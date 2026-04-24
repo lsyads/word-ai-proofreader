@@ -3,6 +3,7 @@
 const devCerts = require("office-addin-dev-certs");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
+const webpack = require("webpack");
 
 const urlDev = "https://localhost:3000/";
 const urlProd = "https://www.contoso.com/"; // CHANGE THIS TO YOUR PRODUCTION DEPLOYMENT LOCATION
@@ -80,6 +81,11 @@ module.exports = async (env, options) => {
         template: "./src/commands/commands.html",
         chunks: ["polyfill", "commands"],
       }),
+      new webpack.DefinePlugin({
+        "process.env.WORD_ADDIN_API_BASE_URL": JSON.stringify(
+          process.env.WORD_ADDIN_API_BASE_URL || "http://127.0.0.1:8000"
+        ),
+      }),
     ],
     devServer: {
       headers: {
@@ -90,6 +96,13 @@ module.exports = async (env, options) => {
         options: env.WEBPACK_BUILD || options.https !== undefined ? options.https : await getHttpsOptions(),
       },
       port: process.env.npm_package_config_dev_server_port || 3000,
+      proxy: [
+        {
+          context: ["/api"],
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+      ],
     },
   };
 

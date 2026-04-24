@@ -35,12 +35,17 @@ cp .env.example .env
 AI_API_KEY=
 OPENAI_API_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4o-mini
+AI_REQUEST_TIMEOUT_SECONDS=30
+AI_MAX_TOKENS=1200
 BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
+BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 当前前端 MVP 在开发环境中请求同源 `/api/proofread`，由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。
+
+API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。
 
 ## 启动后端
 
@@ -49,7 +54,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --env-file ../.env --host 127.0.0.1 --port 8000 --reload
 ```
 
 健康检查：

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
 
 from app.schemas import ProofreadIssue
+from app.settings import Settings, get_settings
 
 
 class AIClientError(RuntimeError):
@@ -35,35 +35,40 @@ SYSTEM_PROMPT = """
 """.strip()
 
 
-async def proofread_with_ai(text: str) -> list[ProofreadIssue]:
-    api_key = os.getenv("AI_API_KEY")
-    if not api_key:
+async def proofread_with_ai(text: str, settings: Settings | None = None) -> list[ProofreadIssue]:
+    settings = settings or get_settings()
+
+    if not settings.ai_api_key:
         raise AIClientError("AI_API_KEY is not configured")
 
-    base_url = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    base_url = settings.openai_api_base_url.rstrip("/")
 
     payload = {
-        "model": model,
+        "model": settings.openai_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
         "temperature": 0.2,
+        "max_tokens": settings.ai_max_tokens,
         "response_format": {"type": "json_object"},
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
             f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {settings.ai_api_key}"},
             json=payload,
         )
 
     if response.status_code >= 400:
         raise AIClientError(f"AI provider returned HTTP {response.status_code}")
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise AIClientError("AI provider response body was not valid JSON") from exc
+
     content = _extract_message_content(data)
     return _parse_issues(content)
 

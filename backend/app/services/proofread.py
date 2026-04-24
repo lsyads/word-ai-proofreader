@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import os
-
 from app.schemas import ProofreadIssue
 from app.services.ai_client import proofread_with_ai
+from app.settings import get_settings
 
 
 async def proofread_text(text: str) -> list[ProofreadIssue]:
-    if os.getenv("AI_API_KEY"):
+    settings = get_settings()
+
+    if settings.ai_api_key:
         return await proofread_with_ai(text)
 
     return build_mock_issues(text)

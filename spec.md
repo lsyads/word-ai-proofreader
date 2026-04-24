@@ -27,13 +27,14 @@ Word 选区
 - 目录：`word-addin/`
 - 技术栈：Office.js、TypeScript、Webpack。
 - 本地地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：构建时读取 `WORD_ADDIN_API_BASE_URL`，默认 `http://127.0.0.1:8000`。
+- 后端地址：开发环境请求同源 `/api/proofread`，由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
 
 ### 后端
 
 - 目录：`backend/`
-- 技术栈：Python、FastAPI、Pydantic、httpx、pytest。
+- 技术栈：Python、FastAPI、Pydantic、pydantic-settings、httpx、pytest。
 - 本地地址：`http://127.0.0.1:8000`。
+- 配置来源：后端运行环境变量；本地可通过 `uvicorn --env-file ../.env` 加载。
 
 ## API 契约
 
@@ -105,8 +106,21 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --env-file ../.env --host 127.0.0.1 --port 8000 --reload
 ```
+
+AI 配置：
+
+```text
+AI_API_KEY=
+OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+AI_REQUEST_TIMEOUT_SECONDS=30
+AI_MAX_TOKENS=1200
+BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
+```
+
+`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时调用 OpenAI 兼容 Chat Completions API。AI HTTP 错误、非 JSON 返回、schema 不匹配统一转换为后端 502。
 
 插件：
 
@@ -129,6 +143,7 @@ npm run dev-server
 - `GET /health` 返回 200 和 `{ "status": "ok" }`。
 - 空文本请求 `POST /api/proofread` 返回 422。
 - 未配置 `AI_API_KEY` 时，后端返回 mock `issues[]`。
+- 配置 `AI_API_KEY` 时，后端调用真实 AI；AI provider 异常时返回 502，且错误信息不包含 Key 或 Authorization header。
 - `npm run lint` 通过。
 - `npm run build` 通过。
 - Word 中空选区点击“AI 审校”时显示错误，不调用后端。

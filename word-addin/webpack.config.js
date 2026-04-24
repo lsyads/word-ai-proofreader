@@ -3,7 +3,6 @@
 const devCerts = require("office-addin-dev-certs");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
-const webpack = require("webpack");
 
 const urlDev = "https://localhost:3000/";
 const urlProd = "https://www.contoso.com/"; // CHANGE THIS TO YOUR PRODUCTION DEPLOYMENT LOCATION
@@ -20,7 +19,6 @@ module.exports = async (env, options) => {
     entry: {
       polyfill: ["core-js/stable", "regenerator-runtime/runtime"],
       taskpane: ["./src/taskpane/taskpane.ts", "./src/taskpane/taskpane.html"],
-      commands: "./src/commands/commands.ts",
     },
     output: {
       clean: true,
@@ -75,16 +73,6 @@ module.exports = async (env, options) => {
             },
           },
         ],
-      }),
-      new HtmlWebpackPlugin({
-        filename: "commands.html",
-        template: "./src/commands/commands.html",
-        chunks: ["polyfill", "commands"],
-      }),
-      new webpack.DefinePlugin({
-        "process.env.WORD_ADDIN_API_BASE_URL": JSON.stringify(
-          process.env.WORD_ADDIN_API_BASE_URL || "http://127.0.0.1:8000"
-        ),
       }),
     ],
     devServer: {

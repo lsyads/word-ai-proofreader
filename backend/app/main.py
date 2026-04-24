@@ -6,13 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.schemas import ProofreadRequest, ProofreadResponse
 from app.services.ai_client import AIClientError
 from app.services.proofread import proofread_text
+from app.settings import get_settings
 
 
 app = FastAPI(title="Word AI Proofreader", version="0.1.0")
+settings = get_settings()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://localhost:3000", "http://localhost:3000"],
+    allow_origins=settings.backend_cors_origin_list,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],

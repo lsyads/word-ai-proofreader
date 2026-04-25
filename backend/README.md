@@ -111,9 +111,7 @@ backend/
       "severity": "medium",
       "original": "原文片段",
       "suggestion": "修改建议",
-      "comment": "给责任编辑看的批注内容",
-      "start": 0,
-      "end": 4
+      "comment": "给责任编辑看的批注内容"
     }
   ]
 }

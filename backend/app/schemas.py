@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class ProofreadRequest(BaseModel):
     text: str = Field(..., min_length=1)
+    session_id: str | None = None
     context: dict[str, Any] | None = None
 
     @field_validator("text")
@@ -31,3 +32,8 @@ class ProofreadIssue(BaseModel):
 
 class ProofreadResponse(BaseModel):
     issues: list[ProofreadIssue]
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    created_at: str

@@ -14,7 +14,8 @@ backend/
 │   └── services/
 │       ├── __init__.py
 │       ├── ai_client.py
-│       └── proofread.py
+│       ├── proofread.py
+│       └── sessions.py
 ├── tests/
 │   ├── test_ai_client.py
 │   ├── test_api.py
@@ -27,14 +28,17 @@ backend/
 - `app/main.py`
   - FastAPI 应用入口。
   - 注册 CORS 中间件。
-  - 提供 `GET /health` 和 `POST /api/proofread`。
+  - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread` 和 `POST /api/proofread/stream`。
   - 将 AI client 抛出的 `AIClientError` 转换为 HTTP 502。
+  - 流式接口使用 SSE 返回阶段进度、最终结果或错误事件。
 
 - `app/schemas.py`
   - 定义 API 请求和响应模型。
   - `ProofreadRequest` 校验 `text` 不能为空。
+  - `ProofreadRequest` 可携带 `session_id` 续接 provider 原生 Responses session。
   - `ProofreadIssue` 定义单条审校问题结构。
   - `ProofreadResponse` 固定返回 `{ "issues": [...] }`。
+  - `SessionResponse` 定义本地 session ID 和创建时间。
 
 - `app/settings.py`
   - 统一读取后端运行环境变量。
@@ -45,12 +49,16 @@ backend/
 - `app/services/proofread.py`
   - 审校服务编排层。
   - 未配置 `AI_API_KEY` 时返回 mock issue。
-  - 配置 `AI_API_KEY` 时调用真实 AI client。
+  - 配置 `AI_API_KEY` 时读取并更新当前 session 的 provider `response.id`。
 
 - `app/services/ai_client.py`
-  - OpenAI 兼容 Chat Completions client。
-  - 负责构造审校 prompt、发送请求、解析模型返回 JSON。
+  - OpenAI 兼容 Responses API client。
+  - 使用 `/v1/responses`、`previous_response_id` 和 `text.format.type=json_object`。
   - 统一将 provider HTTP 错误、非 JSON 响应、schema 不匹配转换为 `AIClientError`。
+
+- `app/services/sessions.py`
+  - 维护轻量内存 session 映射。
+  - 保存 `session_id -> last_response_id`，真正上下文由 provider 原生 Responses session 续接。
 
 - `requirements.txt`
   - 后端 Python 依赖清单。
@@ -85,6 +93,7 @@ backend/
 ```json
 {
   "text": "需要审校的 Word 选区文本",
+  "session_id": "session_xxx",
   "context": {
     "source": "word-addin"
   }
@@ -110,15 +119,56 @@ backend/
 }
 ```
 
+### `POST /api/proofread/stream`
+
+请求与 `/api/proofread` 相同，响应类型为 `text/event-stream`。正常情况下会返回阶段状态和最终结果：
+
+```text
+event: status
+data: {"stage":"received","message":"已接收选区文本。"}
+
+event: status
+data: {"stage":"calling_ai","message":"正在调用 AI 审校。"}
+
+event: status
+data: {"stage":"calling_ai","message":"AI 审校仍在运行（约 1 秒）。"}
+
+event: status
+data: {"stage":"normalizing","message":"正在整理结构化审校结果。"}
+
+event: result
+data: {"issues":[]}
+
+event: status
+data: {"stage":"completed","message":"审校完成。"}
+```
+
+AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口的脱敏错误文案。
+
+### `POST /api/sessions`
+
+创建新的 AI 对话 session。后端只保存本地 `session_id` 到 provider `response.id` 的映射；后续审校请求携带该 `session_id`，后端会把上一轮 provider `response.id` 作为 `previous_response_id` 发给 `/v1/responses`。
+
+响应：
+
+```json
+{
+  "session_id": "session_xxx",
+  "created_at": "2026-04-25T04:00:00+00:00"
+}
+```
+
 ## 环境变量
 
 本地开发推荐在仓库根目录创建 `.env`，并通过 `uvicorn --env-file ../.env` 加载。
 
 ```text
-AI_API_KEY=
-OPENAI_API_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-AI_REQUEST_TIMEOUT_SECONDS=30
+AI_API_KEY=local-omlx-dev-key
+AI_PROVIDER_API=responses
+AI_REQUIRE_NATIVE_SESSION=true
+OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
+OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
+AI_REQUEST_TIMEOUT_SECONDS=180
 AI_MAX_TOKENS=1200
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
@@ -126,7 +176,11 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 说明：
 
 - `AI_API_KEY` 为空时走 mock fallback。
-- `AI_API_KEY` 有值时走真实 OpenAI 兼容接口。
+- `AI_API_KEY` 有值时走真实 OpenAI 兼容 Responses API。
+- `AI_PROVIDER_API=responses` 表示使用 `/v1/responses` 而非 `/chat/completions`。
+- `AI_REQUIRE_NATIVE_SESSION=true` 表示 provider 不支持原生 Responses session 时明确报错，不静默降级。
+- 本地真实 AI 联调推荐先运行仓库根目录的 `./scripts/start-omlx.sh`，默认 oMLX 地址为 `http://127.0.0.1:8001/v1`，并会将 `Qwen3.6-35B-A3B-4.4bit-msq` 配置为 default + pinned 以便启动时预加载。
+- `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - `BACKEND_CORS_ORIGINS` 使用英文逗号分隔。
 - 真实 API Key 不要提交到 Git，不要写入 README、manifest、前端源码或构建产物。
 
@@ -152,5 +206,7 @@ python -m pytest -q
 
 - API 行为稳定。
 - mock fallback 可用。
-- 真实 AI 分支请求 payload 正确。
+- 真实 AI 分支 Responses API 请求 payload 正确。
+- 同一 session 的第二次审校会带 `previous_response_id`。
 - AI provider 异常不会泄露敏感信息，并统一返回 502。
+- 流式审校接口会返回阶段事件、最终 `result` 事件或 `error` 事件。

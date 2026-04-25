@@ -7,6 +7,7 @@
 ```text
 .
 ├── backend/      # Python FastAPI 后端服务
+├── scripts/      # 本地开发辅助脚本
 ├── word-addin/   # Office.js + TypeScript + Webpack 的 Word 插件
 ├── AGENTS.md     # 项目协作约定
 └── spec.md       # MVP 技术方案和开发计划
@@ -15,10 +16,13 @@
 ## 当前 MVP 能力
 
 - Word 任务窗格提供一个正式入口：“AI 审校”。
+- 插件打开时会创建一个 AI 对话 session；点击“新建对话”会创建新的 provider 原生 Responses session。
 - 插件内部读取当前 Word 选区文本。
 - 插件调用后端 `POST /api/proofread`。
+- 插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。
 - 后端返回结构化 `issues[]`。
-- 插件把审校问题汇总成一条 Word 批注，插入当前选区。
+- 插件把审校问题汇总成一条 Word 批注，插入当前选区；未发现问题时只更新任务窗格，不插入批注。
+- 插件支持停止当前审校，并在本地保存最近 20 条审校历史用于回看。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
 
 ## 环境变量
@@ -32,10 +36,12 @@ cp .env.example .env
 常用变量：
 
 ```text
-AI_API_KEY=
-OPENAI_API_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-AI_REQUEST_TIMEOUT_SECONDS=30
+AI_API_KEY=local-omlx-dev-key
+AI_PROVIDER_API=responses
+AI_REQUIRE_NATIVE_SESSION=true
+OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
+OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
+AI_REQUEST_TIMEOUT_SECONDS=180
 AI_MAX_TOKENS=1200
 BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
@@ -43,9 +49,45 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-当前前端 MVP 在开发环境中请求同源 `/api/proofread`，由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。
+当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建 AI 对话，再优先请求同源 `/api/proofread/stream`，由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
 
-API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。
+API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 和 `previous_response_id` 做 provider 原生 session 续接；如果 provider 不支持 Responses session，会明确报错，不静默降级到伪 session。
+
+## 启动 oMLX 本地 AI 服务
+
+本地真实 AI 联调推荐先用 oMLX 启动 OpenAI 兼容服务。脚本默认读取 `/Users/wulala/AI/models`，监听 `8001` 端口，避免和 FastAPI 后端 `8000` 冲突。
+
+```bash
+./scripts/start-omlx.sh
+```
+
+脚本默认会在启动前把 `Qwen3.6-35B-A3B-4.4bit-msq` 写入 `~/.omlx/model_settings.json`，设置为 default + pinned。oMLX 启动时会预加载 pinned 模型，因此正常情况下不需要再到管理页手动加载。
+
+可按需覆盖默认配置：
+
+```bash
+OMLX_MODEL_DIR=/Users/wulala/AI/models \
+OMLX_BASE_PATH="$HOME/.omlx" \
+OMLX_PORT=8001 \
+OMLX_API_KEY=local-omlx-dev-key \
+OMLX_PRELOAD_MODEL=Qwen3.6-35B-A3B-4.4bit-msq \
+./scripts/start-omlx.sh
+```
+
+如只想启动服务、不改 oMLX 的模型设置，可使用：
+
+```bash
+OMLX_CONFIGURE_MODEL_SETTINGS=0 ./scripts/start-omlx.sh
+```
+
+模型服务检查：
+
+```bash
+curl --noproxy 127.0.0.1 http://127.0.0.1:8001/v1/models \
+  -H 'Authorization: Bearer local-omlx-dev-key'
+```
+
+默认后端联调模型使用 `Qwen3.6-35B-A3B-4.4bit-msq`。如果 `/v1/models` 返回的模型 ID 和目录名不同，请把 `.env` 中的 `OPENAI_MODEL` 改成返回的模型 ID。
 
 ## 启动后端
 
@@ -69,12 +111,22 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 {"status":"ok"}
 ```
 
-本地 mock 审校接口：
+审校接口 smoke test。未配置 `AI_API_KEY` 时返回 mock；使用上面的 oMLX 配置时调用本地真实 AI：
 
 ```bash
+SESSION_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
 curl --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread \
   -H 'Content-Type: application/json' \
-  -d '{"text":"这是一段需要审校的文本。","context":{"source":"manual-curl"}}'
+  -d "{\"text\":\"这是一段需要审校的文本。\",\"session_id\":\"${SESSION_ID}\",\"context\":{\"source\":\"manual-curl\"}}"
+```
+
+流式审校接口 smoke test。预期会依次看到 `status`、`result` 等 SSE 事件：
+
+```bash
+curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d "{\"text\":\"这是一段需要审校的文本。\",\"session_id\":\"${SESSION_ID}\",\"context\":{\"source\":\"manual-curl\"}}"
 ```
 
 ## 启动 Word 插件
@@ -107,13 +159,17 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 
 ## 联调流程
 
-1. 启动后端，确认 `/health` 返回 `{"status":"ok"}`。
-2. 启动 `word-addin` dev server。
-3. 运行 `npm run start` 旁加载插件到 Word。
-4. 在 Word 文档中选中一段文本。
-5. 打开任务窗格，点击“AI 审校”。
-6. 确认任务窗格显示审校结果。
-7. 确认 Word 当前选区出现一条汇总批注。
+1. 启动 oMLX 本地 AI 服务，确认 `http://127.0.0.1:8001/v1/models` 可访问。
+2. 启动后端，确认 `/health` 返回 `{"status":"ok"}`。
+3. 启动 `word-addin` dev server。
+4. 运行 `npm run start` 旁加载插件到 Word。
+5. 在 Word 文档中选中一段文本。
+6. 打开任务窗格，点击“AI 审校”。
+7. 确认任务窗格“运行过程”区域先逐条显示阶段进度，再显示审校结果。
+8. 如果后端返回非空 `issues[]`，确认 Word 当前选区出现一条汇总批注。
+9. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注。
+10. 点击“新建对话”，确认任务窗格清空当前结果，并后续请求进入新的 AI session。
+11. 审校运行中点击“停止审校”，确认请求停止、不会插入批注，并在历史记录中保存为已停止。
 
 ## 测试与验证
 

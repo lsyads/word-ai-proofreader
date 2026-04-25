@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     ai_api_key: str = Field(default="", alias="AI_API_KEY")
+    ai_provider_api: str = Field(default="responses", alias="AI_PROVIDER_API")
+    ai_require_native_session: bool = Field(default=True, alias="AI_REQUIRE_NATIVE_SESSION")
     openai_api_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_API_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     ai_request_timeout_seconds: float = Field(default=30, alias="AI_REQUEST_TIMEOUT_SECONDS")

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import ValidationError
 
 from app.schemas import ProofreadIssue
 from app.settings import Settings, get_settings
+
+ProviderAPI = Literal["responses", "chat"]
+ProofreadMode = Literal["fast", "thinking"]
+logger = logging.getLogger(__name__)
 
 
 class AIClientError(RuntimeError):
@@ -28,9 +33,9 @@ class AIStreamEvent:
     data: dict[str, Any]
 
 
-SYSTEM_PROMPT = """
-你是出版社责任编辑的中文审校助手。请只返回 JSON，不要返回 Markdown。
-返回格式必须是：
+BASE_SYSTEM_PROMPT = """
+你是出版社责任编辑的中文审校助手。只返回紧凑 JSON，不要返回 Markdown 或解释。
+返回格式：
 {
   "issues": [
     {
@@ -38,26 +43,52 @@ SYSTEM_PROMPT = """
       "category": "typo",
       "severity": "low|medium|high",
       "original": "原文片段",
+      "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
       "suggestion": "修改建议",
-      "comment": "给责任编辑看的批注内容",
-      "start": 0,
-      "end": 4
+      "comment": "给责任编辑看的短批注"
     }
   ]
 }
+后端会按 original 定位。comment 控制在 40 个中文字符以内。
+replacement 只写可直接进入正文的替换文本；事实待核、需人工判断、体例疑问等不能直接替换的问题必须返回 null。
 如果没有发现问题，返回 {"issues": []}。
 """.strip()
+
+MODE_PROMPTS: dict[ProofreadMode, str] = {
+    "fast": "快速模式：只指出明显错别字、病句、事实矛盾或出版物体例硬伤。",
+    "thinking": "思考模式：更细致检查文字、语法、风格、事实一致性和出版物体例。",
+}
 
 
 async def proofread_with_ai(
     text: str,
     previous_response_id: str | None = None,
     settings: Settings | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
 ) -> AIProofreadResult:
     settings = settings or get_settings()
+    provider_api = _resolve_provider_api(settings, provider_api)
+
+    if provider_api == "chat":
+        return await _proofread_with_chat(text, settings, proofread_mode=proofread_mode)
+
     _ensure_responses_api(settings)
 
-    payload = _build_responses_payload(text, settings, previous_response_id=previous_response_id)
+    payload = _build_responses_payload(
+        text,
+        settings,
+        previous_response_id=previous_response_id,
+        proofread_mode=proofread_mode,
+    )
+    logger.info(
+        "AI responses request started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s has_previous_response=%s",
+        settings.openai_model,
+        proofread_mode,
+        len(text),
+        payload["max_output_tokens"],
+        bool(previous_response_id),
+    )
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
@@ -66,6 +97,7 @@ async def proofread_with_ai(
             json=payload,
         )
 
+    logger.info("AI responses request completed status_code=%s", response.status_code)
     _raise_for_provider_error(response.status_code)
 
     try:
@@ -73,24 +105,57 @@ async def proofread_with_ai(
     except ValueError as exc:
         raise AIClientError("AI provider response body was not valid JSON") from exc
 
-    return _parse_response_payload(data)
+    result = _parse_response_payload(data)
+    logger.info(
+        "AI responses payload parsed issue_count=%s response_id_present=%s",
+        len(result.issues),
+        bool(result.response_id),
+    )
+    return result
 
 
 async def stream_proofread_with_ai(
     text: str,
     previous_response_id: str | None = None,
     settings: Settings | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
 ) -> AsyncIterator[AIStreamEvent]:
     settings = settings or get_settings()
+    provider_api = _resolve_provider_api(settings, provider_api)
+
+    if provider_api == "chat":
+        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Chat Completions。"})
+        result = await _proofread_with_chat(text, settings, proofread_mode=proofread_mode)
+        yield AIStreamEvent("status", {"stage": "normalizing", "message": "正在整理结构化审校结果。"})
+        yield AIStreamEvent(
+            "result",
+            {
+                "issues": [issue.model_dump() for issue in result.issues],
+                "response_id": result.response_id,
+            },
+        )
+        yield AIStreamEvent("status", {"stage": "completed", "message": "审校完成。"})
+        return
+
     _ensure_responses_api(settings)
 
     payload = _build_responses_payload(
         text,
         settings,
         previous_response_id=previous_response_id,
+        proofread_mode=proofread_mode,
         stream=True,
     )
     output_text = ""
+    logger.info(
+        "AI responses stream started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s has_previous_response=%s",
+        settings.openai_model,
+        proofread_mode,
+        len(text),
+        payload["max_output_tokens"],
+        bool(previous_response_id),
+    )
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         async with client.stream(
@@ -99,11 +164,13 @@ async def stream_proofread_with_ai(
             headers=_auth_headers(settings),
             json=payload,
         ) as response:
+            logger.info("AI responses stream connected status_code=%s", response.status_code)
             _raise_for_provider_error(response.status_code)
 
             async for provider_event in _iter_sse_events(response.aiter_lines()):
                 event_name = provider_event["event"]
                 data = provider_event["data"]
+                logger.debug("AI responses stream event event=%s", event_name)
 
                 if event_name == "response.created":
                     yield AIStreamEvent("status", {"stage": "calling_ai", "message": "AI 原生 session 已创建响应。"})
@@ -125,6 +192,11 @@ async def stream_proofread_with_ai(
                 if event_name == "response.completed":
                     provider_response = _coerce_dict(data.get("response"))
                     result = _parse_response_payload(provider_response, fallback_content=output_text)
+                    logger.info(
+                        "AI responses stream completed issue_count=%s response_id_present=%s",
+                        len(result.issues),
+                        bool(result.response_id),
+                    )
                     yield AIStreamEvent(
                         "result",
                         {
@@ -140,24 +212,60 @@ async def stream_proofread_with_ai(
 
 
 def _ensure_responses_api(settings: Settings) -> None:
-    if not settings.ai_api_key:
-        raise AIClientError("AI_API_KEY is not configured")
+    _ensure_api_key(settings)
 
-    if settings.ai_provider_api != "responses":
-        raise AIClientError("AI_PROVIDER_API must be responses for native AI sessions")
+
+async def _proofread_with_chat(
+    text: str,
+    settings: Settings,
+    proofread_mode: ProofreadMode,
+) -> AIProofreadResult:
+    _ensure_api_key(settings)
+    payload = _build_chat_payload(text, settings, proofread_mode=proofread_mode)
+    logger.info(
+        "AI chat request started model=%s proofread_mode=%s text_len=%s max_tokens=%s",
+        settings.openai_model,
+        proofread_mode,
+        len(text),
+        payload["max_tokens"],
+    )
+
+    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+        response = await client.post(
+            _chat_url(settings),
+            headers=_auth_headers(settings),
+            json=payload,
+        )
+
+    logger.info("AI chat request completed status_code=%s", response.status_code)
+    _raise_for_provider_error(response.status_code, provider_api="chat")
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise AIClientError("AI provider response body was not valid JSON") from exc
+
+    result = _parse_chat_payload(data)
+    logger.info(
+        "AI chat payload parsed issue_count=%s response_id_present=%s",
+        len(result.issues),
+        bool(result.response_id),
+    )
+    return result
 
 
 def _build_responses_payload(
     text: str,
     settings: Settings,
     previous_response_id: str | None = None,
+    proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": settings.openai_model,
-        "input": f"{SYSTEM_PROMPT}\n\n请审校以下 Word 选区文本：\n{text}",
+        "input": f"{_build_system_prompt(proofread_mode)}\n\n请审校以下 Word 选区文本：\n{text}",
         "temperature": 0.2,
-        "max_output_tokens": settings.ai_max_tokens,
+        "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
     }
 
@@ -170,27 +278,89 @@ def _build_responses_payload(
     return payload
 
 
+def _build_chat_payload(
+    text: str,
+    settings: Settings,
+    proofread_mode: ProofreadMode = "fast",
+) -> dict[str, Any]:
+    return {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": _build_system_prompt(proofread_mode)},
+            {"role": "user", "content": f"请审校以下 Word 选区文本：\n{text}"},
+        ],
+        "temperature": 0.2,
+        "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
+        "response_format": {"type": "json_object"},
+    }
+
+
+def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
+    return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
+
+
+def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> int:
+    if proofread_mode == "thinking":
+        return settings.ai_thinking_max_tokens
+
+    return min(settings.ai_max_tokens, settings.ai_fast_max_tokens)
+
+
 def _responses_url(settings: Settings) -> str:
     return f"{settings.openai_api_base_url.rstrip('/')}/responses"
+
+
+def _chat_url(settings: Settings) -> str:
+    return f"{settings.openai_api_base_url.rstrip('/')}/chat/completions"
 
 
 def _auth_headers(settings: Settings) -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.ai_api_key}"}
 
 
-def _raise_for_provider_error(status_code: int) -> None:
+def _raise_for_provider_error(status_code: int, provider_api: ProviderAPI = "responses") -> None:
     if status_code < 400:
         return
 
-    if status_code in {400, 404, 405}:
+    if provider_api == "responses" and status_code in {400, 404, 405}:
+        logger.warning("AI provider native responses API unsupported status_code=%s", status_code)
         raise AIClientError(f"AI provider does not support native Responses session API (HTTP {status_code})")
 
+    logger.warning("AI provider returned error status_code=%s provider_api=%s", status_code, provider_api)
     raise AIClientError(f"AI provider returned HTTP {status_code}")
+
+
+def _resolve_provider_api(settings: Settings, provider_api: ProviderAPI | None) -> ProviderAPI:
+    resolved = provider_api or settings.ai_provider_api
+
+    if resolved not in {"responses", "chat"}:
+        raise AIClientError("AI_PROVIDER_API must be responses or chat")
+
+    return resolved
+
+
+def _ensure_api_key(settings: Settings) -> None:
+    if not settings.ai_api_key:
+        raise AIClientError("AI_API_KEY is not configured")
 
 
 def _parse_response_payload(data: dict[str, Any], fallback_content: str = "") -> AIProofreadResult:
     response_id = _coerce_optional_string(data.get("id"))
     content = fallback_content or _extract_response_output_text(data)
+    return AIProofreadResult(issues=_parse_issues(content), response_id=response_id)
+
+
+def _parse_chat_payload(data: dict[str, Any]) -> AIProofreadResult:
+    response_id = _coerce_optional_string(data.get("id"))
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AIClientError("AI provider chat response did not include message content") from exc
+
+    if not isinstance(content, str) or not content.strip():
+        raise AIClientError("AI provider chat response did not include message content")
+
     return AIProofreadResult(issues=_parse_issues(content), response_id=response_id)
 
 
@@ -252,9 +422,12 @@ def _parse_issues(content: str) -> list[ProofreadIssue]:
         raise AIClientError("AI provider response did not match the expected schema")
 
     try:
-        return [ProofreadIssue.model_validate(issue) for issue in parsed["issues"]]
+        issues = [ProofreadIssue.model_validate(issue) for issue in parsed["issues"]]
     except ValidationError as exc:
         raise AIClientError("AI provider response issues did not match the expected schema") from exc
+
+    logger.debug("AI issues parsed issue_count=%s content_len=%s", len(issues), len(content))
+    return issues
 
 
 def _coerce_dict(value: Any) -> dict[str, Any]:

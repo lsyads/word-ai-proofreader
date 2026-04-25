@@ -31,6 +31,24 @@
         </section>
 
         <section class="actions">
+            <label class="field-label" for="proofread-mode">审校模式</label>
+            <select id="proofread-mode" class="control-select">
+                <option value="fast">快速模式</option>
+                <option value="thinking">思考模式</option>
+            </select>
+
+            <label class="field-label" for="provider-api">AI API</label>
+            <select id="provider-api" class="control-select">
+                <option value="responses">Responses</option>
+                <option value="chat">Chat</option>
+            </select>
+
+            <label class="field-label" for="application-mode">应用方式</label>
+            <select id="application-mode" class="control-select">
+                <option value="comment">批注模式</option>
+                <option value="revision">修订模式</option>
+            </select>
+
             <button id="proofread" class="ms-Button ms-Button--primary" type="button">
                 <span class="ms-Button-label">AI 审校</span>
             </button>
@@ -51,6 +69,18 @@
 
         <section class="history-panel">
             <h2 class="ms-font-m">历史记录</h2>
+            <div class="history-actions">
+                <button id="export-history" class="ms-Button" type="button">
+                    <span class="ms-Button-label">另存为</span>
+                </button>
+                <button id="import-history" class="ms-Button" type="button">
+                    <span class="ms-Button-label">导入</span>
+                </button>
+                <button id="clear-history" class="ms-Button" type="button">
+                    <span class="ms-Button-label">清空</span>
+                </button>
+                <input id="history-file" type="file" accept="application/json,.json" hidden />
+            </div>
             <div id="history" class="history-empty">暂无历史记录</div>
         </section>
     </main>

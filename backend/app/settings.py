@@ -14,10 +14,13 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     ai_request_timeout_seconds: float = Field(default=30, alias="AI_REQUEST_TIMEOUT_SECONDS")
     ai_max_tokens: int = Field(default=1200, alias="AI_MAX_TOKENS")
+    ai_fast_max_tokens: int = Field(default=800, alias="AI_FAST_MAX_TOKENS")
+    ai_thinking_max_tokens: int = Field(default=1200, alias="AI_THINKING_MAX_TOKENS")
     backend_cors_origins: str = Field(
         default="https://localhost:3000,http://localhost:3000",
         alias="BACKEND_CORS_ORIGINS",
     )
+    backend_log_level: str = Field(default="INFO", alias="BACKEND_LOG_LEVEL")
 
     @property
     def backend_cors_origin_list(self) -> list[str]:

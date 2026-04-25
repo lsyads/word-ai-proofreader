@@ -70,6 +70,27 @@ body {
   gap: 10px;
 }
 
+.field-label {
+  color: #605e5c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.control-select {
+  border: 1px solid #8a8886;
+  border-radius: 4px;
+  color: #323130;
+  min-height: 34px;
+  padding: 4px 8px;
+}
+
+.history-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
 .ms-Button {
   min-height: 36px;
 }
@@ -136,6 +157,13 @@ body {
   color: #605e5c;
   display: block;
   margin-top: 2px;
+}
+
+.location-status {
+  color: #605e5c;
+  display: inline-block;
+  font-size: 12px;
+  margin-left: 6px;
 }
 
 .progress-log {

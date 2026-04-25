@@ -1,6 +1,6 @@
 # Backend README
 
-`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区文本，返回结构化审校问题。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
+`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区文本，返回结构化审校问题，并按 `original` 计算每条问题在选区文本中的 `start/end`。issue 中的 `replacement` 表示可直接替换原文的新文本，供 Word 插件修订模式使用。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
 
 ## 目录结构
 
@@ -35,7 +35,7 @@ backend/
 - `app/schemas.py`
   - 定义 API 请求和响应模型。
   - `ProofreadRequest` 校验 `text` 不能为空。
-  - `ProofreadRequest` 可携带 `session_id` 续接 provider 原生 Responses session。
+  - `ProofreadRequest` 可携带 `session_id` 续接 provider 原生 Responses session，并可携带 `provider_api`、`proofread_mode`。
   - `ProofreadIssue` 定义单条审校问题结构。
   - `ProofreadResponse` 固定返回 `{ "issues": [...] }`。
   - `SessionResponse` 定义本地 session ID 和创建时间。
@@ -43,17 +43,20 @@ backend/
 - `app/settings.py`
   - 统一读取后端运行环境变量。
   - 使用 `pydantic-settings` 管理配置。
-  - 负责 AI Key、OpenAI 兼容接口地址、模型、超时、max tokens、CORS origins 等配置。
+  - 负责 AI Key、OpenAI 兼容接口地址、模型、超时、不同审校模式的 max tokens、CORS origins 等配置。
   - API Key 只允许存在于后端运行环境中，不进入前端代码或构建产物。
 
 - `app/services/proofread.py`
   - 审校服务编排层。
   - 未配置 `AI_API_KEY` 时返回 mock issue。
-  - 配置 `AI_API_KEY` 时读取并更新当前 session 的 provider `response.id`。
+  - 配置 `AI_API_KEY` 时按 `provider_api` 调用 Responses 或 Chat。
+  - 对 mock/AI 返回的 issues 统一按 `original` 搜索并填充 `start/end`。
+  - Responses 模式读取并更新当前 session 的 provider `response.id`。
 
 - `app/services/ai_client.py`
-  - OpenAI 兼容 Responses API client。
-  - 使用 `/v1/responses`、`previous_response_id` 和 `text.format.type=json_object`。
+  - OpenAI 兼容 Responses API 与 Chat Completions client。
+  - Responses 模式使用 `/v1/responses`、`previous_response_id` 和 `text.format.type=json_object`。
+  - Chat 模式使用 `/v1/chat/completions` 和 `response_format.type=json_object`，第一版不维护 provider session。
   - 统一将 provider HTTP 错误、非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
@@ -94,6 +97,8 @@ backend/
 {
   "text": "需要审校的 Word 选区文本",
   "session_id": "session_xxx",
+  "provider_api": "responses",
+  "proofread_mode": "fast",
   "context": {
     "source": "word-addin"
   }
@@ -110,12 +115,17 @@ backend/
       "category": "style",
       "severity": "medium",
       "original": "原文片段",
-      "suggestion": "修改建议",
-      "comment": "给责任编辑看的批注内容"
+      "replacement": "可直接替换原文的新文本",
+      "suggestion": "修改建议说明",
+      "comment": "给责任编辑看的批注内容",
+      "start": 0,
+      "end": 4
     }
   ]
 }
 ```
+
+AI 原始输出不包含 `start/end`；后端在返回给插件前计算。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
 
 ### `POST /api/proofread/stream`
 
@@ -168,19 +178,26 @@ OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
 AI_MAX_TOKENS=1200
+AI_FAST_MAX_TOKENS=800
+AI_THINKING_MAX_TOKENS=1200
+BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
 
 说明：
 
 - `AI_API_KEY` 为空时走 mock fallback。
-- `AI_API_KEY` 有值时走真实 OpenAI 兼容 Responses API。
-- `AI_PROVIDER_API=responses` 表示使用 `/v1/responses` 而非 `/chat/completions`。
-- `AI_REQUIRE_NATIVE_SESSION=true` 表示 provider 不支持原生 Responses session 时明确报错，不静默降级。
+- `AI_API_KEY` 有值时走真实 OpenAI 兼容 Responses API 或 Chat Completions。
+- `AI_PROVIDER_API=responses` 表示默认使用 `/v1/responses`；也可在请求中传 `provider_api=chat` 临时切到 `/chat/completions`。
+- `AI_FAST_MAX_TOKENS` 和 `AI_THINKING_MAX_TOKENS` 分别控制快速模式与思考模式的输出上限。
+- `BACKEND_LOG_LEVEL` 控制后端日志级别，默认 `INFO`；调试定位细节时可设为 `DEBUG`。
+- `AI_REQUIRE_NATIVE_SESSION=true` 表示 Responses 模式下 provider 不支持原生 session 时明确报错，不静默降级。
 - 本地真实 AI 联调推荐先运行仓库根目录的 `./scripts/start-omlx.sh`，默认 oMLX 地址为 `http://127.0.0.1:8001/v1`，并会将 `Qwen3.6-35B-A3B-4.4bit-msq` 配置为 default + pinned 以便启动时预加载。
 - `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - `BACKEND_CORS_ORIGINS` 使用英文逗号分隔。
 - 真实 API Key 不要提交到 Git，不要写入 README、manifest、前端源码或构建产物。
+
+日志会打印请求入口、provider、审校模式、文本长度、AI HTTP 状态、问题数和定位数量。日志不会打印 API Key、Authorization header 或选中文本全文。
 
 ## 本地运行
 
@@ -204,7 +221,9 @@ python -m pytest -q
 
 - API 行为稳定。
 - mock fallback 可用。
-- 真实 AI 分支 Responses API 请求 payload 正确。
+- 后端能按 `original` 计算 `start/end`，重复片段按顺序定位，找不到时返回 `null`。
+- 后端能保留有效 `replacement`，并将缺失或空字符串 `replacement` 归一为 `null`。
+- 真实 AI 分支 Responses API 与 Chat Completions 请求 payload 正确。
 - 同一 session 的第二次审校会带 `previous_response_id`。
 - AI provider 异常不会泄露敏感信息，并统一返回 502。
 - 流式审校接口会返回阶段事件、最终 `result` 事件或 `error` 事件。

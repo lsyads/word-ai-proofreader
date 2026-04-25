@@ -9,17 +9,19 @@ Word 插件任务窗格
   -> POST /api/sessions
   -> POST /api/proofread/stream
   -> FastAPI 后端
-  -> POST {OPENAI_API_BASE_URL}/responses
+  -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
+  -> FastAPI 后端按 original 计算 start/end
+  -> Word 插件按应用方式插入原文片段批注或生成 Word 修订
 ```
 
-当前实现使用 provider 原生 Responses API 维护 AI session。后端只保存轻量映射：
+当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。Responses 模式使用 provider 原生 session，后端只保存轻量映射：
 
 ```text
 session_id -> last_response_id
 ```
 
-同一个 `session_id` 的后续审校请求会把上一轮 AI provider 返回的 `response.id` 作为 `previous_response_id` 传给 `/v1/responses`，真正上下文续接由 provider 完成。
+同一个 `session_id` 的后续 Responses 审校请求会把上一轮 AI provider 返回的 `response.id` 作为 `previous_response_id` 传给 `/v1/responses`，真正上下文续接由 provider 完成。Chat 模式第一版是单轮审校，不维护 provider 上下文。
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
@@ -61,6 +63,8 @@ Content-Type: application/json
 {
   "text": "需要审校的 Word 选区文本",
   "session_id": "session_8d7f...",
+  "provider_api": "responses",
+  "proofread_mode": "fast",
   "context": {
     "source": "word-addin"
   }
@@ -77,7 +81,8 @@ Response:
       "category": "typo",
       "severity": "medium",
       "original": "原文片段",
-      "suggestion": "修改建议",
+      "replacement": "可直接替换原文的新文本",
+      "suggestion": "修改建议说明",
       "comment": "给责任编辑看的批注内容",
       "start": 0,
       "end": 4
@@ -87,6 +92,12 @@ Response:
 ```
 
 `issues` 为空表示未发现明显问题。插件此时只更新任务窗格，不插入 Word 批注。
+
+`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。
+
+AI 原始输出不包含 `start/end`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
+
+`replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
 ### 3. 流式审校接口
 
@@ -104,6 +115,8 @@ Accept: text/event-stream
 {
   "text": "需要审校的 Word 选区文本",
   "session_id": "session_8d7f...",
+  "provider_api": "responses",
+  "proofread_mode": "fast",
   "context": {
     "source": "word-addin"
   }
@@ -165,7 +178,7 @@ Content-Type: application/json
   "model": "Qwen3.6-35B-A3B-4.4bit-msq",
   "input": "系统审校要求...\n\n请审校以下 Word 选区文本：\n需要审校的 Word 选区文本",
   "temperature": 0.2,
-  "max_output_tokens": 1200,
+  "max_output_tokens": 800,
   "text": {
     "format": {
       "type": "json_object"
@@ -206,9 +219,40 @@ Provider Response:
 }
 ```
 
-解析成功后，后端把 provider 的 `id` 写入当前 session 的 `last_response_id`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`、`comment`。解析成功后，后端按 `original` 定位并填充 `start/end`，再把 provider 的 `id` 写入当前 session 的 `last_response_id`。
 
-### 2. 流式 Responses 调用
+### 2. Chat Completions 调用
+
+插件选择 `provider_api=chat` 时，后端调用 `/chat/completions`：
+
+```http
+POST {OPENAI_API_BASE_URL}/chat/completions
+Authorization: Bearer {AI_API_KEY}
+Content-Type: application/json
+```
+
+```json
+{
+  "model": "Qwen3.6-35B-A3B-4.4bit-msq",
+  "messages": [
+    {"role": "system", "content": "系统审校要求..."},
+    {"role": "user", "content": "请审校以下 Word 选区文本：\n需要审校的 Word 选区文本"}
+  ],
+  "temperature": 0.2,
+  "max_tokens": 800,
+  "response_format": {
+    "type": "json_object"
+  }
+}
+```
+
+Chat 模式返回同样的精简 issues JSON。后端会照常计算 `start/end`，但不会写入或读取 `previous_response_id`。
+
+### 3. 快速/思考模式
+
+`proofread_mode=fast` 使用更短 prompt 和较低输出上限，只抓明显问题，默认 `AI_FAST_MAX_TOKENS=800`。`proofread_mode=thinking` 使用更细审要求和较高输出上限，默认 `AI_THINKING_MAX_TOKENS=1200`。两种模式都要求 AI 不返回 `start/end`。
+
+### 4. 流式 Responses 调用
 
 后端流式接口会调用 provider 的流式 Responses API。
 
@@ -263,25 +307,32 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 - 事件：`status`、`result`、`error`
 - 作用：展示运行过程、最终审校结果、错误信息
 
-第二段是 provider 链路：
+第二段是 provider 链路，仅在 Responses 流式调用时存在：
 
 - 接口：`POST {OPENAI_API_BASE_URL}/responses`，请求体 `stream: true`
 - 消费方：FastAPI 后端
 - 事件：`response.created`、`response.in_progress`、`response.output_text.done`、`response.completed` 等
 - 作用：接收 AI provider 原生流式输出，并在完成后解析结构化审校结果
 
-## 批注插入规则
+## 批注与修订应用规则
 
 插件拿到最终 `issues` 后再决定是否写入 Word：
 
 ```text
-issues.length > 0 -> 插入一条汇总批注
+批注模式 + start/end 可定位 -> 在 original 对应原文片段插入逐条批注
+修订模式 + start/end 可定位 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
+修订模式 + 无 replacement 或定位失败 -> 在当前选区插入 fallback 汇总批注
+批注模式 + 定位失败 -> 在当前选区插入 fallback 汇总批注
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
+
+修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
+
+批注内容以 `replacement`、`suggestion` 为核心，并带上简短 `comment`、`category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数和 fallback 数。
 
 ## 停止审校和历史记录
 
 插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端使用 `AbortController` 中断当前请求。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看。历史记录不承担 AI 上下文续接；AI 上下文只由 provider `previous_response_id` 维护。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录不承担 AI 上下文续接；Responses 上下文只由 provider `previous_response_id` 维护。

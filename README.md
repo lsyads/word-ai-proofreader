@@ -25,6 +25,8 @@
 - 插件支持停止当前审校，并在本地保存最近 20 条审校历史用于回看。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
 
+完整通讯链路和数据格式见 [docs/architecture.md](docs/architecture.md)。
+
 ## 环境变量
 
 复制 `.env.example` 后按需填写本地配置。

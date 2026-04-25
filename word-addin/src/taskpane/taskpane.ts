@@ -233,13 +233,14 @@ async function requestProofread(
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
   try {
+    onStatus({ stage: "api", message: "正在请求流式接口" });
     return await requestProofreadStream(text, onStatus, signal);
   } catch (error) {
     if (isAbortError(error)) {
       throw error;
     }
 
-    onStatus({ stage: "fallback", message: "流式进度不可用，正在改用普通接口完成审校。" });
+    onStatus({ stage: "fallback", message: "流式接口不可用，正在回退到普通接口" });
     return requestProofreadJson(text, signal);
   }
 }
@@ -444,6 +445,7 @@ function appendProgressStatus(status: ProofreadStatusEvent) {
 
 function formatStage(stage: string): string {
   const stageLabels: Record<string, string> = {
+    api: "接口",
     calling_ai: "AI",
     cancelled: "停止",
     completed: "完成",

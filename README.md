@@ -21,7 +21,7 @@
 - 插件可切换“快速审校/深度审校”和 `Responses/Chat` API。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
 - 插件调用后端 `POST /api/proofread`。
-- 插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。
+- Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
 - AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端按 `original` 在选区文本中搜索并计算位置。
 - 批注模式下，插件对可定位问题逐条在对应原文片段插入批注；修订模式下，插件临时开启 Word 修订跟踪，用 `replacement` 替换可定位原文并生成原生修订；不可定位或无 `replacement` 的问题回退为当前选区汇总批注。
 - 插件支持停止当前审校，并在本地保存最近 20 条审校历史用于回看、清空、另存为 JSON 和导入 JSON。
@@ -56,7 +56,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建 AI 对话，再优先请求同源 `/api/proofread/stream`，由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
+当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建 AI 对话。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
 
 API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 和 `previous_response_id` 做 provider 原生 session 续接；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 

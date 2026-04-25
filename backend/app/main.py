@@ -90,11 +90,18 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
 
 @app.post("/api/proofread/stream")
 async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
+    provider_api = proofread_service.resolve_provider_api(request.provider_api)
+    if provider_api == "chat":
+        raise HTTPException(
+            status_code=400,
+            detail="Chat mode uses /api/proofread with standard Chat Completions, not SSE.",
+        )
+
     logger.info(
         "proofread stream accepted text_len=%s session_id=%s provider_api=%s proofread_mode=%s",
         len(request.text),
         _mask_session_id(request.session_id),
-        request.provider_api or "default",
+        provider_api,
         request.proofread_mode,
     )
     return StreamingResponse(

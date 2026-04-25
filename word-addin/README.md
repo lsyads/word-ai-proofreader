@@ -1,6 +1,6 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 MVP 提供一个任务窗格入口：“AI 审校”。用户在 Word 中选中文本后点击按钮，插件调用后端 `/api/proofread/stream`，并按应用方式处理结果：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；不可定位建议回退为当前选区汇总批注。
+`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 MVP 提供一个任务窗格入口：“AI 审校”。用户在 Word 中选中文本后点击按钮，插件在 Responses 模式调用后端 `/api/proofread/stream`，在 Chat 模式调用 `/api/proofread`，并按应用方式处理结果：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；不可定位建议回退为当前选区汇总批注。
 
 ## 目录结构
 
@@ -61,7 +61,7 @@ word-addin/
   - 点击后内部流程：
     1. 检查 Word 批注 API 能力。
     2. 读取当前 Word 选区文本。
-    3. 带上 `provider_api` 和 `proofread_mode` 请求同源 `/api/proofread/stream`，不可用时回退 `/api/proofread`。
+    3. 带上 `provider_api` 和 `proofread_mode` 请求同源接口：Responses 模式用 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接用 `/api/proofread`。
     4. 批注模式：对有 `start/end` 的 issue 用 `selection.search(original)` 找到原文片段并插入单条批注。
     5. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
     6. 对无法定位或无 `replacement` 的 issue 调用 `selection.insertComment(...)` 插入 fallback 汇总批注。

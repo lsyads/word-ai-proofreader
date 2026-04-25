@@ -156,7 +156,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert call["json"]["text"] == {"format": {"type": "json_object"}}
     assert call["json"]["previous_response_id"] == "resp-prev"
     assert "这是一段文本。" in call["json"]["input"]
-    assert "不要返回 start 或 end" in call["json"]["input"]
+    assert "<text>\n这是一段文本。\n</text>" in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
     assert "comment" not in call["json"]["input"]
 
@@ -198,10 +198,9 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["response_format"] == {"type": "json_object"}
     assert call["json"]["max_tokens"] == 16384
     assert call["json"]["messages"][0]["role"] == "system"
-    assert "不要返回 start 或 end" in call["json"]["messages"][0]["content"]
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
-    assert call["json"]["messages"][1]["content"].endswith("这是一段文本。")
+    assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
 
 
 def test_proofread_with_ai_raises_for_native_responses_unsupported(monkeypatch):
@@ -261,6 +260,11 @@ def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):
     assert events[3].data["response_id"] == "resp-stream"
     assert events[3].data["issues"][0]["id"] == "issue-1"
     assert FakeAsyncClient.calls[0]["json"]["stream"] is True
+
+
+def test_stream_proofread_with_ai_rejects_chat_mode():
+    with pytest.raises(AIClientError, match="not SSE"):
+        asyncio.run(_collect_stream_events(stream_proofread_with_ai("文本", settings=settings(), provider_api="chat")))
 
 
 async def _collect_stream_events(stream):

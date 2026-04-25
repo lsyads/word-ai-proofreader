@@ -345,7 +345,7 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
     ):
         assert text == "这是一段需要真实审校的文本。"
         assert session_id == "session-test"
-        assert provider_api == "chat"
+        assert provider_api == "responses"
         assert proofread_mode == "thinking"
         yield AIStreamEvent("status", {"stage": "received", "message": "已接收选区文本。"})
         yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
@@ -375,7 +375,7 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
         json={
             "text": "这是一段需要真实审校的文本。",
             "session_id": "session-test",
-            "provider_api": "chat",
+            "provider_api": "responses",
             "proofread_mode": "thinking",
         },
     )
@@ -392,6 +392,18 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
         "completed",
     ]
     assert events[3]["data"]["issues"][0]["id"] == "ai-issue-1"
+
+
+def test_proofread_stream_rejects_chat_mode():
+    response = client.post(
+        "/api/proofread/stream",
+        json={"text": "这是一段文本。", "provider_api": "chat"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Chat mode uses /api/proofread with standard Chat Completions, not SSE."
+    }
 
 
 def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):

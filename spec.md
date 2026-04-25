@@ -17,7 +17,7 @@
 Word 选区
   -> word-addin 读取选区文本
   -> POST /api/sessions 创建 AI session
-  -> POST /api/proofread/stream
+  -> Responses: POST /api/proofread/stream；Chat: POST /api/proofread
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
   -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
   -> backend 在选区文本中搜索 issue.original 并填充 start/end
@@ -29,7 +29,7 @@ Word 选区
 - 目录：`word-addin/`
 - 技术栈：Office.js、TypeScript、Webpack。
 - 本地地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：开发环境先请求同源 `/api/sessions` 创建 AI 对话，再优先请求同源 `/api/proofread/stream` 获取阶段进度，并在任务窗格“运行过程”区域逐条展示；流式不可用时回退 `/api/proofread`。插件请求会携带 `proofread_mode` 和 `provider_api`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
+- 后端地址：开发环境先请求同源 `/api/sessions` 创建 AI 对话；Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；Chat 模式直接请求 `/api/proofread`。插件请求会携带 `proofread_mode` 和 `provider_api`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
 
 ### 后端
 
@@ -100,7 +100,7 @@ Response:
 
 ### `POST /api/proofread/stream`
 
-Request 与 `/api/proofread` 相同。
+Request 与 `/api/proofread` 相同，但仅用于 Responses 模式。Chat 模式直接使用 `/api/proofread`，后端按标准 Chat Completions request/response 调用 `/v1/chat/completions`。
 
 Response 使用 `text/event-stream`：
 
@@ -154,7 +154,7 @@ Response:
 3. 实现 mock 审校服务，未配置 `AI_API_KEY` 时返回可预测的本地结果。
 4. 实现 OpenAI 兼容 Responses API 与 Chat Completions client，配置 `AI_API_KEY` 后请求对应 provider API 并解析精简 JSON。
 5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
-6. 插件内部读取 Word 当前选区，优先调用流式接口展示阶段进度，失败时回退普通接口。
+6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
 7. 后端返回问题时，插件按应用方式处理：批注模式按 `start/end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订；定位失败或无 `replacement` 的问题汇总插入当前选区 fallback 批注；未发现问题时只更新任务窗格，不插入批注。
 8. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
 9. 补充后端测试、插件 lint/build 验证和本地联调说明。
@@ -200,7 +200,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8001/v1/models \
 
 `scripts/start-omlx.sh` 默认将 `Qwen3.6-35B-A3B-4.4bit-msq` 写入 `~/.omlx/model_settings.json`，设置为 default + pinned，使 oMLX 启动时预加载该模型。可通过 `OMLX_PRELOAD_MODEL` 覆盖模型 ID，或设置 `OMLX_CONFIGURE_MODEL_SETTINGS=0` 跳过该配置步骤。
 
-流式接口 smoke test：
+Responses 流式接口 smoke test：
 
 ```bash
 curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
@@ -244,7 +244,7 @@ npm run dev-server
 - AI 输出含 `replacement` 时，后端响应保留该字段；AI 输出无 `replacement` 或空字符串时，响应为 `replacement: null`。
 - 重复 `original` 会按 issue 顺序定位不同 occurrence；找不到 `original` 时返回 `start/end: null`。
 - `proofread_mode=fast` 与 `proofread_mode=thinking` 使用不同 prompt 和 token 上限。
-- 流式接口返回阶段进度事件和最终 `result` 事件。
+- Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - `npm run lint` 通过。
 - `npm run build` 通过。
 - Word 中空选区点击“AI 审校”时显示错误，不调用后端。

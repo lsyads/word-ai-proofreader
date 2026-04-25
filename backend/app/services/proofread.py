@@ -84,6 +84,9 @@ async def stream_proofread_text(
 
     yield AIStreamEvent("status", {"stage": "received", "message": "已接收选区文本。"})
 
+    if provider_api == "chat":
+        raise AIClientError("Chat mode uses /api/proofread with standard Chat Completions, not SSE.")
+
     if not settings.ai_api_key:
         logger.info("proofread stream service using mock issues")
         yield AIStreamEvent("status", {"stage": "calling_ai", "message": "当前未配置 AI_API_KEY，正在返回本地 mock 审校结果。"})
@@ -93,17 +96,13 @@ async def stream_proofread_text(
         return
 
     previous_response_id = None
-    if provider_api == "responses":
-        try:
-            previous_response_id = get_last_response_id(session_id)
-        except SessionNotFoundError as exc:
-            logger.warning("proofread stream service session not found session_id=%s", _mask_session_id(session_id))
-            raise AIClientError("AI session was not found. Please create a new session.") from exc
+    try:
+        previous_response_id = get_last_response_id(session_id)
+    except SessionNotFoundError as exc:
+        logger.warning("proofread stream service session not found session_id=%s", _mask_session_id(session_id))
+        raise AIClientError("AI session was not found. Please create a new session.") from exc
 
-    if provider_api == "responses":
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
-    else:
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Chat Completions。"})
+    yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
 
     async for event in stream_proofread_with_ai(
         text,

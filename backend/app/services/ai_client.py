@@ -34,7 +34,7 @@ class AIStreamEvent:
 
 
 BASE_SYSTEM_PROMPT = """
-你是出版社责任编辑的中文审校助手。只返回紧凑 JSON，不要返回 Markdown 或解释。
+你是出版社责任编辑的中文审校助手。只返回紧凑 JSON，不要返回 Markdown。
 返回格式：
 {
   "issues": [
@@ -48,14 +48,15 @@ BASE_SYSTEM_PROMPT = """
     }
   ]
 }
-后端会按 original 定位。
-replacement 只写可直接进入正文的替换文本；事实待核、需人工判断、体例疑问等不能直接替换的问题必须返回 null。
-如果没有发现问题，返回 {"issues": []}。
+如果整体没有发现问题，返回 {"issues": []}。
+suggestion是空格类问题，不写入issues。
+后端会按 original 定位，不能修改原文。
+replacement 只写可直接进入正文的替换文本；事实待核、需人工判断、体例疑问、无问题等情况必须返回 null。
 """.strip()
 
 MODE_PROMPTS: dict[ProofreadMode, str] = {
-    "fast": "快速审校：只指出明显错别字、病句、事实矛盾或出版物体例硬伤，优先响应速度。",
-    "thinking": "深度审校：更细致检查文字、语法、风格、事实一致性和出版物体例，优先审校质量。",
+    "fast": "快速审校：只指出明显错别字、病句、事实矛盾或出版物体例硬伤，忽略空格问题，优先响应速度。",
+    "thinking": "深度审校：细致检查文字、语法、风格、事实一致性和出版物体例，忽略空格问题，优先审校质量。",
 }
 
 
@@ -124,18 +125,7 @@ async def stream_proofread_with_ai(
     provider_api = _resolve_provider_api(settings, provider_api)
 
     if provider_api == "chat":
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Chat Completions。"})
-        result = await _proofread_with_chat(text, settings, proofread_mode=proofread_mode)
-        yield AIStreamEvent("status", {"stage": "normalizing", "message": "正在整理结构化审校结果。"})
-        yield AIStreamEvent(
-            "result",
-            {
-                "issues": [issue.model_dump() for issue in result.issues],
-                "response_id": result.response_id,
-            },
-        )
-        yield AIStreamEvent("status", {"stage": "completed", "message": "审校完成。"})
-        return
+        raise AIClientError("Chat mode uses the standard Chat Completions response, not SSE.")
 
     _ensure_responses_api(settings)
 
@@ -262,7 +252,7 @@ def _build_responses_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": settings.openai_model,
-        "input": f"{_build_system_prompt(proofread_mode)}\n\n请审校以下 Word 选区文本：\n{text}",
+        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text)}",
         "temperature": 0.2,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
@@ -286,7 +276,7 @@ def _build_chat_payload(
         "model": settings.openai_model,
         "messages": [
             {"role": "system", "content": _build_system_prompt(proofread_mode)},
-            {"role": "user", "content": f"请审校以下 Word 选区文本：\n{text}"},
+            {"role": "user", "content": _build_user_prompt(text)},
         ],
         "temperature": 0.2,
         "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
@@ -296,6 +286,10 @@ def _build_chat_payload(
 
 def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
+
+
+def _build_user_prompt(text: str) -> str:
+    return f"请审校 <text> 内的 Word 选区文本：\n<text>\n{text}\n</text>"
 
 
 def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> int:

@@ -30,7 +30,7 @@ backend/
   - 注册 CORS 中间件。
   - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread` 和 `POST /api/proofread/stream`。
   - 将 AI client 抛出的 `AIClientError` 转换为 HTTP 502。
-  - 流式接口使用 SSE 返回阶段进度、最终结果或错误事件。
+  - 流式接口仅用于 Responses 模式，使用 SSE 返回阶段进度、最终结果或错误事件；Chat 模式使用普通接口。
 
 - `app/schemas.py`
   - 定义 API 请求和响应模型。
@@ -128,7 +128,7 @@ AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算
 
 ### `POST /api/proofread/stream`
 
-请求与 `/api/proofread` 相同，响应类型为 `text/event-stream`。正常情况下会返回阶段状态和最终结果：
+请求与 `/api/proofread` 相同，但仅支持 Responses 模式；Chat 模式请使用 `/api/proofread`。响应类型为 `text/event-stream`。正常情况下会返回阶段状态和最终结果：
 
 ```text
 event: status

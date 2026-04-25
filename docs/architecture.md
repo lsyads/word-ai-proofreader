@@ -7,7 +7,7 @@
 ```text
 Word 插件任务窗格
   -> POST /api/sessions
-  -> POST /api/proofread/stream
+  -> Responses: POST /api/proofread/stream；Chat: POST /api/proofread
   -> FastAPI 后端
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
@@ -50,7 +50,7 @@ Response:
 
 ### 2. 普通审校接口
 
-普通接口用于非流式回退。插件优先使用流式接口，只有流式读取不可用时才回退到这个接口。
+普通接口用于非流式回退，也用于 Chat 模式。插件在 Responses 模式优先使用流式接口，只有流式读取不可用时才回退到这个接口；Chat 模式直接使用这个接口。
 
 Request:
 
@@ -100,7 +100,7 @@ AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会�
 
 ### 3. 流式审校接口
 
-插件主路径使用流式接口展示运行过程。
+插件在 Responses 模式使用流式接口展示运行过程；Chat 模式不走 SSE，直接使用普通接口。
 
 Request:
 
@@ -245,7 +245,7 @@ Content-Type: application/json
 }
 ```
 
-Chat 模式返回同样的精简 issues JSON。后端会照常计算 `start/end`，但不会写入或读取 `previous_response_id`。
+Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/chat/completions`，从 `choices[0].message.content` 读取精简 issues JSON。后端会照常计算 `start/end`，但不会写入或读取 `previous_response_id`，也不会把 Chat 结果包装成 SSE。
 
 ### 3. 快速/深度审校
 
@@ -253,7 +253,7 @@ Chat 模式返回同样的精简 issues JSON。后端会照常计算 `start/end`
 
 ### 4. 流式 Responses 调用
 
-后端流式接口会调用 provider 的流式 Responses API。
+后端流式接口仅用于 Responses 模式，会调用 provider 的流式 Responses API。
 
 Request 与非流式基本一致，但增加：
 
@@ -293,7 +293,7 @@ provider response.failed         -> backend event: error
 
 ## SSE 使用位置
 
-当前有两段 SSE：
+当前 SSE 只用于 Responses 模式，有两段：
 
 ```text
 Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider

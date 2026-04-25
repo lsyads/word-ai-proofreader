@@ -405,6 +405,11 @@ async function requestProofread(
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
+  if (getProviderApi() === "chat") {
+    onStatus({ stage: "api", message: "正在请求 Chat Completions 接口" });
+    return requestProofreadJson(text, signal);
+  }
+
   try {
     onStatus({ stage: "api", message: "正在请求流式接口" });
     return await requestProofreadStream(text, onStatus, signal);

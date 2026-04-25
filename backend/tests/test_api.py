@@ -78,7 +78,6 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
     assert issue["original"]
     assert issue["replacement"]
     assert issue["suggestion"]
-    assert issue["comment"]
     assert issue["start"] == 0
     assert isinstance(issue["end"], int)
 
@@ -102,7 +101,6 @@ def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
                     original="需要定位",
                     replacement="需要定位后的文本",
                     suggestion="建议",
-                    comment="说明",
                 )
             ],
         )
@@ -136,7 +134,6 @@ def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
                     original="文本",
                     replacement="   ",
                     suggestion="建议",
-                    comment="说明",
                 )
             ],
         )
@@ -169,7 +166,6 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
                     severity="medium",
                     original="重复",
                     suggestion="建议一",
-                    comment="说明一",
                 ),
                 ProofreadIssue(
                     id="ai-issue-2",
@@ -177,7 +173,6 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
                     severity="medium",
                     original="重复",
                     suggestion="建议二",
-                    comment="说明二",
                 ),
             ],
         )
@@ -207,7 +202,6 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
                     severity="low",
                     original="不存在",
                     suggestion="建议",
-                    comment="说明",
                 )
             ],
         )
@@ -243,7 +237,6 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
                     severity="high",
                     original="真实",
                     suggestion="真实建议",
-                    comment="真实 AI 分支",
                     start=0,
                     end=2,
                 )
@@ -367,7 +360,6 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
                         "severity": "high",
                         "original": "真实",
                         "suggestion": "真实建议",
-                        "comment": "真实 AI 分支",
                         "start": 0,
                         "end": 2,
                     }

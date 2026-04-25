@@ -138,7 +138,6 @@ def build_mock_issues(text: str) -> list[ProofreadIssue]:
             original=sample,
             replacement=f"{sample}（建议核对）" if sample else None,
             suggestion="请结合上下文检查该表述是否准确、简洁，并确认是否符合出版物体例。",
-            comment="本地 mock 审校结果：当前未配置 AI_API_KEY，已返回一条示例审校建议，用于验证 Word 批注闭环。",
         )
     ]
 

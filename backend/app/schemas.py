@@ -28,7 +28,6 @@ class ProofreadIssue(BaseModel):
     original: str
     replacement: str | None = None
     suggestion: str
-    comment: str
     start: int | None = Field(default=None, ge=0)
     end: int | None = Field(default=None, ge=0)
 

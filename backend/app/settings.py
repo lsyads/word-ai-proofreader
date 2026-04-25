@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     openai_api_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_API_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     ai_request_timeout_seconds: float = Field(default=30, alias="AI_REQUEST_TIMEOUT_SECONDS")
-    ai_max_tokens: int = Field(default=1200, alias="AI_MAX_TOKENS")
-    ai_fast_max_tokens: int = Field(default=800, alias="AI_FAST_MAX_TOKENS")
-    ai_thinking_max_tokens: int = Field(default=1200, alias="AI_THINKING_MAX_TOKENS")
+    ai_max_tokens: int = Field(default=32768, alias="AI_MAX_TOKENS")
+    ai_fast_max_tokens: int = Field(default=16384, alias="AI_FAST_MAX_TOKENS")
+    ai_thinking_max_tokens: int = Field(default=32768, alias="AI_THINKING_MAX_TOKENS")
     backend_cors_origins: str = Field(
         default="https://localhost:3000,http://localhost:3000",
         alias="BACKEND_CORS_ORIGINS",

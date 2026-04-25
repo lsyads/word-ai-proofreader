@@ -6,7 +6,7 @@
 
 ## MVP 范围
 
-- 包含：Word 选区读取、provider 原生 AI session、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、逐条精准批注、修订模式替换、快速/思考模式、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
+- 包含：Word 选区读取、provider 原生 AI session、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、逐条精准批注、修订模式替换、快速/深度审校、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
 - 不包含：登录、云端审校历史、全文扫描、token 级模型文本流、无人工确认地默认改正文。
 - 第一版后端使用 OpenAI 兼容接口；没有 `AI_API_KEY` 时返回 mock 结果，保证本地可联调。
 - 本地真实 AI 联调可使用 oMLX 启动 OpenAI 兼容服务，默认地址为 `http://127.0.0.1:8001/v1`。
@@ -19,7 +19,7 @@ Word 选区
   -> POST /api/sessions 创建 AI session
   -> POST /api/proofread/stream
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
-  -> AI 返回精简 issues[]，包含 original/replacement/suggestion/comment，不返回 start/end
+  -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
   -> backend 在选区文本中搜索 issue.original 并填充 start/end
   -> word-addin 按应用方式插入批注或生成 Word 修订，定位失败时回退汇总批注
 ```
@@ -79,7 +79,6 @@ Response:
       "original": "原文片段",
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
-      "comment": "给责任编辑看的批注内容",
       "start": 0,
       "end": 4
     }
@@ -92,8 +91,8 @@ Response:
 - `category`：问题类别，第一版允许自由字符串，例如 `typo`、`grammar`、`style`、`fact`。
 - `severity`：严重程度，使用 `low`、`medium`、`high`。
 - `provider_api`：可选，支持 `responses`、`chat`；未传时使用后端环境变量 `AI_PROVIDER_API`，默认 `responses`。
-- `proofread_mode`：可选，支持 `fast`、`thinking`；默认 `fast`。`fast` 只抓明显问题、限制问题数和说明长度；`thinking` 更细审、允许更多问题和更高输出上限。
-- AI 原始输出不包含 `start`、`end`，只包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`、`comment`。
+- `proofread_mode`：可选，支持 `fast`、`thinking`；默认 `fast`。`fast` 只抓明显问题、优先响应速度；`thinking` 更细审、使用更高输出上限，优先审校质量。两种模式均不限制返回条数。
+- AI 原始输出不包含 `start`、`end`、`comment`，只包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。
 - `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
 - `start`、`end`：后端按 `original` 在请求文本中计算，`start` 为包含式起点，`end` 为不包含式终点，均相对请求文本。重复 `original` 按 issue 顺序匹配下一处；找不到时返回 `null`。
 - `issues` 为空表示未发现明显问题。
@@ -157,7 +156,7 @@ Response:
 5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
 6. 插件内部读取 Word 当前选区，优先调用流式接口展示阶段进度，失败时回退普通接口。
 7. 后端返回问题时，插件按应用方式处理：批注模式按 `start/end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订；定位失败或无 `replacement` 的问题汇总插入当前选区 fallback 批注；未发现问题时只更新任务窗格，不插入批注。
-8. 插件支持新建对话、停止审校、快速/思考模式、Responses/Chat API 切换、本地历史记录清空/导出/导入。
+8. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
 9. 补充后端测试、插件 lint/build 验证和本地联调说明。
 
 ## 本地运行
@@ -181,14 +180,14 @@ AI_REQUIRE_NATIVE_SESSION=true
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
-AI_MAX_TOKENS=1200
-AI_FAST_MAX_TOKENS=800
-AI_THINKING_MAX_TOKENS=1200
+AI_MAX_TOKENS=32768
+AI_FAST_MAX_TOKENS=16384
+AI_THINKING_MAX_TOKENS=32768
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
 
-`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、非 JSON 返回、schema 不匹配统一转换为后端 502。`AI_FAST_MAX_TOKENS` 用于快速模式，`AI_THINKING_MAX_TOKENS` 用于思考模式。
+`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、非 JSON 返回、schema 不匹配统一转换为后端 502。`AI_FAST_MAX_TOKENS` 用于快速审校，`AI_THINKING_MAX_TOKENS` 用于深度审校。
 `BACKEND_LOG_LEVEL` 默认 `INFO`，用于打印请求模式、文本长度、provider 状态、问题数和定位数量；不得打印 API Key 或选中文本全文。
 
 本地 oMLX：
@@ -228,7 +227,7 @@ npm run dev-server
 6. 如果存在审校问题，确认可定位问题批注在对应原文片段上；定位失败问题会作为一条 fallback 汇总批注插在当前选区；如果没有问题，确认不会插入批注。
 7. 点击“新建对话”，确认后续审校使用新的 AI session。
 8. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
-9. 切换“快速模式/思考模式”和“Responses/Chat”，确认后续请求使用对应模式。
+9. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
 10. 切换“批注模式/修订模式”，确认批注模式不改正文，修订模式生成可接受/拒绝的 Word 修订。
 11. 使用历史记录“清空、另存为、导入”，确认本地历史可管理。
 

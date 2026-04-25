@@ -48,7 +48,7 @@ word-addin/
 
 - `src/taskpane/taskpane.html`
   - 任务窗格 HTML。
-  - 定义标题、状态提示、快速/思考模式切换、Responses/Chat API 切换、批注/修订模式切换、“AI 审校”按钮、审校结果展示区域、历史记录管理按钮。
+  - 定义标题、状态提示、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、“AI 审校”按钮、审校结果展示区域、历史记录管理按钮。
   - 当前 MVP 不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
 
 - `src/taskpane/taskpane.css`

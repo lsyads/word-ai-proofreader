@@ -83,7 +83,6 @@ Response:
       "original": "原文片段",
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
-      "comment": "给责任编辑看的批注内容",
       "start": 0,
       "end": 4
     }
@@ -95,7 +94,7 @@ Response:
 
 `provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。
 
-AI 原始输出不包含 `start/end`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
+AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
 
 `replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
@@ -178,7 +177,7 @@ Content-Type: application/json
   "model": "Qwen3.6-35B-A3B-4.4bit-msq",
   "input": "系统审校要求...\n\n请审校以下 Word 选区文本：\n需要审校的 Word 选区文本",
   "temperature": 0.2,
-  "max_output_tokens": 800,
+  "max_output_tokens": 16384,
   "text": {
     "format": {
       "type": "json_object"
@@ -219,7 +218,7 @@ Provider Response:
 }
 ```
 
-AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`、`comment`。解析成功后，后端按 `original` 定位并填充 `start/end`，再把 provider 的 `id` 写入当前 session 的 `last_response_id`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析成功后，后端按 `original` 定位并填充 `start/end`，再把 provider 的 `id` 写入当前 session 的 `last_response_id`。
 
 ### 2. Chat Completions 调用
 
@@ -239,7 +238,7 @@ Content-Type: application/json
     {"role": "user", "content": "请审校以下 Word 选区文本：\n需要审校的 Word 选区文本"}
   ],
   "temperature": 0.2,
-  "max_tokens": 800,
+  "max_tokens": 16384,
   "response_format": {
     "type": "json_object"
   }
@@ -248,9 +247,9 @@ Content-Type: application/json
 
 Chat 模式返回同样的精简 issues JSON。后端会照常计算 `start/end`，但不会写入或读取 `previous_response_id`。
 
-### 3. 快速/思考模式
+### 3. 快速/深度审校
 
-`proofread_mode=fast` 使用更短 prompt 和较低输出上限，只抓明显问题，默认 `AI_FAST_MAX_TOKENS=800`。`proofread_mode=thinking` 使用更细审要求和较高输出上限，默认 `AI_THINKING_MAX_TOKENS=1200`。两种模式都要求 AI 不返回 `start/end`。
+`proofread_mode=fast` 使用更短 prompt 和16K 输出上限，只抓明显问题，默认 `AI_FAST_MAX_TOKENS=16384`。`proofread_mode=thinking` 使用更细审要求和32K 输出上限，默认 `AI_THINKING_MAX_TOKENS=32768`。两种模式都要求 AI 不返回 `start/end`。
 
 ### 4. 流式 Responses 调用
 
@@ -329,7 +328,7 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
-批注内容以 `replacement`、`suggestion` 为核心，并带上简短 `comment`、`category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数和 fallback 数。
+批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数和 fallback 数。
 
 ## 停止审校和历史记录
 

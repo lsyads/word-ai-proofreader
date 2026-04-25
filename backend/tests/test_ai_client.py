@@ -89,7 +89,7 @@ def response_payload(response_id="resp-1", content=None):
                         "text": content
                         or (
                             '{"issues":[{"id":"issue-1","category":"typo","severity":"low",'
-                            '"original":"错字","replacement":"改字","suggestion":"改字","comment":"请修正","start":0,"end":2}]}'
+                            '"original":"错字","replacement":"改字","suggestion":"改字","start":0,"end":2}]}'
                         ),
                     }
                 ],
@@ -107,7 +107,7 @@ def chat_payload(response_id="chatcmpl-1", content=None):
                     "content": content
                     or (
                         '{"issues":[{"id":"issue-1","category":"typo","severity":"low",'
-                        '"original":"错字","replacement":"改字","suggestion":"改字","comment":"请修正"}]}'
+                        '"original":"错字","replacement":"改字","suggestion":"改字"}]}'
                     )
                 }
             }
@@ -140,7 +140,6 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
             original="错字",
             replacement="改字",
             suggestion="改字",
-            comment="请修正",
             start=0,
             end=2,
         )
@@ -153,12 +152,13 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert call["timeout"] == 12
     assert call["json"]["model"] == "test-model"
     assert call["json"]["temperature"] == 0.2
-    assert call["json"]["max_output_tokens"] == 345
+    assert call["json"]["max_output_tokens"] == 16384
     assert call["json"]["text"] == {"format": {"type": "json_object"}}
     assert call["json"]["previous_response_id"] == "resp-prev"
     assert "这是一段文本。" in call["json"]["input"]
     assert "不要返回 start 或 end" in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
+    assert "comment" not in call["json"]["input"]
 
 
 def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
@@ -169,8 +169,8 @@ def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
     result = asyncio.run(proofread_with_ai("文本", settings=settings(), proofread_mode="thinking"))
 
     assert result.response_id == "resp-1"
-    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 1200
-    assert "思考模式" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 32768
+    assert "深度审校" in FakeAsyncClient.calls[0]["json"]["input"]
 
 
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):
@@ -189,7 +189,6 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
             original="错字",
             replacement="改字",
             suggestion="改字",
-            comment="请修正",
         )
     ]
 
@@ -197,10 +196,11 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["url"] == "https://example.test/v1/chat/completions"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
     assert call["json"]["response_format"] == {"type": "json_object"}
-    assert call["json"]["max_tokens"] == 345
+    assert call["json"]["max_tokens"] == 16384
     assert call["json"]["messages"][0]["role"] == "system"
     assert "不要返回 start 或 end" in call["json"]["messages"][0]["content"]
     assert "replacement" in call["json"]["messages"][0]["content"]
+    assert "comment" not in call["json"]["messages"][0]["content"]
     assert call["json"]["messages"][1]["content"].endswith("这是一段文本。")
 
 
@@ -241,7 +241,7 @@ def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):
                 "type": "response.output_text.done",
                 "text": (
                     '{"issues":[{"id":"issue-1","category":"typo","severity":"low",'
-                    '"original":"错字","replacement":"改字","suggestion":"改字","comment":"请修正","start":0,"end":2}]}'
+                    '"original":"错字","replacement":"改字","suggestion":"改字","start":0,"end":2}]}'
                 ),
             },
         ),

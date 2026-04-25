@@ -7,7 +7,6 @@ interface ProofreadIssue {
   original: string;
   replacement?: string | null;
   suggestion: string;
-  comment: string;
   start?: number | null;
   end?: number | null;
 }
@@ -577,7 +576,6 @@ function formatIssueComment(issue: ProofreadIssue): string {
   return [
     issue.replacement ? `替换为：${issue.replacement}` : "",
     `建议：${issue.suggestion || "未提供"}`,
-    `说明：${issue.comment || "未提供"}`,
     `类别：${issue.category} / ${issue.severity}`,
   ]
     .filter(Boolean)
@@ -603,7 +601,6 @@ function formatComment(issues: ProofreadIssue[]): string {
       lines.push(`替换为：${issue.replacement}`);
     }
     lines.push(`建议：${issue.suggestion || "未提供"}`);
-    lines.push(`说明：${issue.comment || "未提供"}`);
   });
 
   return lines.join("\n");
@@ -629,7 +626,6 @@ function renderResult(issues: ProofreadIssue[], commentText: string) {
           <p><b>原文：</b>${escapeHtml(issue.original || "未提供")}</p>
           <p><b>替换为：</b>${escapeHtml(issue.replacement || "无直接替换文本")}</p>
           <p><b>建议：</b>${escapeHtml(issue.suggestion || "未提供")}</p>
-          <p><b>说明：</b>${escapeHtml(issue.comment || "未提供")}</p>
         </article>
       `
     )
@@ -933,7 +929,7 @@ function formatProviderApi(providerApi: ProviderAPI): string {
 }
 
 function formatProofreadMode(proofreadMode: ProofreadMode): string {
-  return proofreadMode === "thinking" ? "思考模式" : "快速模式";
+  return proofreadMode === "thinking" ? "深度审校" : "快速审校";
 }
 
 function formatApplicationMode(applicationMode: ApplicationMode): string {

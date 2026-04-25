@@ -44,19 +44,18 @@ BASE_SYSTEM_PROMPT = """
       "severity": "low|medium|high",
       "original": "原文片段",
       "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
-      "suggestion": "修改建议",
-      "comment": "给责任编辑看的短批注"
+      "suggestion": "给责任编辑看的修改建议"
     }
   ]
 }
-后端会按 original 定位。comment 控制在 40 个中文字符以内。
+后端会按 original 定位。
 replacement 只写可直接进入正文的替换文本；事实待核、需人工判断、体例疑问等不能直接替换的问题必须返回 null。
 如果没有发现问题，返回 {"issues": []}。
 """.strip()
 
 MODE_PROMPTS: dict[ProofreadMode, str] = {
-    "fast": "快速模式：只指出明显错别字、病句、事实矛盾或出版物体例硬伤。",
-    "thinking": "思考模式：更细致检查文字、语法、风格、事实一致性和出版物体例。",
+    "fast": "快速审校：只指出明显错别字、病句、事实矛盾或出版物体例硬伤，优先响应速度。",
+    "thinking": "深度审校：更细致检查文字、语法、风格、事实一致性和出版物体例，优先审校质量。",
 }
 
 
@@ -303,7 +302,7 @@ def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> i
     if proofread_mode == "thinking":
         return settings.ai_thinking_max_tokens
 
-    return min(settings.ai_max_tokens, settings.ai_fast_max_tokens)
+    return settings.ai_fast_max_tokens
 
 
 def _responses_url(settings: Settings) -> str:

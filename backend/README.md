@@ -117,7 +117,6 @@ backend/
       "original": "原文片段",
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
-      "comment": "给责任编辑看的批注内容",
       "start": 0,
       "end": 4
     }
@@ -125,7 +124,7 @@ backend/
 }
 ```
 
-AI 原始输出不包含 `start/end`；后端在返回给插件前计算。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
+AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
 
 ### `POST /api/proofread/stream`
 
@@ -177,9 +176,9 @@ AI_REQUIRE_NATIVE_SESSION=true
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
-AI_MAX_TOKENS=1200
-AI_FAST_MAX_TOKENS=800
-AI_THINKING_MAX_TOKENS=1200
+AI_MAX_TOKENS=32768
+AI_FAST_MAX_TOKENS=16384
+AI_THINKING_MAX_TOKENS=32768
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
@@ -189,7 +188,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 - `AI_API_KEY` 为空时走 mock fallback。
 - `AI_API_KEY` 有值时走真实 OpenAI 兼容 Responses API 或 Chat Completions。
 - `AI_PROVIDER_API=responses` 表示默认使用 `/v1/responses`；也可在请求中传 `provider_api=chat` 临时切到 `/chat/completions`。
-- `AI_FAST_MAX_TOKENS` 和 `AI_THINKING_MAX_TOKENS` 分别控制快速模式与思考模式的输出上限。
+- `AI_FAST_MAX_TOKENS` 和 `AI_THINKING_MAX_TOKENS` 分别控制快速审校与深度审校的输出上限。
 - `BACKEND_LOG_LEVEL` 控制后端日志级别，默认 `INFO`；调试定位细节时可设为 `DEBUG`。
 - `AI_REQUIRE_NATIVE_SESSION=true` 表示 Responses 模式下 provider 不支持原生 session 时明确报错，不静默降级。
 - 本地真实 AI 联调推荐先运行仓库根目录的 `./scripts/start-omlx.sh`，默认 oMLX 地址为 `http://127.0.0.1:8001/v1`，并会将 `Qwen3.6-35B-A3B-4.4bit-msq` 配置为 default + pinned 以便启动时预加载。

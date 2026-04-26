@@ -149,13 +149,15 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
 
             heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk, chunk_started_at))
             try:
-                chunk_issues = await proofread_text(
-                    chunk.text,
-                    task.request.book,
-                    session_id=task.request.session_id,
-                    provider_api=task.request.provider_api,
-                    proofread_mode=task.request.proofread_mode,
-                )
+                proofread_kwargs = {
+                    "session_id": task.request.session_id,
+                    "provider_api": task.request.provider_api,
+                    "proofread_mode": task.request.proofread_mode,
+                }
+                if task.request.reasoning_enabled:
+                    proofread_kwargs["reasoning_enabled"] = True
+
+                chunk_issues = await proofread_text(chunk.text, task.request.book, **proofread_kwargs)
             except AIClientError as exc:
                 task.failed_chunks += 1
                 _touch(task)

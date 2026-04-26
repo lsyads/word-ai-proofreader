@@ -34,6 +34,7 @@ export function saveHistoryEntry(input: {
   sessionId: string;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
+  reasoningEnabled: boolean;
   applicationMode: ApplicationMode;
   errorMessage?: string;
 }) {
@@ -56,6 +57,7 @@ export function saveHistoryEntry(input: {
     fallbackCount: input.fallbackCount,
     providerApi: input.providerApi,
     proofreadMode: input.proofreadMode,
+    reasoningEnabled: input.reasoningEnabled,
     applicationMode: input.applicationMode,
     scope: input.scope,
     taskId: input.taskId,
@@ -105,6 +107,7 @@ export function savePendingResultHistory(input: {
     sessionId: input.result.sessionId,
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
+    reasoningEnabled: input.result.reasoningEnabled,
     applicationMode: input.applicationMode,
     errorMessage: input.errorMessage,
   });
@@ -133,6 +136,7 @@ export function saveAppliedResultHistory(input: {
     sessionId: input.result.sessionId,
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
+    reasoningEnabled: input.result.reasoningEnabled,
     applicationMode: input.applicationMode,
   });
 }

@@ -95,6 +95,18 @@ body {
   resize: vertical;
 }
 
+.checkbox-field {
+  align-items: center;
+  color: #323130;
+  display: flex;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.checkbox-field input {
+  margin: 0;
+}
+
 .history-actions {
   display: grid;
   gap: 8px;

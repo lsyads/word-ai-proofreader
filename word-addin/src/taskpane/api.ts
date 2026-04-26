@@ -35,12 +35,21 @@ export async function requestProofread(
   sessionId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
   if (providerApi === "chat") {
     onStatus({ stage: "api", message: "正在请求 Chat Completions 接口" });
-    return requestProofreadJson(text, book, sessionId, providerApi, proofreadMode, signal);
+    return requestProofreadJson(
+      text,
+      book,
+      sessionId,
+      providerApi,
+      proofreadMode,
+      reasoningEnabled,
+      signal
+    );
   }
 
   try {
@@ -51,6 +60,7 @@ export async function requestProofread(
       sessionId,
       providerApi,
       proofreadMode,
+      reasoningEnabled,
       onStatus,
       signal
     );
@@ -60,7 +70,15 @@ export async function requestProofread(
     }
 
     onStatus({ stage: "fallback", message: "流式接口不可用，正在回退到普通接口" });
-    return requestProofreadJson(text, book, sessionId, providerApi, proofreadMode, signal);
+    return requestProofreadJson(
+      text,
+      book,
+      sessionId,
+      providerApi,
+      proofreadMode,
+      reasoningEnabled,
+      signal
+    );
   }
 }
 
@@ -71,6 +89,7 @@ export async function requestChunkedProofreadTask(
   sessionId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
   onStatus: (status: ProofreadStatusEvent) => void,
   onTaskCreated: (taskId: string | null) => void,
   signal: AbortSignal
@@ -90,6 +109,7 @@ export async function requestChunkedProofreadTask(
     sessionId,
     providerApi,
     proofreadMode,
+    reasoningEnabled,
     signal
   );
   onTaskCreated(createdTask.task_id || null);
@@ -189,6 +209,7 @@ async function requestProofreadJson(
   sessionId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
   const response = await fetch(`${API_BASE_URL}/api/proofread`, {
@@ -203,6 +224,7 @@ async function requestProofreadJson(
       session_id: sessionId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
+      reasoning_enabled: reasoningEnabled,
       context: {
         source: "word-addin",
       },
@@ -222,6 +244,7 @@ async function requestProofreadStream(
   sessionId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
@@ -238,6 +261,7 @@ async function requestProofreadStream(
       session_id: sessionId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
+      reasoning_enabled: reasoningEnabled,
       context: {
         source: "word-addin",
       },
@@ -304,6 +328,7 @@ async function createProofreadTask(
   sessionId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
   signal: AbortSignal
 ): Promise<ChunkedProofreadResponse> {
   const response = await fetch(`${API_BASE_URL}/api/proofread/tasks`, {
@@ -318,6 +343,7 @@ async function createProofreadTask(
       session_id: sessionId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
+      reasoning_enabled: reasoningEnabled,
       scope,
       chunk_size: DEFAULT_CHUNK_SIZE,
       context: {

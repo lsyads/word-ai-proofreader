@@ -140,12 +140,19 @@ async def proofread_with_ai(
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
     provider_api = _resolve_provider_api(settings, provider_api)
 
     if provider_api == "chat":
-        return await _proofread_with_chat(text, book, settings, proofread_mode=proofread_mode)
+        return await _proofread_with_chat(
+            text,
+            book,
+            settings,
+            proofread_mode=proofread_mode,
+            reasoning_enabled=reasoning_enabled,
+        )
 
     _ensure_responses_api(settings)
 
@@ -198,6 +205,7 @@ async def stream_proofread_with_ai(
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = settings or get_settings()
     provider_api = _resolve_provider_api(settings, provider_api)
@@ -299,13 +307,21 @@ async def _proofread_with_chat(
     book: BookInfo,
     settings: Settings,
     proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
 ) -> AIProofreadResult:
     _ensure_api_key(settings)
-    payload = _build_chat_payload(text, book, settings, proofread_mode=proofread_mode)
+    payload = _build_chat_payload(
+        text,
+        book,
+        settings,
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+    )
     logger.info(
-        "AI chat request started model=%s proofread_mode=%s text_len=%s max_tokens=%s",
+        "AI chat request started model=%s proofread_mode=%s reasoning_enabled=%s text_len=%s max_tokens=%s",
         settings.openai_model,
         proofread_mode,
+        reasoning_enabled,
         len(text),
         payload["max_tokens"],
     )
@@ -365,6 +381,7 @@ def _build_chat_payload(
     book: BookInfo,
     settings: Settings,
     proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
 ) -> dict[str, Any]:
     return {
         "model": settings.openai_model,
@@ -374,7 +391,7 @@ def _build_chat_payload(
         ],
         "temperature": 0.2,
         "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
-        "reasoning": {"enabled": False},
+        "reasoning": {"enabled": reasoning_enabled},
         # "response_format": {"type": "json_object"},
     }
 

@@ -66,6 +66,7 @@ Content-Type: application/json
   "session_id": "session_8d7f...",
   "provider_api": "responses",
   "proofread_mode": "fast",
+  "reasoning_enabled": false,
   "context": {
     "source": "word-addin"
   }
@@ -93,7 +94,7 @@ Response:
 
 `issues` 为空表示未发现明显问题。插件此时只更新任务窗格，不插入 Word 批注。
 
-`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。`reasoning_enabled` 可选，默认 `false`，用于控制 Chat Completions 请求体中的 `reasoning.enabled`，不改变审校 prompt。
 
 AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
 
@@ -323,7 +324,7 @@ Content-Type: application/json
 }
 ```
 
-Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/chat/completions`，从 `choices[0].message.content` 读取精简 issues JSON。后端会照常过滤纯空白差异 issue 并计算 `start/end`，不会写入或读取 `previous_response_id`，也不会把 Chat 结果包装成 SSE。
+Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/chat/completions`，从 `choices[0].message.content` 读取精简 issues JSON。`reasoning.enabled` 默认 `false`，用户开启“深度思考”后改为 `true`。后端会照常过滤纯空白差异 issue 并计算 `start/end`，不会写入或读取 `previous_response_id`，也不会把 Chat 结果包装成 SSE。
 
 ### 3. 快速/深度审校
 

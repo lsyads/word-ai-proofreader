@@ -356,11 +356,13 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
         book,
         provider_api=None,
         proofread_mode="fast",
+        reasoning_enabled=False,
     ):
         calls.append(
             {
                 "provider_api": provider_api,
                 "proofread_mode": proofread_mode,
+                "reasoning_enabled": reasoning_enabled,
             }
         )
         return AIProofreadResult(response_id="chatcmpl-1", issues=[])
@@ -370,7 +372,12 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
 
     first = client.post(
         "/api/proofread",
-        json=proofread_payload("第一段文本。", provider_api="chat", proofread_mode="thinking"),
+        json=proofread_payload(
+            "第一段文本。",
+            provider_api="chat",
+            proofread_mode="thinking",
+            reasoning_enabled=True,
+        ),
     )
     second = client.post(
         "/api/proofread",
@@ -380,8 +387,8 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
     assert first.status_code == 200
     assert second.status_code == 200
     assert calls == [
-        {"provider_api": "chat", "proofread_mode": "thinking"},
-        {"provider_api": "chat", "proofread_mode": "fast"},
+        {"provider_api": "chat", "proofread_mode": "thinking", "reasoning_enabled": True},
+        {"provider_api": "chat", "proofread_mode": "fast", "reasoning_enabled": False},
     ]
 
 

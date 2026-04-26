@@ -85,6 +85,7 @@ export interface ProofreadHistoryEntry {
   fallbackCount: number;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
+  reasoningEnabled: boolean;
   applicationMode: ApplicationMode;
   scope: ProofreadScope;
   taskId?: string | null;
@@ -115,12 +116,14 @@ export interface PendingProofreadResult {
   failedChunks: number;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
+  reasoningEnabled: boolean;
   issues: ProofreadIssue[];
 }
 
 export interface ControlsState {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
+  reasoningEnabled: boolean;
   applicationMode: ApplicationMode;
   scope: ProofreadScope;
 }

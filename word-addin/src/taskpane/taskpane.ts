@@ -54,6 +54,7 @@ import {
 
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v2";
+const REASONING_ENABLED_STORAGE_KEY = "word-ai-proofreader-reasoning-enabled-v2";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v2";
 const PROOFREAD_SCOPE_STORAGE_KEY = "word-ai-proofreader-scope-v2";
 const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v2";
@@ -82,6 +83,7 @@ Office.onReady((info) => {
     getTextArea("book-introduction").oninput = persistBookInfo;
     getSelect("provider-api").onchange = persistControls;
     getSelect("proofread-mode").onchange = persistControls;
+    getInput("reasoning-enabled").onchange = persistControls;
     getSelect("application-mode").onchange = persistControls;
     getSelect("proofread-scope").onchange = persistControls;
     initializeControls();
@@ -190,6 +192,7 @@ export async function proofreadSelection() {
         currentSessionId,
         controls.providerApi,
         controls.proofreadMode,
+        controls.reasoningEnabled,
         (progress) => {
           showMessage(progress.message, "default");
           appendProgressStatus(progress);
@@ -213,6 +216,7 @@ export async function proofreadSelection() {
         currentSessionId,
         controls.providerApi,
         controls.proofreadMode,
+        controls.reasoningEnabled,
         (progress) => {
           showMessage(progress.message, "default");
           appendProgressStatus(progress);
@@ -234,6 +238,7 @@ export async function proofreadSelection() {
       failedChunks,
       providerApi: controls.providerApi,
       proofreadMode: controls.proofreadMode,
+      reasoningEnabled: controls.reasoningEnabled,
       issues,
     };
     renderResult(issues, formatComment(issues));
@@ -362,6 +367,7 @@ function saveStoppedOrFailedHistory(input: {
     failedChunks: 0,
     providerApi: input.controls.providerApi,
     proofreadMode: input.controls.proofreadMode,
+    reasoningEnabled: input.controls.reasoningEnabled,
     applicationMode: input.controls.applicationMode,
     sessionId: currentSessionId || "",
     errorMessage: input.errorMessage,
@@ -378,6 +384,7 @@ function initializeControls() {
     localStorage.getItem(BOOK_INTRODUCTION_STORAGE_KEY) || "";
   getSelect("provider-api").value = readStoredProviderApi();
   getSelect("proofread-mode").value = readStoredProofreadMode();
+  getInput("reasoning-enabled").checked = readStoredReasoningEnabled();
   getSelect("application-mode").value = readStoredApplicationMode();
   getSelect("proofread-scope").value = readStoredProofreadScope();
 }
@@ -385,6 +392,7 @@ function initializeControls() {
 function persistControls() {
   localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
+  localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
   localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
 }
@@ -418,6 +426,7 @@ function getControlsState(): ControlsState {
   return {
     providerApi: getProviderApi(),
     proofreadMode: getProofreadMode(),
+    reasoningEnabled: getReasoningEnabled(),
     applicationMode: getApplicationMode(),
     scope: getProofreadScope(),
   };
@@ -431,6 +440,10 @@ function getProviderApi(): ProviderAPI {
 function getProofreadMode(): ProofreadMode {
   const value = getSelect("proofread-mode").value;
   return isProofreadMode(value) ? value : "fast";
+}
+
+function getReasoningEnabled(): boolean {
+  return getInput("reasoning-enabled").checked;
 }
 
 function getApplicationMode(): ApplicationMode {
@@ -451,6 +464,10 @@ function readStoredProviderApi(): ProviderAPI {
 function readStoredProofreadMode(): ProofreadMode {
   const value = localStorage.getItem(PROOFREAD_MODE_STORAGE_KEY);
   return isProofreadMode(value) ? value : "fast";
+}
+
+function readStoredReasoningEnabled(): boolean {
+  return localStorage.getItem(REASONING_ENABLED_STORAGE_KEY) === "true";
 }
 
 function readStoredApplicationMode(): ApplicationMode {
@@ -559,6 +576,7 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
   getTextArea("book-introduction").disabled = isBusy;
   getSelect("provider-api").disabled = isBusy;
   getSelect("proofread-mode").disabled = isBusy;
+  getInput("reasoning-enabled").disabled = isBusy;
   getSelect("application-mode").disabled = isBusy;
   getSelect("proofread-scope").disabled = isBusy;
 }

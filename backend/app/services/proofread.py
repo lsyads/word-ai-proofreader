@@ -20,30 +20,32 @@ async def proofread_text(
     session_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
 ) -> list[ProofreadIssue]:
     settings = get_settings()
     provider_api = resolve_provider_api(provider_api)
     logger.info(
-        "proofread service started text_len=%s provider_api=%s proofread_mode=%s has_api_key=%s session_id=%s",
+        "proofread service started text_len=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
         len(text),
         provider_api,
         proofread_mode,
+        reasoning_enabled,
         bool(settings.ai_api_key),
         _mask_session_id(session_id),
     )
 
     if settings.ai_api_key:
         logger.info(
-            "proofread service calling AI provider provider_api=%s proofread_mode=%s",
+            "proofread service calling AI provider provider_api=%s proofread_mode=%s reasoning_enabled=%s",
             provider_api,
             proofread_mode,
+            reasoning_enabled,
         )
-        result = await proofread_with_ai(
-            text,
-            book,
-            provider_api=provider_api,
-            proofread_mode=proofread_mode,
-        )
+        ai_kwargs = {"provider_api": provider_api, "proofread_mode": proofread_mode}
+        if reasoning_enabled:
+            ai_kwargs["reasoning_enabled"] = True
+
+        result = await proofread_with_ai(text, book, **ai_kwargs)
         return locate_issues(text, result.issues)
 
     logger.info("proofread service using mock issues")
@@ -56,14 +58,16 @@ async def stream_proofread_text(
     session_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = get_settings()
     provider_api = resolve_provider_api(provider_api)
     logger.info(
-        "proofread stream service started text_len=%s provider_api=%s proofread_mode=%s has_api_key=%s session_id=%s",
+        "proofread stream service started text_len=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
         len(text),
         provider_api,
         proofread_mode,
+        reasoning_enabled,
         bool(settings.ai_api_key),
         _mask_session_id(session_id),
     )
@@ -83,12 +87,11 @@ async def stream_proofread_text(
 
     yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Responses API。"})
 
-    async for event in stream_proofread_with_ai(
-        text,
-        book,
-        provider_api=provider_api,
-        proofread_mode=proofread_mode,
-    ):
+    ai_kwargs = {"provider_api": provider_api, "proofread_mode": proofread_mode}
+    if reasoning_enabled:
+        ai_kwargs["reasoning_enabled"] = True
+
+    async for event in stream_proofread_with_ai(text, book, **ai_kwargs):
         if event.event == "result":
             event.data.pop("response_id", None)
             raw_issues = [ProofreadIssue.model_validate(issue) for issue in event.data.get("issues", [])]

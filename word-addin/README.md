@@ -1,6 +1,6 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围。审校完成后先在任务窗格展示结果，用户点击“应用到 Word”后才写回：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；不可定位建议合并为一条范围起点汇总批注。
+`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围，并支持单独开启“深度思考”以控制后端 Chat `reasoning.enabled`。审校完成后先在任务窗格展示结果，用户点击“应用到 Word”后才写回：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；不可定位建议合并为一条范围起点汇总批注。
 
 ## 目录结构
 
@@ -53,7 +53,7 @@ word-addin/
 
 - `src/taskpane/taskpane.html`
   - 任务窗格 HTML。
-  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、审校范围切换、“AI 审校”、“应用到 Word”、审校结果展示区域、历史记录管理按钮。
+  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、深度思考开关、Responses/Chat API 切换、批注/修订模式切换、审校范围切换、“AI 审校”、“应用到 Word”、审校结果展示区域、历史记录管理按钮。
   - 当前 MVP 不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
 
 - `src/taskpane/taskpane.css`

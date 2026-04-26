@@ -23,7 +23,14 @@ PARAGRAPH_BOUNDARIES = ("\n\n", "\r\n\r\n", "\n", "\r")
 SENTENCE_BOUNDARIES = ("。", "！", "？", "；", ".", "!", "?", ";")
 
 ProofreadChunkCallable = Callable[
-    [str, BookInfo, str | None, proofread_service.ProviderAPI | None, proofread_service.ProofreadMode],
+    [
+        str,
+        BookInfo,
+        str | None,
+        proofread_service.ProviderAPI | None,
+        proofread_service.ProofreadMode,
+        bool,
+    ],
     Awaitable[list[ProofreadIssue]],
 ]
 
@@ -107,13 +114,23 @@ async def proofread_chunks(
 
     for chunk in chunks:
         try:
-            chunk_issues = await proofread_chunk(
-                chunk.text,
-                request.book,
-                request.session_id,
-                request.provider_api,
-                request.proofread_mode,
-            )
+            if request.reasoning_enabled:
+                chunk_issues = await proofread_chunk(
+                    chunk.text,
+                    request.book,
+                    request.session_id,
+                    request.provider_api,
+                    request.proofread_mode,
+                    True,
+                )
+            else:
+                chunk_issues = await proofread_chunk(
+                    chunk.text,
+                    request.book,
+                    request.session_id,
+                    request.provider_api,
+                    request.proofread_mode,
+                )
         except Exception:
             failed_chunks += 1
             logger.exception("chunk proofread failed chunk_index=%s", chunk.index)

@@ -206,8 +206,27 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
+    assert call["json"]["reasoning"] == {"enabled": False}
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
     assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
+
+
+def test_proofread_with_ai_can_enable_chat_reasoning(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            provider_api="chat",
+            reasoning_enabled=True,
+            settings=settings(),
+        )
+    )
+
+    assert FakeAsyncClient.calls[0]["json"]["reasoning"] == {"enabled": True}
 
 
 def test_proofread_with_ai_raises_for_responses_unsupported(monkeypatch):

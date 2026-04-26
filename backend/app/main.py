@@ -59,11 +59,12 @@ async def create_ai_session() -> SessionResponse:
 @app.post("/api/proofread", response_model=ProofreadResponse)
 async def proofread(request: ProofreadRequest) -> ProofreadResponse:
     logger.info(
-        "proofread request received text_len=%s session_id=%s provider_api=%s proofread_mode=%s",
+        "proofread request received text_len=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         _mask_session_id(request.session_id),
         request.provider_api or "default",
         request.proofread_mode,
+        request.reasoning_enabled,
     )
     _debug_log_json("proofread request body", request.model_dump())
     try:
@@ -73,6 +74,7 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
             session_id=request.session_id,
             provider_api=request.provider_api,
             proofread_mode=request.proofread_mode,
+            reasoning_enabled=request.reasoning_enabled,
         )
     except AIClientError as exc:
         logger.warning(
@@ -104,11 +106,12 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
         )
 
     logger.info(
-        "proofread stream accepted text_len=%s session_id=%s provider_api=%s proofread_mode=%s",
+        "proofread stream accepted text_len=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         _mask_session_id(request.session_id),
         provider_api,
         request.proofread_mode,
+        request.reasoning_enabled,
     )
     _debug_log_json("proofread stream request body", request.model_dump())
     return StreamingResponse(
@@ -125,13 +128,14 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
 @app.post("/api/proofread/chunked", response_model=ChunkedProofreadResult)
 async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s",
+        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
         _mask_session_id(request.session_id),
         request.provider_api or "default",
         request.proofread_mode,
+        request.reasoning_enabled,
     )
     _debug_log_json("chunked proofread request body", request.model_dump())
     response = await chunking.proofread_chunked(request)
@@ -149,13 +153,14 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
 @app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
 async def create_proofread_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s",
+        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
         _mask_session_id(request.session_id),
         request.provider_api or "default",
         request.proofread_mode,
+        request.reasoning_enabled,
     )
     _debug_log_json("proofread task request body", request.model_dump())
     return task_service.create_task(request)
@@ -197,12 +202,18 @@ async def proofread_task_events(task_id: str) -> StreamingResponse:
 
 async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[str]:
     try:
+        stream_kwargs = {
+            "session_id": request.session_id,
+            "provider_api": request.provider_api,
+            "proofread_mode": request.proofread_mode,
+        }
+        if request.reasoning_enabled:
+            stream_kwargs["reasoning_enabled"] = True
+
         async for event in proofread_service.stream_proofread_text(
             request.text,
             request.book,
-            session_id=request.session_id,
-            provider_api=request.provider_api,
-            proofread_mode=request.proofread_mode,
+            **stream_kwargs,
         ):
             if event.event == "result":
                 issues = event.data.get("issues", [])

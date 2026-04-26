@@ -67,6 +67,7 @@ Request:
   "session_id": "session_xxx",
   "provider_api": "responses",
   "proofread_mode": "fast",
+  "reasoning_enabled": false,
   "context": {
     "source": "word-addin"
   }
@@ -99,6 +100,7 @@ Response:
 - `book`：必填。`title` 为书名，去掉首尾空白后不能为空；`introduction` 为可选书籍介绍，空白会归一为 `null`。缺少 `book` 或空书名返回 422。
 - `provider_api`：可选，支持 `responses`、`chat`；未传时使用后端环境变量 `AI_PROVIDER_API`，默认 `responses`。
 - `proofread_mode`：可选，支持 `fast`、`thinking`；默认 `fast`。`fast` 只抓明显问题、优先响应速度；`thinking` 更细审、使用更高输出上限，优先审校质量。两种模式均不限制返回条数。
+- `reasoning_enabled`：可选布尔值，默认 `false`。启用时，Chat Completions 请求携带 `"reasoning": {"enabled": true}`；关闭时携带 `"reasoning": {"enabled": false}`。该开关独立于 `proofread_mode`，不改变 prompt 文案。
 - 后端会把书名和书籍介绍作为 prompt 背景传给 AI；书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回可定位 issue。
 - AI 原始输出不包含 `start`、`end`、`comment`，只包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。
 - `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
@@ -274,7 +276,7 @@ BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
 
-`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、无法清理解析的非 JSON 返回、schema 不匹配统一转换为后端 502；模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符时，后端会先清理再做 schema 校验。`AI_FAST_MAX_TOKENS` 用于快速审校，`AI_THINKING_MAX_TOKENS` 用于深度审校。
+`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。Chat 模式根据 `reasoning_enabled` 写入 `reasoning.enabled`，默认关闭。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、无法清理解析的非 JSON 返回、schema 不匹配统一转换为后端 502；模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符时，后端会先清理再做 schema 校验。`AI_FAST_MAX_TOKENS` 用于快速审校，`AI_THINKING_MAX_TOKENS` 用于深度审校。
 `BACKEND_LOG_LEVEL` 默认 `INFO`，用于打印请求模式、文本长度、provider 状态、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因，不打印完整请求正文。AI 返回报文可能包含 `original` 原文摘录。临时设为 `DEBUG` 时会额外打印后端请求体和 AI provider 请求报文，可能包含选区文本、书名、介绍和 AI 输出；任何模式都不得打印 API Key、`Authorization` 或 Bearer token。
 
 本地 oMLX：
@@ -335,6 +337,7 @@ npm run dev-server
 - `original` 与 `replacement` 去掉所有空白后完全一致的 issue 会被后端过滤。
 - 重复 `original` 会按 issue 顺序定位不同 occurrence；找不到 `original` 时返回 `start/end: null`。
 - `proofread_mode=fast` 与 `proofread_mode=thinking` 使用不同 prompt 和 token 上限。
+- `reasoning_enabled` 默认关闭；开启时 Chat 请求体包含 `"reasoning": {"enabled": true}`，关闭时包含 `"reasoning": {"enabled": false}`。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
 - 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。

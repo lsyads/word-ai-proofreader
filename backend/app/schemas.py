@@ -33,6 +33,7 @@ class ProofreadRequest(BaseModel):
     session_id: str | None = None
     provider_api: Literal["responses", "chat"] | None = None
     proofread_mode: Literal["fast", "thinking"] = "fast"
+    reasoning_enabled: bool = False
     context: dict[str, Any] | None = None
 
     @field_validator("text")

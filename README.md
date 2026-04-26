@@ -20,7 +20,7 @@
 - 插件可选择审校范围：“当前选区”或“全书正文”。全书正文以 `document.body.text` 为范围，暂不包含页眉页脚、脚注、文本框等非正文内容。
 - 当前选区不超过 5000 字时沿用单段审校；当前选区超过 5000 字或选择全书正文时，会自动按约 3000 字分块审校。
 - 插件提供书籍信息输入：书名必填，介绍可选，并保存在本地用于同一本书连续审校；书籍信息会作为 prompt 背景传给后端。
-- 插件可切换“快速审校/深度审校”和 `Responses/Chat` API。
+- 插件可切换“快速审校/深度审校”、`Responses/Chat` API，并可单独开启“深度思考”；深度思考默认关闭，Chat 模式下对应后端 `reasoning.enabled`。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
 - 插件调用后端 `POST /api/proofread`。
 - Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。

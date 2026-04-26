@@ -117,7 +117,6 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 
 async def proofread_with_ai(
     text: str,
-    previous_response_id: str | None = None,
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -133,16 +132,14 @@ async def proofread_with_ai(
     payload = _build_responses_payload(
         text,
         settings,
-        previous_response_id=previous_response_id,
         proofread_mode=proofread_mode,
     )
     logger.info(
-        "AI responses request started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s has_previous_response=%s",
+        "AI responses request started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
         settings.openai_model,
         proofread_mode,
         len(text),
         payload["max_output_tokens"],
-        bool(previous_response_id),
     )
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
@@ -171,7 +168,6 @@ async def proofread_with_ai(
 
 async def stream_proofread_with_ai(
     text: str,
-    previous_response_id: str | None = None,
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -187,18 +183,16 @@ async def stream_proofread_with_ai(
     payload = _build_responses_payload(
         text,
         settings,
-        previous_response_id=previous_response_id,
         proofread_mode=proofread_mode,
         stream=True,
     )
     output_text = ""
     logger.info(
-        "AI responses stream started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s has_previous_response=%s",
+        "AI responses stream started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
         settings.openai_model,
         proofread_mode,
         len(text),
         payload["max_output_tokens"],
-        bool(previous_response_id),
     )
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
@@ -217,7 +211,7 @@ async def stream_proofread_with_ai(
                 logger.debug("AI responses stream event event=%s", event_name)
 
                 if event_name == "response.created":
-                    yield AIStreamEvent("status", {"stage": "calling_ai", "message": "AI 原生 session 已创建响应。"})
+                    yield AIStreamEvent("status", {"stage": "calling_ai", "message": "AI 已创建响应。"})
                     continue
 
                 if event_name == "response.in_progress":
@@ -301,7 +295,6 @@ async def _proofread_with_chat(
 def _build_responses_payload(
     text: str,
     settings: Settings,
-    previous_response_id: str | None = None,
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
 ) -> dict[str, Any]:
@@ -312,9 +305,6 @@ def _build_responses_payload(
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
     }
-
-    if previous_response_id:
-        payload["previous_response_id"] = previous_response_id
 
     if stream:
         payload["stream"] = True
@@ -335,7 +325,8 @@ def _build_chat_payload(
         ],
         "temperature": 0.2,
         "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
-        "response_format": {"type": "json_object"},
+        "reasoning": {"enabled": False},
+        # "response_format": {"type": "json_object"},
     }
 
 
@@ -383,8 +374,8 @@ def _raise_for_provider_error(status_code: int, provider_api: ProviderAPI = "res
         return
 
     if provider_api == "responses" and status_code in {400, 404, 405}:
-        logger.warning("AI provider native responses API unsupported status_code=%s", status_code)
-        raise AIClientError(f"AI provider does not support native Responses session API (HTTP {status_code})")
+        logger.warning("AI provider responses API unsupported status_code=%s", status_code)
+        raise AIClientError(f"AI provider does not support Responses API (HTTP {status_code})")
 
     logger.warning("AI provider returned error status_code=%s provider_api=%s", status_code, provider_api)
     raise AIClientError(f"AI provider returned HTTP {status_code}")

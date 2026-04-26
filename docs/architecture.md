@@ -15,21 +15,15 @@ Word 插件任务窗格
   -> Word 插件按应用方式插入原文片段批注或生成 Word 修订
 ```
 
-当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。Responses 模式使用 provider 原生 session，后端只保存轻量映射：
-
-```text
-session_id -> last_response_id
-```
-
-同一个 `session_id` 的后续 Responses 审校请求会把上一轮 AI provider 返回的 `response.id` 作为 `previous_response_id` 传给 `/v1/responses`，真正上下文续接由 provider 完成。Chat 模式第一版是单轮审校，不维护 provider 上下文。
+当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
 ## Word 插件到后端
 
-### 1. 创建 AI session
+### 1. 创建本地 session
 
-插件打开时会先创建一个 AI 对话。点击“新建对话”时，也会调用同一个接口创建新的 AI session。
+插件打开时会先创建一个本地 session。点击“新建对话”时，也会调用同一个接口创建新的 session。该 ID 用于兼容插件流程和历史记录，不承担 AI 上下文续接。
 
 Request:
 
@@ -46,7 +40,7 @@ Response:
 }
 ```
 
-插件保存当前 `session_id`，后续审校请求都会带上它。
+插件保存当前 `session_id`，后续审校请求可以带上它。后端不会用该 ID 查找上一轮 AI 响应。
 
 ### 2. 普通审校接口
 
@@ -98,6 +92,8 @@ AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会�
 
 `replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
+如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明该 issue 只是加/删/改空白，后端会在返回给 Word 插件前过滤掉。
+
 ### 3. 流式审校接口
 
 插件在 Responses 模式使用流式接口展示运行过程；Chat 模式不走 SSE，直接使用普通接口。
@@ -129,7 +125,7 @@ event: status
 data: {"stage":"received","message":"已接收选区文本。"}
 
 event: status
-data: {"stage":"calling_ai","message":"正在调用 AI 原生 Responses session。"}
+data: {"stage":"calling_ai","message":"正在调用 AI Responses API。"}
 
 event: status
 data: {"stage":"normalizing","message":"已收到 AI 输出，正在解析结构化结果。"}
@@ -182,12 +178,11 @@ Content-Type: application/json
     "format": {
       "type": "json_object"
     }
-  },
-  "previous_response_id": "resp_xxx"
+  }
 }
 ```
 
-第一次审校没有 `previous_response_id`。同一个 `session_id` 的第二次及以后审校会带上上一轮 provider 返回的 `response.id`。
+每次审校都是独立请求，不携带 `previous_response_id`。
 
 Provider Response:
 
@@ -218,7 +213,7 @@ Provider Response:
 }
 ```
 
-AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析成功后，后端按 `original` 定位并填充 `start/end`，再把 provider 的 `id` 写入当前 session 的 `last_response_id`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
 
 ### 2. Chat Completions 调用
 
@@ -245,7 +240,7 @@ Content-Type: application/json
 }
 ```
 
-Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/chat/completions`，从 `choices[0].message.content` 读取精简 issues JSON。后端会照常计算 `start/end`，但不会写入或读取 `previous_response_id`，也不会把 Chat 结果包装成 SSE。
+Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/chat/completions`，从 `choices[0].message.content` 读取精简 issues JSON。后端会照常过滤纯空白差异 issue 并计算 `start/end`，不会写入或读取 `previous_response_id`，也不会把 Chat 结果包装成 SSE。
 
 ### 3. 快速/深度审校
 
@@ -334,4 +329,4 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端使用 `AbortController` 中断当前请求。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录不承担 AI 上下文续接；Responses 上下文只由 provider `previous_response_id` 维护。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。

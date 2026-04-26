@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Literal
 
 from app.schemas import ProofreadIssue
 from app.services.ai_client import AIClientError, AIStreamEvent, proofread_with_ai, stream_proofread_with_ai
-from app.services.sessions import SessionNotFoundError, get_last_response_id, update_last_response_id
 from app.settings import get_settings
 
 ProviderAPI = Literal["responses", "chat"]
@@ -32,33 +32,16 @@ async def proofread_text(
     )
 
     if settings.ai_api_key:
-        previous_response_id = None
-        if provider_api == "responses":
-            try:
-                previous_response_id = get_last_response_id(session_id)
-            except SessionNotFoundError as exc:
-                logger.warning("proofread service session not found session_id=%s", _mask_session_id(session_id))
-                raise AIClientError("AI session was not found. Please create a new session.") from exc
-
         logger.info(
-            "proofread service calling AI provider provider_api=%s proofread_mode=%s has_previous_response=%s",
+            "proofread service calling AI provider provider_api=%s proofread_mode=%s",
             provider_api,
             proofread_mode,
-            bool(previous_response_id),
         )
         result = await proofread_with_ai(
             text,
-            previous_response_id=previous_response_id,
             provider_api=provider_api,
             proofread_mode=proofread_mode,
         )
-        if provider_api == "responses":
-            update_last_response_id(session_id, result.response_id)
-            logger.info(
-                "proofread service updated session response_id_present=%s session_id=%s",
-                bool(result.response_id),
-                _mask_session_id(session_id),
-            )
         return locate_issues(text, result.issues)
 
     logger.info("proofread service using mock issues")
@@ -95,33 +78,18 @@ async def stream_proofread_text(
         yield AIStreamEvent("status", {"stage": "completed", "message": "审校完成。"})
         return
 
-    previous_response_id = None
-    try:
-        previous_response_id = get_last_response_id(session_id)
-    except SessionNotFoundError as exc:
-        logger.warning("proofread stream service session not found session_id=%s", _mask_session_id(session_id))
-        raise AIClientError("AI session was not found. Please create a new session.") from exc
-
-    yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
+    yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Responses API。"})
 
     async for event in stream_proofread_with_ai(
         text,
-        previous_response_id=previous_response_id,
         provider_api=provider_api,
         proofread_mode=proofread_mode,
     ):
         if event.event == "result":
-            response_id = event.data.pop("response_id", None)
+            event.data.pop("response_id", None)
             raw_issues = [ProofreadIssue.model_validate(issue) for issue in event.data.get("issues", [])]
             located_issues = locate_issues(text, raw_issues)
             event.data["issues"] = [issue.model_dump() for issue in located_issues]
-            if provider_api == "responses":
-                update_last_response_id(session_id, response_id if isinstance(response_id, str) else None)
-                logger.info(
-                    "proofread stream service updated session response_id_present=%s session_id=%s",
-                    isinstance(response_id, str),
-                    _mask_session_id(session_id),
-                )
 
         yield event
 
@@ -155,8 +123,14 @@ def resolve_provider_api(provider_api: ProviderAPI | None) -> ProviderAPI:
 def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssue]:
     search_from_by_original: dict[str, int] = {}
     located: list[ProofreadIssue] = []
+    filtered_count = 0
 
     for issue in issues:
+        if _is_whitespace_only_change(issue):
+            filtered_count += 1
+            logger.debug("issue filtered as whitespace-only change issue_id=%s", issue.id)
+            continue
+
         original = issue.original.strip()
         start: int | None = None
         end: int | None = None
@@ -183,12 +157,24 @@ def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssu
         )
 
     logger.info(
-        "issue location completed issue_count=%s located_issue_count=%s unlocated_issue_count=%s",
-        len(located),
+        "issue location completed issue_count=%s filtered_whitespace_issue_count=%s located_issue_count=%s unlocated_issue_count=%s",
+        len(issues),
+        filtered_count,
         sum(1 for issue in located if issue.start is not None and issue.end is not None),
         sum(1 for issue in located if issue.start is None or issue.end is None),
     )
     return located
+
+
+def _is_whitespace_only_change(issue: ProofreadIssue) -> bool:
+    if issue.replacement is None:
+        return False
+
+    return _remove_all_whitespace(issue.original) == _remove_all_whitespace(issue.replacement)
+
+
+def _remove_all_whitespace(value: str) -> str:
+    return re.sub(r"\s+", "", value)
 
 
 def _mask_session_id(session_id: str | None) -> str:

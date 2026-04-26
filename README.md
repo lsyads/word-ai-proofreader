@@ -16,13 +16,13 @@
 ## 当前 MVP 能力
 
 - Word 任务窗格提供一个正式入口：“AI 审校”。
-- 插件打开时会创建一个 AI 对话 session；点击“新建对话”会创建新的 provider 原生 Responses session。
+- 插件打开时会创建一个本地 session；点击“新建对话”会创建新的本地 session。后端不使用 session 续接 AI 上下文。
 - 插件内部读取当前 Word 选区文本。
 - 插件可切换“快速审校/深度审校”和 `Responses/Chat` API。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
 - 插件调用后端 `POST /api/proofread`。
 - Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
-- AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端按 `original` 在选区文本中搜索并计算位置。
+- AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置。
 - 批注模式下，插件对可定位问题逐条在对应原文片段插入批注；修订模式下，插件临时开启 Word 修订跟踪，用 `replacement` 替换可定位原文并生成原生修订；不可定位或无 `replacement` 的问题回退为当前选区汇总批注。
 - 插件支持停止当前审校，并在本地保存最近 20 条审校历史用于回看、清空、另存为 JSON 和导入 JSON。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
@@ -42,7 +42,6 @@ cp .env.example .env
 ```text
 AI_API_KEY=local-omlx-dev-key
 AI_PROVIDER_API=responses
-AI_REQUIRE_NATIVE_SESSION=true
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -56,9 +55,9 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建 AI 对话。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
+当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
 
-API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 和 `previous_response_id` 做 provider 原生 session 续接；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
+API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 
 后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、问题数和定位数量等调试信息，不打印 API Key 或选中文本全文。需要更细定位过程时可临时设为 `DEBUG`。
 
@@ -179,7 +178,7 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 9. 如果选择批注模式且后端返回非空 `issues[]`，确认可定位问题批注在对应原文片段上；不可定位问题会作为 fallback 汇总批注插在当前选区。
 10. 如果选择修订模式，确认有 `replacement` 且可定位的问题会在 Word 审阅面板中显示为可接受/拒绝的修订，运行后原修订跟踪设置会恢复。
 11. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注或修订。
-12. 点击“新建对话”，确认任务窗格清空当前结果，并后续 Responses 请求进入新的 AI session。
+12. 点击“新建对话”，确认任务窗格清空当前结果，并创建新的本地 session。
 13. 审校运行中点击“停止审校”，确认请求停止、不会插入批注或修订，并在历史记录中保存为已停止。
 14. 使用历史记录“清空、另存为、导入”，确认本地历史可管理。
 

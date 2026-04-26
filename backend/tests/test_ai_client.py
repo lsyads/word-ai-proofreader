@@ -130,7 +130,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     FakeAsyncClient.response = FakeResponse(payload=response_payload())
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    result = asyncio.run(proofread_with_ai("这是一段文本。", previous_response_id="resp-prev", settings=settings()))
+    result = asyncio.run(proofread_with_ai("这是一段文本。", settings=settings()))
 
     assert result.issues == [
         ProofreadIssue(
@@ -154,7 +154,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert call["json"]["temperature"] == 0.2
     assert call["json"]["max_output_tokens"] == 16384
     assert call["json"]["text"] == {"format": {"type": "json_object"}}
-    assert call["json"]["previous_response_id"] == "resp-prev"
+    assert "previous_response_id" not in call["json"]
     assert "这是一段文本。" in call["json"]["input"]
     assert "<text>\n这是一段文本。\n</text>" in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
@@ -203,12 +203,12 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
 
 
-def test_proofread_with_ai_raises_for_native_responses_unsupported(monkeypatch):
+def test_proofread_with_ai_raises_for_responses_unsupported(monkeypatch):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(status_code=404, payload={})
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    with pytest.raises(AIClientError, match="native Responses session API"):
+    with pytest.raises(AIClientError, match="Responses API"):
         asyncio.run(proofread_with_ai("文本", settings=settings()))
 
 

@@ -85,7 +85,6 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
 def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -120,7 +119,6 @@ def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
 def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -150,10 +148,49 @@ def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
     assert issue["end"] == 6
 
 
+def test_proofread_filters_whitespace_only_changes(monkeypatch):
+    async def fake_proofread_with_ai(
+        text,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return AIProofreadResult(
+            response_id="resp-1",
+            issues=[
+                ProofreadIssue(
+                    id="ai-issue-space",
+                    category="style",
+                    severity="low",
+                    original="A B",
+                    replacement="AB",
+                    suggestion="删除多余空格。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-typo",
+                    category="typo",
+                    severity="low",
+                    original="错字",
+                    replacement="改字",
+                    suggestion="修正错别字。",
+                ),
+            ],
+        )
+
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+    monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
+
+    response = client.post("/api/proofread", json={"text": "这里有 A B，还有错字。"})
+
+    assert response.status_code == 200
+    issues = response.json()["issues"]
+    assert [issue["id"] for issue in issues] == ["ai-issue-typo"]
+    assert issues[0]["start"] == 10
+    assert issues[0]["end"] == 12
+
+
 def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -189,7 +226,6 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
 def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -220,12 +256,10 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
 def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
         assert text == "这是一段需要真实审校的文本。"
-        assert previous_response_id is None
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
         return AIProofreadResult(
@@ -255,17 +289,17 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
     assert response.json()["issues"][0]["id"] == "ai-issue-1"
 
 
-def test_proofread_sends_previous_response_id_for_same_session(monkeypatch):
-    previous_response_ids = []
+def test_proofread_responses_mode_does_not_require_session(monkeypatch):
+    call_count = 0
 
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
-        previous_response_ids.append(previous_response_id)
-        return AIProofreadResult(response_id=f"resp-{len(previous_response_ids)}", issues=[])
+        nonlocal call_count
+        call_count += 1
+        return AIProofreadResult(response_id=f"resp-{call_count}", issues=[])
 
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
@@ -274,24 +308,24 @@ def test_proofread_sends_previous_response_id_for_same_session(monkeypatch):
 
     first = client.post("/api/proofread", json={"text": "第一段文本。", "session_id": session_id})
     second = client.post("/api/proofread", json={"text": "第二段文本。", "session_id": session_id})
+    third = client.post("/api/proofread", json={"text": "第三段文本。", "session_id": "missing-session"})
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert previous_response_ids == [None, "resp-1"]
+    assert third.status_code == 200
+    assert call_count == 3
 
 
-def test_proofread_chat_mode_does_not_require_or_update_native_session(monkeypatch):
+def test_proofread_chat_mode_does_not_require_session(monkeypatch):
     calls = []
 
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
         calls.append(
             {
-                "previous_response_id": previous_response_id,
                 "provider_api": provider_api,
                 "proofread_mode": proofread_mode,
             }
@@ -313,15 +347,14 @@ def test_proofread_chat_mode_does_not_require_or_update_native_session(monkeypat
     assert first.status_code == 200
     assert second.status_code == 200
     assert calls == [
-        {"previous_response_id": None, "provider_api": "chat", "proofread_mode": "thinking"},
-        {"previous_response_id": None, "provider_api": "chat", "proofread_mode": "fast"},
+        {"provider_api": "chat", "proofread_mode": "thinking"},
+        {"provider_api": "chat", "proofread_mode": "fast"},
     ]
 
 
 def test_proofread_converts_ai_client_error_to_502(monkeypatch):
     async def fake_proofread_with_ai(
         text,
-        previous_response_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -348,7 +381,7 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
         yield AIStreamEvent("status", {"stage": "received", "message": "已接收选区文本。"})
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
+        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Responses API。"})
         yield AIStreamEvent("status", {"stage": "normalizing", "message": "已收到 AI 输出，正在解析结构化结果。"})
         yield AIStreamEvent(
             "result",
@@ -406,6 +439,31 @@ def test_proofread_stream_rejects_chat_mode():
     }
 
 
+def test_proofread_stream_does_not_require_session(monkeypatch):
+    async def fake_stream_proofread_with_ai(
+        text,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        assert text == "这是一段文本。"
+        assert provider_api == "responses"
+        assert proofread_mode == "fast"
+        yield AIStreamEvent("result", {"issues": [], "response_id": "resp-1"})
+
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+    monkeypatch.setattr(proofread_service, "stream_proofread_with_ai", fake_stream_proofread_with_ai)
+
+    response = client.post(
+        "/api/proofread/stream",
+        json={"text": "这是一段文本。", "session_id": "missing-session"},
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    assert [event["event"] for event in events] == ["status", "status", "result"]
+    assert events[2]["data"] == {"issues": []}
+
+
 def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
     async def fake_stream_proofread_text(
         text,
@@ -414,7 +472,7 @@ def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
         proofread_mode="fast",
     ):
         yield AIStreamEvent("status", {"stage": "received", "message": "已接收选区文本。"})
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI 原生 Responses session。"})
+        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Responses API。"})
         raise AIClientError("AI provider returned HTTP 500")
 
     monkeypatch.setattr(proofread_service, "stream_proofread_text", fake_stream_proofread_text)

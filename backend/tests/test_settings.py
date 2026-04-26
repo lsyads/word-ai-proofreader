@@ -6,7 +6,6 @@ def test_settings_defaults():
 
     assert settings.ai_api_key == ""
     assert settings.ai_provider_api == "responses"
-    assert settings.ai_require_native_session is True
     assert settings.openai_api_base_url == "https://api.openai.com/v1"
     assert settings.openai_model == "gpt-4o-mini"
     assert settings.ai_request_timeout_seconds == 30

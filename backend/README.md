@@ -35,7 +35,7 @@ backend/
 - `app/schemas.py`
   - 定义 API 请求和响应模型。
   - `ProofreadRequest` 校验 `text` 不能为空。
-  - `ProofreadRequest` 可携带 `session_id` 续接 provider 原生 Responses session，并可携带 `provider_api`、`proofread_mode`。
+  - `ProofreadRequest` 可携带 `session_id`、`provider_api`、`proofread_mode`；`session_id` 仅用于兼容插件请求，不用于续接 AI 上下文。
   - `ProofreadIssue` 定义单条审校问题结构。
   - `ProofreadResponse` 固定返回 `{ "issues": [...] }`。
   - `SessionResponse` 定义本地 session ID 和创建时间。
@@ -51,17 +51,18 @@ backend/
   - 未配置 `AI_API_KEY` 时返回 mock issue。
   - 配置 `AI_API_KEY` 时按 `provider_api` 调用 Responses 或 Chat。
   - 对 mock/AI 返回的 issues 统一按 `original` 搜索并填充 `start/end`。
-  - Responses 模式读取并更新当前 session 的 provider `response.id`。
+  - 返回给插件前过滤纯空白差异 issue：`original` 与 `replacement` 去掉所有空白后完全一致时不返回。
+  - 每次审校都是独立请求，不读取或写入上一轮 provider response ID。
 
 - `app/services/ai_client.py`
   - OpenAI 兼容 Responses API 与 Chat Completions client。
-  - Responses 模式使用 `/v1/responses`、`previous_response_id` 和 `text.format.type=json_object`。
-  - Chat 模式使用 `/v1/chat/completions` 和 `response_format.type=json_object`，第一版不维护 provider session。
+  - Responses 模式使用 `/v1/responses` 和 `text.format.type=json_object`，不发送 `previous_response_id`。
+  - Chat 模式使用 `/v1/chat/completions` 和 `response_format.type=json_object`。
   - 统一将 provider HTTP 错误、非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
-  - 维护轻量内存 session 映射。
-  - 保存 `session_id -> last_response_id`，真正上下文由 provider 原生 Responses session 续接。
+  - 创建轻量本地 session ID，用于兼容当前插件启动和“新建对话”流程。
+  - 不保存 AI 上下文、不保存 provider `response.id`。
 
 - `requirements.txt`
   - 后端 Python 依赖清单。
@@ -124,7 +125,7 @@ backend/
 }
 ```
 
-AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
+AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
 
 ### `POST /api/proofread/stream`
 
@@ -154,7 +155,7 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 
 ### `POST /api/sessions`
 
-创建新的 AI 对话 session。后端只保存本地 `session_id` 到 provider `response.id` 的映射；后续审校请求携带该 `session_id`，后端会把上一轮 provider `response.id` 作为 `previous_response_id` 发给 `/v1/responses`。
+创建新的本地 session ID，用于兼容插件启动和“新建对话”流程。后端不保存 AI 上下文，也不会把上一轮 provider `response.id` 作为 `previous_response_id` 发给 `/v1/responses`；每次审校都是独立请求。
 
 响应：
 
@@ -172,7 +173,6 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 ```text
 AI_API_KEY=local-omlx-dev-key
 AI_PROVIDER_API=responses
-AI_REQUIRE_NATIVE_SESSION=true
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -190,7 +190,6 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 - `AI_PROVIDER_API=responses` 表示默认使用 `/v1/responses`；也可在请求中传 `provider_api=chat` 临时切到 `/chat/completions`。
 - `AI_FAST_MAX_TOKENS` 和 `AI_THINKING_MAX_TOKENS` 分别控制快速审校与深度审校的输出上限。
 - `BACKEND_LOG_LEVEL` 控制后端日志级别，默认 `INFO`；调试定位细节时可设为 `DEBUG`。
-- `AI_REQUIRE_NATIVE_SESSION=true` 表示 Responses 模式下 provider 不支持原生 session 时明确报错，不静默降级。
 - 本地真实 AI 联调推荐先运行仓库根目录的 `./scripts/start-omlx.sh`，默认 oMLX 地址为 `http://127.0.0.1:8001/v1`，并会将 `Qwen3.6-35B-A3B-4.4bit-msq` 配置为 default + pinned 以便启动时预加载。
 - `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - `BACKEND_CORS_ORIGINS` 使用英文逗号分隔。
@@ -222,7 +221,8 @@ python -m pytest -q
 - mock fallback 可用。
 - 后端能按 `original` 计算 `start/end`，重复片段按顺序定位，找不到时返回 `null`。
 - 后端能保留有效 `replacement`，并将缺失或空字符串 `replacement` 归一为 `null`。
+- 后端能过滤纯空白差异 issue。
 - 真实 AI 分支 Responses API 与 Chat Completions 请求 payload 正确。
-- 同一 session 的第二次审校会带 `previous_response_id`。
+- Responses 请求不会携带 `previous_response_id`，同一 session 的多次审校也互不续接上下文。
 - AI provider 异常不会泄露敏感信息，并统一返回 502。
 - 流式审校接口会返回阶段事件、最终 `result` 事件或 `error` 事件。

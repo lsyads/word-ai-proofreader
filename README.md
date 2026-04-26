@@ -1,6 +1,6 @@
 # Word AI 审校助手
 
-面向出版社责任编辑的 Word AI 审校助手。当前 MVP 目标是在 Word 中选中一段文字，点击“AI 审校”，调用 FastAPI 后端返回结构化审校问题和原文位置，并把审校建议作为 Word 批注插入对应原文片段，或在修订模式下生成可接受/拒绝的 Word 修订。
+面向出版社责任编辑的 Word AI 审校助手。
 
 ## 项目结构
 
@@ -10,7 +10,7 @@
 ├── scripts/      # 本地开发辅助脚本
 ├── word-addin/   # Office.js + TypeScript + Webpack 的 Word 插件
 ├── AGENTS.md     # 项目协作约定
-└── spec.md       # MVP 技术方案和开发计划
+└── spec.md       # 技术方案和开发计划
 ```
 
 ## 当前 MVP 能力

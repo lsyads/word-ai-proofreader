@@ -1,6 +1,6 @@
 # Backend README
 
-`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区文本，返回结构化审校问题，并按 `original` 计算每条问题在选区文本中的 `start/end`。issue 中的 `replacement` 表示可直接替换原文的新文本，供 Word 插件修订模式使用。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
+`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区或全书正文文本，返回结构化审校问题，并按 `original` 计算每条问题在单段或分块文本中的位置。分块任务会额外返回 `global_start/global_end`，供 Word 插件在长选区和全书正文中定位批注或修订。issue 中的 `replacement` 表示可直接替换原文的新文本，供 Word 插件修订模式使用。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
 
 ## 目录结构
 
@@ -14,7 +14,9 @@ backend/
 │   └── services/
 │       ├── __init__.py
 │       ├── ai_client.py
+│       ├── chunking.py
 │       ├── proofread.py
+│       ├── tasks.py
 │       └── sessions.py
 ├── tests/
 │   ├── test_ai_client.py
@@ -28,7 +30,7 @@ backend/
 - `app/main.py`
   - FastAPI 应用入口。
   - 注册 CORS 中间件。
-  - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread` 和 `POST /api/proofread/stream`。
+  - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread`、`POST /api/proofread/stream`、`POST /api/proofread/chunked` 和分块任务接口。
   - 将 AI client 抛出的 `AIClientError` 转换为 HTTP 502。
   - 流式接口仅用于 Responses 模式，使用 SSE 返回阶段进度、最终结果或错误事件；Chat 模式使用普通接口。
 
@@ -39,6 +41,7 @@ backend/
   - `ProofreadRequest` 可携带 `session_id`、`provider_api`、`proofread_mode`；`session_id` 仅用于兼容插件请求，不用于续接 AI 上下文。
   - `ProofreadIssue` 定义单条审校问题结构。
   - `ProofreadResponse` 固定返回 `{ "issues": [...] }`。
+  - `ChunkedProofreadRequest`、`ChunkedProofreadIssue`、`ChunkedProofreadResult` 定义 V2 分块审校和异步任务结构。
   - `SessionResponse` 定义本地 session ID 和创建时间。
 
 - `app/settings.py`
@@ -54,6 +57,18 @@ backend/
   - 对 mock/AI 返回的 issues 统一按 `original` 搜索并填充 `start/end`。
   - 返回给插件前过滤纯空白差异 issue：`original` 与 `replacement` 去掉所有空白后完全一致时不返回。
   - 每次审校都是独立请求，不读取或写入上一轮 provider response ID。
+
+- `app/services/chunking.py`
+  - V2 分块审校服务。
+  - 当前选区超过 5000 字时按约 3000 字分块；全书正文始终按约 3000 字分块。
+  - 优先在段落换行、句末标点附近切分；找不到边界时硬切。
+  - 每个 chunk 复用 `proofread_text`，并把 chunk 内 `start/end` 转换为全文 `global_start/global_end`。
+
+- `app/services/tasks.py`
+  - V2 内存异步任务服务。
+  - 使用模块级内存 dict 保存任务状态、进度、聚合结果和 SSE 事件。
+  - 顺序处理 chunk；支持查询、SSE 订阅和取消。
+  - 任务仅用于本地运行期，服务重启后不可恢复。
 
 - `app/services/ai_client.py`
   - OpenAI 兼容 Responses API 与 Chat Completions client。
@@ -71,7 +86,11 @@ backend/
 
 - `tests/test_api.py`
   - API 层测试。
-  - 覆盖健康检查、空文本校验、mock fallback、真实 AI 分支调用、AI 错误转 502。
+  - 覆盖健康检查、空文本校验、mock fallback、真实 AI 分支调用、AI 错误转 502、分块接口和异步任务。
+
+- `tests/test_chunking.py`
+  - 分块服务测试。
+  - 覆盖短文本单段、长选区分块、全书分块、边界切分、硬切和全局位置转换。
 
 - `tests/test_ai_client.py`
   - AI client 单元测试。
@@ -157,6 +176,55 @@ data: {"stage":"completed","message":"审校完成。"}
 ```
 
 AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口的脱敏错误文案。
+
+### `POST /api/proofread/chunked`
+
+同步分块审校接口。请求字段沿用 `/api/proofread`，增加：
+
+```json
+{
+  "scope": "document",
+  "chunk_size": 3000
+}
+```
+
+响应为聚合后的分块结果：
+
+```json
+{
+  "task_id": null,
+  "scope": "document",
+  "status": "succeeded",
+  "total_chunks": 2,
+  "completed_chunks": 2,
+  "failed_chunks": 0,
+  "issues": [
+    {
+      "id": "issue-1",
+      "category": "style",
+      "severity": "medium",
+      "original": "原文片段",
+      "replacement": null,
+      "suggestion": "修改建议说明",
+      "start": 0,
+      "end": 4,
+      "chunk_index": 0,
+      "global_start": 0,
+      "global_end": 4
+    }
+  ],
+  "error_message": null
+}
+```
+
+### 分块任务接口
+
+- `POST /api/proofread/tasks`：创建内存异步任务，返回 `task_id` 和初始进度。
+- `GET /api/proofread/tasks/{task_id}`：查询任务状态、进度和聚合结果。
+- `GET /api/proofread/tasks/{task_id}/events`：订阅任务 SSE，事件包括 `queued`、`running`、`chunk_started`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。
+- `DELETE /api/proofread/tasks/{task_id}`：标记取消任务；当前 chunk 完成后停止后续 chunk。
+
+任务只保存在后端内存中；服务重启或任务被清理后，查询会返回 404。
 
 ### `POST /api/sessions`
 

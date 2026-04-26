@@ -15,9 +15,37 @@ interface ProofreadResponse {
   issues: ProofreadIssue[];
 }
 
+interface ChunkedProofreadIssue extends ProofreadIssue {
+  chunk_index: number;
+  global_start?: number | null;
+  global_end?: number | null;
+}
+
+interface ChunkedProofreadResponse {
+  task_id?: string | null;
+  scope: ProofreadScope;
+  status: TaskState;
+  total_chunks: number;
+  completed_chunks: number;
+  failed_chunks: number;
+  issues: ChunkedProofreadIssue[];
+  error_message?: string | null;
+}
+
 interface ProofreadStatusEvent {
   stage: string;
   message: string;
+  task_id?: string;
+  status?: TaskState;
+  scope?: ProofreadScope;
+  total_chunks?: number;
+  completed_chunks?: number;
+  failed_chunks?: number;
+  issue_count?: number;
+  chunk_index?: number;
+  chunk_start?: number;
+  chunk_end?: number;
+  error_message?: string;
 }
 
 interface SessionResponse {
@@ -30,10 +58,11 @@ interface BookInfo {
   introduction?: string | null;
 }
 
-type TaskState = "idle" | "running" | "succeeded" | "failed" | "cancelled";
+type TaskState = "idle" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
 type ProviderAPI = "responses" | "chat";
 type ProofreadMode = "fast" | "thinking";
 type ApplicationMode = "comment" | "revision";
+type ProofreadScope = "selection" | "document";
 
 interface ProofreadHistoryEntry {
   id: string;
@@ -50,6 +79,12 @@ interface ProofreadHistoryEntry {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   applicationMode: ApplicationMode;
+  scope: ProofreadScope;
+  taskId?: string | null;
+  totalChunks: number;
+  completedChunks: number;
+  failedChunks: number;
+  globalLocatedIssueCount: number;
   issues: ProofreadIssue[];
   insertedComment: boolean;
   errorMessage?: string;
@@ -66,13 +101,17 @@ const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v1";
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v1";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v1";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v1";
+const PROOFREAD_SCOPE_STORAGE_KEY = "word-ai-proofreader-scope-v1";
 const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v1";
 const BOOK_INTRODUCTION_STORAGE_KEY = "word-ai-proofreader-book-introduction-v1";
 const MAX_HISTORY_ENTRIES = 20;
 const CLEAR_HISTORY_CONFIRM_MS = 4000;
+const SELECTION_CHUNK_THRESHOLD = 5000;
+const DEFAULT_CHUNK_SIZE = 3000;
 
 let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
+let currentTaskId: string | null = null;
 let clearHistoryConfirmTimer: number | null = null;
 let isClearHistoryArmed = false;
 let taskState: TaskState = "idle";
@@ -90,6 +129,7 @@ Office.onReady((info) => {
     getSelect("provider-api").onchange = persistControls;
     getSelect("proofread-mode").onchange = persistControls;
     getSelect("application-mode").onchange = persistControls;
+    getSelect("proofread-scope").onchange = persistControls;
     initializeControls();
     renderHistory();
     initializeSession();
@@ -171,24 +211,54 @@ export async function proofreadSelection() {
   currentAbortController = abortController;
   taskState = "running";
   setBusy(true);
-  showMessage("正在审校当前选区...", "default");
+  const scope = getProofreadScope();
+  showMessage(scope === "document" ? "正在审校全书正文..." : "正在审校当前选区...", "default");
   resetProgress();
   renderEmptyResult("审校中...");
 
-  let selectedText = "";
+  let sourceText = "";
 
   try {
-    selectedText = await getSelectedText();
-    const proofreadResult = await requestProofread(
-      selectedText,
-      book,
-      (status) => {
-        showMessage(status.message, "default");
-        appendProgressStatus(status);
-        renderEmptyResult(status.message);
-      },
-      abortController.signal
-    );
+    sourceText = scope === "document" ? await getDocumentBodyText() : await getSelectedText();
+    const useChunkedFlow = scope === "document" || sourceText.length > SELECTION_CHUNK_THRESHOLD;
+    let proofreadResult: ProofreadResponse;
+    let taskId: string | null = null;
+    let totalChunks = 1;
+    let completedChunks = 1;
+    let failedChunks = 0;
+
+    if (useChunkedFlow) {
+      const chunkedResult = await requestChunkedProofreadTask(
+        sourceText,
+        book,
+        scope,
+        (status) => {
+          showMessage(status.message, "default");
+          appendProgressStatus(status);
+          renderEmptyResult(formatProgressResult(status));
+        },
+        abortController.signal
+      );
+      taskId = chunkedResult.task_id || null;
+      totalChunks = chunkedResult.total_chunks;
+      completedChunks = chunkedResult.completed_chunks;
+      failedChunks = chunkedResult.failed_chunks;
+      proofreadResult = {
+        issues: normalizeChunkedIssuesForScope(chunkedResult.issues),
+      };
+    } else {
+      proofreadResult = await requestProofread(
+        sourceText,
+        book,
+        (status) => {
+          showMessage(status.message, "default");
+          appendProgressStatus(status);
+          renderEmptyResult(status.message);
+        },
+        abortController.signal
+      );
+    }
+
     const commentText = formatComment(proofreadResult.issues);
     let applicationSummary: IssueApplicationSummary = {
       commentCount: 0,
@@ -197,20 +267,25 @@ export async function proofreadSelection() {
     };
 
     if (proofreadResult.issues.length > 0) {
-      applicationSummary = await applyIssuesToSelection(selectedText, proofreadResult.issues);
+      applicationSummary = await applyIssuesToScope(sourceText, proofreadResult.issues, scope);
     }
 
     renderResult(proofreadResult.issues, commentText);
     taskState = "succeeded";
     saveHistoryEntry({
       status: taskState,
-      text: selectedText,
+      text: sourceText,
       book,
       issues: proofreadResult.issues,
       insertedComment: applicationSummary.commentCount + applicationSummary.fallbackCount > 0,
       locatedIssueCount: applicationSummary.commentCount + applicationSummary.revisionCount,
       revisionCount: applicationSummary.revisionCount,
       fallbackCount: applicationSummary.fallbackCount,
+      scope,
+      taskId,
+      totalChunks,
+      completedChunks,
+      failedChunks,
     });
 
     showMessage(
@@ -226,13 +301,18 @@ export async function proofreadSelection() {
       renderEmptyResult("已停止审校");
       saveHistoryEntry({
         status: taskState,
-        text: selectedText,
+        text: sourceText,
         book,
         issues: [],
         insertedComment: false,
         locatedIssueCount: 0,
         revisionCount: 0,
         fallbackCount: 0,
+        scope,
+        taskId: currentTaskId,
+        totalChunks: 0,
+        completedChunks: 0,
+        failedChunks: 0,
         errorMessage: "用户停止了当前审校。",
       });
       showMessage("已停止当前审校。", "default");
@@ -244,18 +324,24 @@ export async function proofreadSelection() {
     renderEmptyResult("审校失败");
     saveHistoryEntry({
       status: taskState,
-      text: selectedText,
+      text: sourceText,
       book,
       issues: [],
       insertedComment: false,
       locatedIssueCount: 0,
       revisionCount: 0,
       fallbackCount: 0,
+      scope,
+      taskId: currentTaskId,
+      totalChunks: 0,
+      completedChunks: 0,
+      failedChunks: 0,
       errorMessage: getErrorMessage(error),
     });
     showMessage(`审校失败：${getErrorMessage(error)}`, "error");
   } finally {
     currentAbortController = null;
+    currentTaskId = null;
     setBusy(false);
   }
 }
@@ -263,6 +349,12 @@ export async function proofreadSelection() {
 function cancelCurrentProofread() {
   if (currentAbortController) {
     currentAbortController.abort();
+  }
+
+  if (currentTaskId) {
+    cancelProofreadTask(currentTaskId).catch(() => {
+      // The local abort is enough for UI state; task cancellation is best effort.
+    });
   }
 }
 
@@ -281,6 +373,33 @@ async function getSelectedText(): Promise<string> {
   });
 }
 
+async function getDocumentBodyText(): Promise<string> {
+  return Word.run(async (context) => {
+    const body = context.document.body;
+    body.load("text");
+    await context.sync();
+
+    const bodyText = (body.text || "").trim();
+    if (bodyText.length === 0) {
+      throw new Error("当前 Word 正文为空，无法进行全书审校。");
+    }
+
+    return bodyText;
+  });
+}
+
+async function applyIssuesToScope(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  scope: ProofreadScope
+): Promise<IssueApplicationSummary> {
+  if (scope === "document") {
+    return applyIssuesToDocument(sourceText, issues);
+  }
+
+  return applyIssuesToSelection(sourceText, issues);
+}
+
 async function applyIssuesToSelection(
   selectedText: string,
   issues: ProofreadIssue[]
@@ -290,6 +409,17 @@ async function applyIssuesToSelection(
   }
 
   return insertCommentsForIssues(selectedText, issues);
+}
+
+async function applyIssuesToDocument(
+  documentText: string,
+  issues: ProofreadIssue[]
+): Promise<IssueApplicationSummary> {
+  if (getApplicationMode() === "revision") {
+    return applyDocumentRevisionsForIssues(documentText, issues);
+  }
+
+  return insertDocumentCommentsForIssues(documentText, issues);
 }
 
 async function insertCommentsForIssues(
@@ -413,6 +543,136 @@ async function applyRevisionsForIssues(
 
     if (fallbackIssues.length > 0) {
       selection.insertComment(formatFallbackComment(fallbackIssues));
+      await context.sync();
+    }
+
+    return { commentCount: 0, revisionCount, fallbackCount: fallbackIssues.length };
+  });
+}
+
+async function insertDocumentCommentsForIssues(
+  documentText: string,
+  issues: ProofreadIssue[]
+): Promise<IssueApplicationSummary> {
+  return Word.run(async (context) => {
+    const body = context.document.body;
+    const fallbackIssues: ProofreadIssue[] = [];
+    const pendingSearches: Array<{
+      issue: ProofreadIssue;
+      occurrenceIndex: number;
+      searchResults: Word.RangeCollection;
+    }> = [];
+    let commentCount = 0;
+
+    for (const issue of issues) {
+      if (!isIssueLocatable(documentText, issue)) {
+        fallbackIssues.push(issue);
+        continue;
+      }
+
+      const occurrenceIndex = getOccurrenceIndexBeforeOffset(
+        documentText,
+        issue.original,
+        issue.start as number
+      );
+      const searchResults = body.search(issue.original, {
+        matchCase: true,
+        matchWholeWord: false,
+      });
+      searchResults.load("items");
+      pendingSearches.push({ issue, occurrenceIndex, searchResults });
+    }
+
+    await context.sync();
+
+    pendingSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
+      const targetRange = searchResults.items[occurrenceIndex];
+
+      if (!targetRange) {
+        fallbackIssues.push(issue);
+        return;
+      }
+
+      targetRange.insertComment(formatIssueComment(issue));
+      commentCount += 1;
+    });
+
+    if (fallbackIssues.length > 0) {
+      body.getRange().insertComment(formatFallbackComment(fallbackIssues));
+    }
+
+    await context.sync();
+    return { commentCount, revisionCount: 0, fallbackCount: fallbackIssues.length };
+  });
+}
+
+async function applyDocumentRevisionsForIssues(
+  documentText: string,
+  issues: ProofreadIssue[]
+): Promise<IssueApplicationSummary> {
+  return Word.run(async (context) => {
+    const document = context.document;
+    const body = document.body;
+    const fallbackIssues: ProofreadIssue[] = [];
+    const pendingSearches: Array<{
+      issue: ProofreadIssue;
+      occurrenceIndex: number;
+      searchResults: Word.RangeCollection;
+    }> = [];
+    let revisionCount = 0;
+
+    document.load("changeTrackingMode");
+
+    for (const issue of issues) {
+      if (!isIssueLocatable(documentText, issue) || !hasReplacement(issue)) {
+        fallbackIssues.push(issue);
+        continue;
+      }
+
+      const occurrenceIndex = getOccurrenceIndexBeforeOffset(
+        documentText,
+        issue.original,
+        issue.start as number
+      );
+      const searchResults = body.search(issue.original, {
+        matchCase: true,
+        matchWholeWord: false,
+      });
+      searchResults.load("items");
+      pendingSearches.push({ issue, occurrenceIndex, searchResults });
+    }
+
+    await context.sync();
+
+    const originalTrackingMode = document.changeTrackingMode;
+
+    try {
+      if (pendingSearches.length > 0) {
+        document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+
+        pendingSearches
+          .sort((left, right) => (right.issue.start || 0) - (left.issue.start || 0))
+          .forEach(({ issue, occurrenceIndex, searchResults }) => {
+            const targetRange = searchResults.items[occurrenceIndex];
+
+            if (!targetRange || !issue.replacement) {
+              fallbackIssues.push(issue);
+              return;
+            }
+
+            targetRange.insertText(issue.replacement, Word.InsertLocation.replace);
+            revisionCount += 1;
+          });
+
+        await context.sync();
+      }
+    } finally {
+      document.changeTrackingMode = originalTrackingMode;
+      await context.sync();
+    }
+
+    if (fallbackIssues.length > 0) {
+      body.getRange().insertComment(formatFallbackComment(fallbackIssues));
       await context.sync();
     }
 
@@ -552,6 +812,182 @@ async function requestProofreadStream(
   return result;
 }
 
+async function requestChunkedProofreadTask(
+  text: string,
+  book: BookInfo,
+  scope: ProofreadScope,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  onStatus({
+    stage: "task",
+    message:
+      scope === "document"
+        ? "正在创建全书分块审校任务。"
+        : "当前选区超过 5000 字，正在创建分块审校任务。",
+  });
+
+  const createdTask = await createProofreadTask(text, book, scope, signal);
+  currentTaskId = createdTask.task_id || null;
+  onStatus(taskSnapshotToStatus("queued", createdTask, "审校任务已创建。"));
+
+  try {
+    await streamProofreadTaskEvents(createdTask.task_id as string, onStatus, signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    onStatus({ stage: "polling", message: "任务进度流不可用，正在切换到轮询查询。" });
+    return pollProofreadTask(createdTask.task_id as string, onStatus, signal);
+  }
+
+  const finalTask = await getProofreadTask(createdTask.task_id as string, signal);
+  if (finalTask.status === "failed") {
+    throw new Error(finalTask.error_message || "分块审校任务失败。");
+  }
+
+  if (finalTask.status === "cancelled") {
+    throw createAbortError();
+  }
+
+  return finalTask;
+}
+
+async function createProofreadTask(
+  text: string,
+  book: BookInfo,
+  scope: ProofreadScope,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      book,
+      session_id: currentSessionId,
+      provider_api: getProviderApi(),
+      proofread_mode: getProofreadMode(),
+      scope,
+      chunk_size: DEFAULT_CHUNK_SIZE,
+      context: {
+        source: "word-addin",
+        flow: "chunked-task",
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as ChunkedProofreadResponse;
+}
+
+async function streamProofreadTaskEvents(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/events`, {
+    method: "GET",
+    signal,
+    headers: {
+      Accept: "text/event-stream",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  if (!response.body) {
+    throw new Error("当前 Word WebView 不支持任务进度流。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+
+    events.forEach((eventText) => {
+      const event = parseSseEvent(eventText);
+
+      if (!event) {
+        return;
+      }
+
+      const status = taskEventToStatus(event.name, event.data);
+      onStatus(status);
+
+      if (event.name === "error") {
+        throw new Error(status.error_message || status.message || "分块审校任务失败。");
+      }
+    });
+
+    if (done) {
+      break;
+    }
+  }
+}
+
+async function pollProofreadTask(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  while (true) {
+    const task = await getProofreadTask(taskId, signal);
+    onStatus(taskSnapshotToStatus("polling", task, "正在查询分块审校进度。"));
+
+    if (task.status === "succeeded") {
+      return task;
+    }
+
+    if (task.status === "failed") {
+      throw new Error(task.error_message || "分块审校任务失败。");
+    }
+
+    if (task.status === "cancelled") {
+      throw createAbortError();
+    }
+
+    await delay(1000, signal);
+  }
+}
+
+async function getProofreadTask(
+  taskId: string,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}`, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as ChunkedProofreadResponse;
+}
+
+async function cancelProofreadTask(taskId: string): Promise<void> {
+  await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+}
+
 function parseSseEvent(eventText: string): { name: string; data: unknown } | null {
   const lines = eventText.split("\n");
   const eventLine = lines.find((line) => line.startsWith("event: "));
@@ -565,6 +1001,67 @@ function parseSseEvent(eventText: string): { name: string; data: unknown } | nul
     name: eventLine.replace("event: ", ""),
     data: JSON.parse(dataLine.replace("data: ", "")),
   };
+}
+
+function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
+  const payload = isRecord(data) ? data : {};
+  const message = typeof payload.message === "string" ? payload.message : formatStage(stage);
+
+  return {
+    stage,
+    message,
+    task_id: typeof payload.task_id === "string" ? payload.task_id : undefined,
+    status: isTaskState(payload.status) ? payload.status : undefined,
+    scope: isProofreadScope(payload.scope) ? payload.scope : undefined,
+    total_chunks: typeof payload.total_chunks === "number" ? payload.total_chunks : undefined,
+    completed_chunks:
+      typeof payload.completed_chunks === "number" ? payload.completed_chunks : undefined,
+    failed_chunks: typeof payload.failed_chunks === "number" ? payload.failed_chunks : undefined,
+    issue_count: typeof payload.issue_count === "number" ? payload.issue_count : undefined,
+    chunk_index: typeof payload.chunk_index === "number" ? payload.chunk_index : undefined,
+    chunk_start: typeof payload.chunk_start === "number" ? payload.chunk_start : undefined,
+    chunk_end: typeof payload.chunk_end === "number" ? payload.chunk_end : undefined,
+    error_message: typeof payload.error_message === "string" ? payload.error_message : undefined,
+  };
+}
+
+function taskSnapshotToStatus(
+  stage: string,
+  task: ChunkedProofreadResponse,
+  message: string
+): ProofreadStatusEvent {
+  return {
+    stage,
+    message,
+    task_id: task.task_id || undefined,
+    status: task.status,
+    scope: task.scope,
+    total_chunks: task.total_chunks,
+    completed_chunks: task.completed_chunks,
+    failed_chunks: task.failed_chunks,
+    issue_count: task.issues.length,
+    error_message: task.error_message || undefined,
+  };
+}
+
+function formatProgressResult(status: ProofreadStatusEvent): string {
+  if (typeof status.total_chunks !== "number") {
+    return status.message;
+  }
+
+  const completed = status.completed_chunks || 0;
+  const failed = status.failed_chunks || 0;
+  const issueCount = status.issue_count || 0;
+  return `${status.message} 进度 ${completed}/${status.total_chunks}，失败 ${failed} 块，累计问题 ${issueCount} 条。`;
+}
+
+function normalizeChunkedIssuesForScope(issues: ChunkedProofreadIssue[]): ProofreadIssue[] {
+  return issues.map((issue) => ({
+    ...issue,
+    id: `chunk-${issue.chunk_index}-${issue.id}`,
+    start: issue.global_start,
+    end: issue.global_end,
+  }));
 }
 
 function isIssueLocatable(selectedText: string, issue: ProofreadIssue): boolean {
@@ -733,9 +1230,16 @@ function formatStage(stage: string): string {
     completed: "完成",
     failed: "失败",
     fallback: "回退",
+    chunk_completed: "分块",
+    chunk_failed: "分块",
+    chunk_started: "分块",
     normalizing: "整理",
+    polling: "轮询",
+    queued: "排队",
     received: "接收",
     result: "结果",
+    running: "运行",
+    task: "任务",
   };
 
   return `[${stageLabels[stage] || stage}]`;
@@ -750,6 +1254,11 @@ function saveHistoryEntry(input: {
   locatedIssueCount: number;
   revisionCount: number;
   fallbackCount: number;
+  scope: ProofreadScope;
+  taskId?: string | null;
+  totalChunks: number;
+  completedChunks: number;
+  failedChunks: number;
   errorMessage?: string;
 }) {
   if (!currentSessionId || input.text.trim().length === 0) {
@@ -772,6 +1281,14 @@ function saveHistoryEntry(input: {
     providerApi: getProviderApi(),
     proofreadMode: getProofreadMode(),
     applicationMode: getApplicationMode(),
+    scope: input.scope,
+    taskId: input.taskId,
+    totalChunks: input.totalChunks,
+    completedChunks: input.completedChunks,
+    failedChunks: input.failedChunks,
+    globalLocatedIssueCount: input.issues.filter(
+      (issue) => typeof issue.start === "number" && typeof issue.end === "number"
+    ).length,
     issues: input.issues,
     insertedComment: input.insertedComment,
     errorMessage: input.errorMessage,
@@ -868,6 +1385,17 @@ function normalizeHistoryEntries(entries: unknown[]): ProofreadHistoryEntry[] {
         applicationMode: isApplicationMode(entry.applicationMode)
           ? entry.applicationMode
           : "comment",
+        scope: isProofreadScope(entry.scope) ? entry.scope : "selection",
+        taskId: typeof entry.taskId === "string" ? entry.taskId : null,
+        totalChunks: typeof entry.totalChunks === "number" ? entry.totalChunks : 1,
+        completedChunks: typeof entry.completedChunks === "number" ? entry.completedChunks : 1,
+        failedChunks: typeof entry.failedChunks === "number" ? entry.failedChunks : 0,
+        globalLocatedIssueCount:
+          typeof entry.globalLocatedIssueCount === "number"
+            ? entry.globalLocatedIssueCount
+            : issues.filter(
+                (issue) => typeof issue.start === "number" && typeof issue.end === "number"
+              ).length,
         issues,
         insertedComment: Boolean(entry.insertedComment),
         errorMessage: typeof entry.errorMessage === "string" ? entry.errorMessage : undefined,
@@ -881,6 +1409,7 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
     cancelled: "已停止",
     failed: "失败",
     idle: "未开始",
+    queued: "排队中",
     running: "运行中",
     succeeded: "完成",
   };
@@ -892,12 +1421,16 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
     entry.applicationMode === "revision"
       ? `修订 ${entry.revisionCount} / 回退 ${entry.fallbackCount}`
       : `批注 / 回退 ${entry.fallbackCount}`;
-  const modeText = `${formatProofreadMode(entry.proofreadMode)} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
+  const modeText = `${formatProofreadScope(entry.scope)} / ${formatProofreadMode(entry.proofreadMode)} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
+  const chunkText =
+    entry.totalChunks > 1
+      ? `分块 ${entry.completedChunks}/${entry.totalChunks}，失败 ${entry.failedChunks}`
+      : "单段";
   const bookText = entry.bookTitle ? `《${entry.bookTitle}》` : "未记录书名";
   const commentText = entry.insertedComment ? "已插入批注" : "未插入批注";
   const errorText = entry.errorMessage ? `：${entry.errorMessage}` : "";
 
-  return `${createdAt} / ${bookText} / ${statusLabels[entry.status]} / ${modeText} / ${issueText} / ${locatedText} / ${actionText} / ${commentText}${errorText}`;
+  return `${createdAt} / ${bookText} / ${statusLabels[entry.status]} / ${modeText} / ${chunkText} / ${issueText} / ${locatedText} / ${actionText} / ${commentText}${errorText}`;
 }
 
 function initializeControls() {
@@ -907,12 +1440,14 @@ function initializeControls() {
   getSelect("provider-api").value = readStoredProviderApi();
   getSelect("proofread-mode").value = readStoredProofreadMode();
   getSelect("application-mode").value = readStoredApplicationMode();
+  getSelect("proofread-scope").value = readStoredProofreadScope();
 }
 
 function persistControls() {
   localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
+  localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
 }
 
 function persistBookInfo() {
@@ -955,6 +1490,11 @@ function getApplicationMode(): ApplicationMode {
   return isApplicationMode(value) ? value : "comment";
 }
 
+function getProofreadScope(): ProofreadScope {
+  const value = getSelect("proofread-scope").value;
+  return isProofreadScope(value) ? value : "selection";
+}
+
 function readStoredProviderApi(): ProviderAPI {
   const value = localStorage.getItem(PROVIDER_API_STORAGE_KEY);
   return isProviderApi(value) ? value : "responses";
@@ -970,6 +1510,11 @@ function readStoredApplicationMode(): ApplicationMode {
   return isApplicationMode(value) ? value : "comment";
 }
 
+function readStoredProofreadScope(): ProofreadScope {
+  const value = localStorage.getItem(PROOFREAD_SCOPE_STORAGE_KEY);
+  return isProofreadScope(value) ? value : "selection";
+}
+
 function isProviderApi(value: unknown): value is ProviderAPI {
   return value === "responses" || value === "chat";
 }
@@ -982,9 +1527,14 @@ function isApplicationMode(value: unknown): value is ApplicationMode {
   return value === "comment" || value === "revision";
 }
 
+function isProofreadScope(value: unknown): value is ProofreadScope {
+  return value === "selection" || value === "document";
+}
+
 function isTaskState(value: unknown): value is TaskState {
   return (
     value === "idle" ||
+    value === "queued" ||
     value === "running" ||
     value === "succeeded" ||
     value === "failed" ||
@@ -1002,6 +1552,10 @@ function formatProofreadMode(proofreadMode: ProofreadMode): string {
 
 function formatApplicationMode(applicationMode: ApplicationMode): string {
   return applicationMode === "revision" ? "修订模式" : "批注模式";
+}
+
+function formatProofreadScope(scope: ProofreadScope): string {
+  return scope === "document" ? "全书正文" : "当前选区";
 }
 
 function clearHistory() {
@@ -1103,6 +1657,7 @@ function setBusy(isBusy: boolean) {
   getSelect("provider-api").disabled = isBusy;
   getSelect("proofread-mode").disabled = isBusy;
   getSelect("application-mode").disabled = isBusy;
+  getSelect("proofread-scope").disabled = isBusy;
 }
 
 function showMessage(message: string, type: "default" | "error" | "success" = "default") {
@@ -1143,6 +1698,37 @@ function isAbortError(error: unknown): boolean {
   return (
     typeof error === "object" && error !== null && "name" in error && error.name === "AbortError"
   );
+}
+
+function createAbortError(): Error {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      resolve();
+    }, milliseconds);
+
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(createAbortError());
+      },
+      { once: true }
+    );
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {

@@ -1,13 +1,14 @@
-# Word AI 审校助手 MVP 开发计划与技术方案
+# Word AI 审校助手 V2 开发计划与技术方案
 
 ## 目标
 
-面向出版社责任编辑，完成第一版可用闭环：在 Word 中选中一段文字，点击“AI 审校”，插件调用 FastAPI 后端，后端返回结构化审校问题和后端计算出的原文位置，插件可把审校建议批注到对应原文片段，也可在修订模式下把可直接替换的建议写成 Word 原生修订。
+面向出版社责任编辑，在 Word 中完成统一范围审校闭环：小选区直接审校，长选区和全书正文自动分块审校；后端返回结构化审校问题和原文位置，插件可把建议批注到对应原文片段，也可在修订模式下把可直接替换的建议写成 Word 原生修订。
 
-## MVP 范围
+## V2 范围
 
 - 包含：Word 选区读取、本地 session 流程、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、纯空白差异过滤、逐条精准批注、修订模式替换、快速/深度审校、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
-- 不包含：登录、云端审校历史、全文扫描、token 级模型文本流、无人工确认地默认改正文。
+- 新增：当前选区超过 5000 字自动分块审校；全书正文按约 3000 字自动分块审校；分块任务使用后端内存异步任务、SSE 进度和轮询兜底；全书结果支持批注模式和修订模式。
+- 不包含：登录、云端审校历史、跨服务重启恢复任务、页眉页脚/脚注/文本框扫描、token 级模型文本流、无人工确认地默认改正文。
 - 第一版后端使用 OpenAI 兼容接口；没有 `AI_API_KEY` 时返回 mock 结果，保证本地可联调。
 - 本地真实 AI 联调可使用 oMLX 启动 OpenAI 兼容服务，默认地址为 `http://127.0.0.1:8001/v1`。
 
@@ -17,10 +18,11 @@
 Word 选区
   -> word-addin 读取选区文本
   -> POST /api/sessions 创建本地 session
-  -> Responses: POST /api/proofread/stream；Chat: POST /api/proofread
+  -> 小选区: Responses POST /api/proofread/stream；Chat POST /api/proofread
+  -> 长选区/全书: POST /api/proofread/tasks + SSE/轮询任务进度
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
   -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
-  -> backend 在选区文本中搜索 issue.original 并填充 start/end
+  -> backend 在单段或分块文本中搜索 issue.original 并填充 start/end；分块结果额外填充 global_start/global_end
   -> word-addin 按应用方式插入批注或生成 Word 修订，定位失败时回退汇总批注
 ```
 
@@ -29,7 +31,7 @@ Word 选区
 - 目录：`word-addin/`
 - 技术栈：Office.js、TypeScript、Webpack。
 - 本地地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：开发环境先请求同源 `/api/sessions` 创建本地 session；Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；Chat 模式直接请求 `/api/proofread`。插件请求会携带 `proofread_mode` 和 `provider_api`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
+- 后端地址：开发环境先请求同源 `/api/sessions` 创建本地 session；短选区 Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；短选区 Chat 模式直接请求 `/api/proofread`。长选区和全书请求 `/api/proofread/tasks`，优先用 `/api/proofread/tasks/{task_id}/events` 获取 SSE 进度，失败时轮询 `/api/proofread/tasks/{task_id}`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
 
 ### 后端
 
@@ -138,6 +140,83 @@ event: error
 data: {"message":"AI provider returned HTTP 500"}
 ```
 
+### `POST /api/proofread/chunked`
+
+同步分块审校接口，用于测试、调试和较小分块任务。请求字段沿用 `/api/proofread`，增加：
+
+```json
+{
+  "scope": "selection",
+  "chunk_size": 3000
+}
+```
+
+`scope` 支持 `selection` 和 `document`。`selection` 文本不超过 5000 字时返回单个 chunk；超过 5000 字时按约 3000 字分块。`document` 始终按约 3000 字分块。分块优先在段落换行和句末标点附近切分，找不到边界时硬切。
+
+Response:
+
+```json
+{
+  "task_id": null,
+  "scope": "document",
+  "status": "succeeded",
+  "total_chunks": 2,
+  "completed_chunks": 2,
+  "failed_chunks": 0,
+  "issues": [
+    {
+      "id": "issue-1",
+      "category": "typo",
+      "severity": "low",
+      "original": "原文片段",
+      "replacement": "替换文本",
+      "suggestion": "修改建议",
+      "start": 0,
+      "end": 4,
+      "chunk_index": 0,
+      "global_start": 0,
+      "global_end": 4
+    }
+  ],
+  "error_message": null
+}
+```
+
+### 异步分块任务接口
+
+创建任务：
+
+```http
+POST /api/proofread/tasks
+```
+
+请求与 `/api/proofread/chunked` 相同。Response 为 `ChunkedProofreadResult`，其中 `task_id` 必填，初始 `status` 为 `queued`。
+
+查询任务：
+
+```http
+GET /api/proofread/tasks/{task_id}
+```
+
+返回当前进度、聚合结果和错误信息。任务只保存在后端内存中；任务不存在或服务重启后返回 404。
+
+停止任务：
+
+```http
+DELETE /api/proofread/tasks/{task_id}
+```
+
+将任务标记为取消。正在运行的 chunk 完成后停止后续 chunk，最终状态为 `cancelled`。
+
+任务 SSE：
+
+```http
+GET /api/proofread/tasks/{task_id}/events
+Accept: text/event-stream
+```
+
+事件名包括 `queued`、`running`、`chunk_started`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。
+
 ### `POST /api/sessions`
 
 Response:
@@ -162,9 +241,10 @@ Response:
 4. 实现 OpenAI 兼容 Responses API 与 Chat Completions client，配置 `AI_API_KEY` 后请求对应 provider API 并解析精简 JSON。
 5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
 6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
-7. 后端返回问题时，插件按应用方式处理：批注模式按 `start/end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订；定位失败或无 `replacement` 的问题汇总插入当前选区 fallback 批注；未发现问题时只更新任务窗格，不插入批注。
-8. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
-9. 补充后端测试、插件 lint/build 验证和本地联调说明。
+7. 后端返回问题时，插件按应用方式处理：批注模式按 `start/end` 或 `global_start/global_end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订；全书修订按全局位置倒序应用；定位失败或无 `replacement` 的问题汇总插入 fallback 批注；未发现问题时只更新任务窗格，不插入批注。
+8. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
+9. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
+10. 补充后端测试、插件 lint/build 验证和本地联调说明。
 
 ## 本地运行
 
@@ -227,10 +307,10 @@ npm run dev-server
 
 1. 在 Word 中旁加载 `word-addin/manifest.xml`。
 2. 打开任务窗格。
-3. 选中一段正文。
+3. 选中一段正文，或准备使用“全书正文”范围。
 4. 点击“AI 审校”。
-5. 确认任务窗格“运行过程”区域显示阶段进度，并在“审校结果”区域显示最终结果。
-6. 如果存在审校问题，确认可定位问题批注在对应原文片段上；定位失败问题会作为一条 fallback 汇总批注插在当前选区；如果没有问题，确认不会插入批注。
+5. 确认任务窗格“运行过程”区域显示阶段进度；长选区和全书正文显示分块进度，并在“审校结果”区域显示最终结果。
+6. 如果存在审校问题，确认可定位问题批注在对应原文片段上；定位失败问题会作为一条 fallback 汇总批注；如果没有问题，确认不会插入批注。
 7. 点击“新建对话”，确认任务窗格清空当前结果，并创建新的本地 session。
 8. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
 9. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
@@ -253,6 +333,10 @@ npm run dev-server
 - 重复 `original` 会按 issue 顺序定位不同 occurrence；找不到 `original` 时返回 `start/end: null`。
 - `proofread_mode=fast` 与 `proofread_mode=thinking` 使用不同 prompt 和 token 上限。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
+- 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
+- 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
+- 任务 SSE 返回分块进度；SSE 不可用时前端轮询任务状态。
+- 点击停止审校会中断当前请求并取消后端异步任务。
 - `npm run lint` 通过。
 - `npm run build` 通过。
 - Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。

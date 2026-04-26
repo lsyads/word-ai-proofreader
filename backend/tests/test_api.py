@@ -1,9 +1,9 @@
 import json
 import logging
-
 from fastapi.testclient import TestClient
 
 import app.services.proofread as proofread_service
+from app.services import tasks as task_service
 from app.main import app
 from app.schemas import ProofreadIssue
 from app.services.ai_client import AIClientError, AIProofreadResult, AIStreamEvent
@@ -16,6 +16,7 @@ BOOK = {"title": "测试书名", "introduction": "这是一部测试图书。"}
 
 def setup_function():
     clear_sessions_for_tests()
+    task_service.clear_tasks_for_tests()
 
 
 def parse_sse_events(body: str):
@@ -550,3 +551,208 @@ def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == ["status", "status", "error"]
     assert events[-1]["data"] == {"message": "AI provider returned HTTP 500"}
+
+
+def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return [
+            ProofreadIssue(
+                id=f"issue-{text[0]}",
+                category="style",
+                severity="medium",
+                original=text[:2],
+                suggestion="建议",
+                start=0,
+                end=2,
+            )
+        ]
+
+    monkeypatch.setattr(proofread_service, "proofread_text", fake_proofread_text)
+
+    response = client.post(
+        "/api/proofread/chunked",
+        json=proofread_payload(
+            ("甲" * 3000) + ("乙" * 3000),
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "document"
+    assert payload["status"] == "succeeded"
+    assert payload["total_chunks"] == 2
+    assert payload["completed_chunks"] == 2
+    assert payload["failed_chunks"] == 0
+    assert [issue["chunk_index"] for issue in payload["issues"]] == [0, 1]
+    assert [issue["global_start"] for issue in payload["issues"]] == [0, 3000]
+
+
+def test_proofread_task_lifecycle_and_events(monkeypatch):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return [
+            ProofreadIssue(
+                id=f"issue-{text[0]}",
+                category="typo",
+                severity="low",
+                original=text[:1],
+                suggestion="建议",
+                start=0,
+                end=1,
+            )
+        ]
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload(
+            ("甲" * 3000) + ("乙" * 3000),
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+
+    assert create_response.status_code == 200
+    task_id = create_response.json()["task_id"]
+
+    events_response = client.get(f"/api/proofread/tasks/{task_id}/events")
+    assert events_response.status_code == 200
+    events = parse_sse_events(events_response.text)
+    event_names = [event["event"] for event in events]
+    assert event_names[0] == "queued"
+    assert "chunk_started" in event_names
+    assert "chunk_completed" in event_names
+    assert event_names[-1] == "completed"
+
+    status_response = client.get(f"/api/proofread/tasks/{task_id}")
+    assert status_response.status_code == 200
+    payload = status_response.json()
+    assert payload["status"] == "succeeded"
+    assert payload["completed_chunks"] == 2
+    assert payload["failed_chunks"] == 0
+    assert len(payload["issues"]) == 2
+
+
+def test_proofread_task_records_failed_chunk_and_continues(monkeypatch):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        if text.startswith("乙"):
+            raise AIClientError("chunk failed")
+
+        return [
+            ProofreadIssue(
+                id="issue-1",
+                category="typo",
+                severity="low",
+                original=text[:1],
+                suggestion="建议",
+                start=0,
+                end=1,
+            )
+        ]
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload(
+            ("甲" * 3000) + ("乙" * 3000) + ("丙" * 3000),
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+
+    task_id = create_response.json()["task_id"]
+    events = parse_sse_events(client.get(f"/api/proofread/tasks/{task_id}/events").text)
+    status_response = client.get(f"/api/proofread/tasks/{task_id}")
+
+    assert status_response.status_code == 200
+    payload = status_response.json()
+    assert payload["status"] == "succeeded"
+    assert payload["completed_chunks"] == 2
+    assert payload["failed_chunks"] == 1
+    assert "chunk_failed" in [event["event"] for event in events]
+
+
+def test_proofread_task_fails_when_all_chunks_fail(monkeypatch):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        raise AIClientError("chunk failed")
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload(
+            ("甲" * 3000) + ("乙" * 3000),
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+
+    task_id = create_response.json()["task_id"]
+    events = parse_sse_events(client.get(f"/api/proofread/tasks/{task_id}/events").text)
+    status_response = client.get(f"/api/proofread/tasks/{task_id}")
+
+    assert status_response.json()["status"] == "failed"
+    assert status_response.json()["failed_chunks"] == 2
+    assert events[-1]["event"] == "error"
+
+
+def test_proofread_task_can_be_cancelled(monkeypatch):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return []
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload(
+            ("甲" * 3000) + ("乙" * 3000),
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+
+    task_id = create_response.json()["task_id"]
+    cancel_response = client.delete(f"/api/proofread/tasks/{task_id}")
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["task_id"] == task_id
+
+
+def test_proofread_task_not_found_returns_404():
+    response = client.get("/api/proofread/tasks/missing-task")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Proofread task not found"}

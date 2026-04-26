@@ -13,18 +13,21 @@
 └── spec.md       # 技术方案和开发计划
 ```
 
-## 当前 MVP 能力
+## 当前 V2 能力
 
 - Word 任务窗格提供一个正式入口：“AI 审校”。
 - 插件打开时会创建一个本地 session；点击“新建对话”会创建新的本地 session。后端不使用 session 续接 AI 上下文。
-- 插件内部读取当前 Word 选区文本。
+- 插件可选择审校范围：“当前选区”或“全书正文”。全书正文以 `document.body.text` 为范围，暂不包含页眉页脚、脚注、文本框等非正文内容。
+- 当前选区不超过 5000 字时沿用单段审校；当前选区超过 5000 字或选择全书正文时，会自动按约 3000 字分块审校。
 - 插件提供书籍信息输入：书名必填，介绍可选，并保存在本地用于同一本书连续审校；书籍信息会作为 prompt 背景传给后端。
 - 插件可切换“快速审校/深度审校”和 `Responses/Chat` API。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
 - 插件调用后端 `POST /api/proofread`。
 - Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
+- 分块审校使用 `POST /api/proofread/tasks` 创建内存异步任务，优先通过 `GET /api/proofread/tasks/{task_id}/events` 获取 SSE 进度；进度流不可用时回退 `GET /api/proofread/tasks/{task_id}` 轮询。
 - AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置。
-- 批注模式下，插件对可定位问题逐条在对应原文片段插入批注；修订模式下，插件临时开启 Word 修订跟踪，用 `replacement` 替换可定位原文并生成原生修订；不可定位或无 `replacement` 的问题回退为当前选区汇总批注。
+- 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`；插件用全局位置计算重复原文的 occurrence，避免长文或全书中误命中。
+- 批注模式下，插件对可定位问题逐条在对应原文片段插入批注；修订模式下，插件临时开启 Word 修订跟踪，用 `replacement` 替换可定位原文并生成原生修订；全书修订按全局位置倒序应用，不可定位或无 `replacement` 的问题回退为汇总批注。
 - 插件支持停止当前审校，并在本地保存最近 20 条审校历史用于回看、清空、另存为 JSON 和导入 JSON。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
 
@@ -56,7 +59,9 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-当前前端 MVP 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
+当前前端 V2 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
+
+V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。
 
 API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 
@@ -138,6 +143,17 @@ curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread
   -d "{\"text\":\"这是一段需要审校的文本。\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
 ```
 
+分块任务 smoke test。创建任务后用返回的 `task_id` 查询状态，或连接任务 SSE：
+
+```bash
+TASK_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/proofread/tasks \
+  -H 'Content-Type: application/json' \
+  -d "{\"text\":\"$(printf '这是一段需要分块审校的文本。%.0s' {1..400})\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"scope\":\"document\",\"chunk_size\":3000,\"context\":{\"source\":\"manual-curl\"}}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')"
+curl --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}
+curl --no-buffer --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}/events
+```
+
 ## 启动 Word 插件
 
 ```bash
@@ -172,12 +188,12 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 2. 启动后端，确认 `/health` 返回 `{"status":"ok"}`。
 3. 启动 `word-addin` dev server。
 4. 运行 `npm run start` 旁加载插件到 Word。
-5. 在 Word 文档中选中一段文本。
-6. 打开任务窗格，填写书名，按需填写书籍介绍，并选择“快速审校/深度审校”、`Responses/Chat` 和“批注模式/修订模式”。
+5. 在 Word 文档中选中一段文本，或准备使用“全书正文”范围。
+6. 打开任务窗格，填写书名，按需填写书籍介绍，并选择“当前选区/全书正文”、“快速审校/深度审校”、`Responses/Chat` 和“批注模式/修订模式”。
 7. 点击“AI 审校”。
-8. 确认任务窗格“运行过程”区域先逐条显示阶段进度，再显示审校结果。
+8. 确认任务窗格“运行过程”区域先逐条显示阶段进度；长选区或全书会显示分块进度、失败块数和累计问题数。
 9. 如果选择批注模式且后端返回非空 `issues[]`，确认可定位问题批注在对应原文片段上；不可定位问题会作为 fallback 汇总批注插在当前选区。
-10. 如果选择修订模式，确认有 `replacement` 且可定位的问题会在 Word 审阅面板中显示为可接受/拒绝的修订，运行后原修订跟踪设置会恢复。
+10. 如果选择修订模式，确认有 `replacement` 且可定位的问题会在 Word 审阅面板中显示为可接受/拒绝的修订，运行后原修订跟踪设置会恢复；全书修订会按结果位置倒序应用。
 11. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注或修订。
 12. 点击“新建对话”，确认任务窗格清空当前结果，并创建新的本地 session。
 13. 审校运行中点击“停止审校”，确认请求停止、不会插入批注或修订，并在历史记录中保存为已停止。

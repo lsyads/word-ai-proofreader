@@ -7,17 +7,20 @@
 ```text
 Word 插件任务窗格
   -> POST /api/sessions
-  -> Responses: POST /api/proofread/stream；Chat: POST /api/proofread
+  -> 小选区 Responses: POST /api/proofread/stream；小选区 Chat: POST /api/proofread
+  -> 长选区/全书: POST /api/proofread/tasks + SSE/轮询
   -> FastAPI 后端
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
-  -> FastAPI 后端按 original 计算 start/end
+  -> FastAPI 后端按 original 计算 start/end；分块任务额外计算 global_start/global_end
   -> Word 插件按应用方式插入原文片段批注或生成 Word 修订
 ```
 
 当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
+
+V2 支持统一范围审校：当前选区不超过 5000 字时使用原单段链路；当前选区超过 5000 字或选择“全书正文”时，插件创建后端内存异步任务，后端按约 3000 字顺序分块审校。任务状态只存内存，服务重启后不可恢复。
 
 ## Word 插件到后端
 
@@ -161,6 +164,80 @@ X-Accel-Buffering: no
 ```
 
 每个后端 SSE 事件前还有一行 padding 注释，降低小包被代理或 WebView 缓冲的概率。
+
+### 4. 分块审校任务
+
+长选区和全书正文使用异步任务接口。插件先创建任务，再优先连接任务 SSE；如果 Word WebView 或代理不支持进度流，则回退为轮询任务状态。
+
+创建任务：
+
+```http
+POST /api/proofread/tasks
+Content-Type: application/json
+```
+
+```json
+{
+  "text": "需要审校的长文本或全书正文",
+  "book": {
+    "title": "书名",
+    "introduction": "可选书籍介绍"
+  },
+  "session_id": "session_8d7f...",
+  "provider_api": "responses",
+  "proofread_mode": "fast",
+  "scope": "document",
+  "chunk_size": 3000,
+  "context": {
+    "source": "word-addin",
+    "flow": "chunked-task"
+  }
+}
+```
+
+查询任务：
+
+```http
+GET /api/proofread/tasks/{task_id}
+```
+
+Response:
+
+```json
+{
+  "task_id": "task_xxx",
+  "scope": "document",
+  "status": "succeeded",
+  "total_chunks": 3,
+  "completed_chunks": 3,
+  "failed_chunks": 0,
+  "issues": [
+    {
+      "id": "issue-1",
+      "category": "typo",
+      "severity": "low",
+      "original": "原文片段",
+      "replacement": "替换文本",
+      "suggestion": "修改建议",
+      "start": 0,
+      "end": 4,
+      "chunk_index": 1,
+      "global_start": 3000,
+      "global_end": 3004
+    }
+  ],
+  "error_message": null
+}
+```
+
+任务 SSE：
+
+```http
+GET /api/proofread/tasks/{task_id}/events
+Accept: text/event-stream
+```
+
+事件名包括 `queued`、`running`、`chunk_started`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。
 
 ## 后端到 AI Provider
 
@@ -327,15 +404,17 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
+分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`。当前选区分块仍在选区范围内搜索；全书分块在 `document.body` 中搜索。插件用全局位置计算重复 `original` 的 occurrence，降低长文中误命中的风险。
+
+修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
 批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数和 fallback 数。
 
 ## 停止审校和历史记录
 
-插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端使用 `AbortController` 中断当前请求。
+插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端使用 `AbortController` 中断当前请求；如果当前是分块任务，还会调用 `DELETE /api/proofread/tasks/{task_id}` 标记后端任务取消。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名，但不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数和应用统计，但不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。
 
 ## 调试日志
 

@@ -51,10 +51,8 @@ BASE_SYSTEM_PROMPT = """
 
 定位规则：
 1. original 必须逐字摘录自用户提供的 <text> 中，不能改写、概括或补全。
-2. original 应尽量短，只包含需要批注的最小连续片段。
-3. original 必须是连续文本片段，不要跨越多个不连续位置。
-4. 如果同一问题出现多次，应分别返回多个 issue，并使用各自对应的 original。
-5. 如果无法在原文中找到可精确定位的片段，不要输出该 issue。
+2. original 必须是连续文本片段，不要跨越多个不连续位置。
+3. 如果同一问题出现多次，应分别返回多个 issue，并使用各自对应的 original。
 
 replacement 规则：
 1. replacement 只能填写可直接替换 original 的正文文本。
@@ -65,7 +63,7 @@ replacement 规则：
 
 suggestion 规则：
 1. suggestion 写给责任编辑看，说明问题原因和处理建议。
-2. suggestion 要简短明确，不要超过 60 个汉字。
+2. suggestion 要简短明确，不要超过 100 个汉字。
 3. suggestion 不要重复 original 和 replacement 的完整内容。
 4. suggestion 不要使用“建议考虑”“可以适当”等含糊表述，应明确指出问题。
 

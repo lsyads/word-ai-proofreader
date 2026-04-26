@@ -9,8 +9,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ProofreadRequest, ProofreadResponse, SessionResponse
+from app.schemas import ChunkedProofreadRequest, ChunkedProofreadResult, ProofreadRequest, ProofreadResponse, SessionResponse
 import app.services.proofread as proofread_service
+from app.services import chunking
+from app.services import tasks as task_service
 from app.services.ai_client import AIClientError
 from app.services.sessions import create_session
 from app.settings import get_settings
@@ -37,7 +39,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.backend_cors_origin_list,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -120,6 +122,79 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
     )
 
 
+@app.post("/api/proofread/chunked", response_model=ChunkedProofreadResult)
+async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
+    logger.info(
+        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s",
+        len(request.text),
+        request.scope,
+        request.chunk_size,
+        _mask_session_id(request.session_id),
+        request.provider_api or "default",
+        request.proofread_mode,
+    )
+    _debug_log_json("chunked proofread request body", request.model_dump())
+    response = await chunking.proofread_chunked(request)
+    logger.info(
+        "chunked proofread request completed total_chunks=%s completed_chunks=%s failed_chunks=%s issue_count=%s",
+        response.total_chunks,
+        response.completed_chunks,
+        response.failed_chunks,
+        len(response.issues),
+    )
+    _debug_log_json("chunked proofread response body", response.model_dump())
+    return response
+
+
+@app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
+async def create_proofread_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
+    logger.info(
+        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s",
+        len(request.text),
+        request.scope,
+        request.chunk_size,
+        _mask_session_id(request.session_id),
+        request.provider_api or "default",
+        request.proofread_mode,
+    )
+    _debug_log_json("proofread task request body", request.model_dump())
+    return task_service.create_task(request)
+
+
+@app.get("/api/proofread/tasks/{task_id}", response_model=ChunkedProofreadResult)
+async def get_proofread_task(task_id: str) -> ChunkedProofreadResult:
+    try:
+        return task_service.get_task(task_id)
+    except task_service.ProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="Proofread task not found") from exc
+
+
+@app.delete("/api/proofread/tasks/{task_id}", response_model=ChunkedProofreadResult)
+async def cancel_proofread_task(task_id: str) -> ChunkedProofreadResult:
+    try:
+        return task_service.cancel_task(task_id)
+    except task_service.ProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="Proofread task not found") from exc
+
+
+@app.get("/api/proofread/tasks/{task_id}/events")
+async def proofread_task_events(task_id: str) -> StreamingResponse:
+    try:
+        task_service.get_task(task_id)
+    except task_service.ProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="Proofread task not found") from exc
+
+    return StreamingResponse(
+        _task_event_stream(task_service.stream_task_events(task_id)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[str]:
     try:
         async for event in proofread_service.stream_proofread_text(
@@ -149,6 +224,11 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
         error_data = {"message": str(exc)}
         _debug_log_json("proofread stream error body", error_data)
         yield _format_sse("error", error_data)
+
+
+async def _task_event_stream(events: AsyncIterator[Any]) -> AsyncIterator[str]:
+    async for event in events:
+        yield _format_sse(event.event, event.data)
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:

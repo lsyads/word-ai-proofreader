@@ -68,6 +68,39 @@ class ProofreadResponse(BaseModel):
     issues: list[ProofreadIssue]
 
 
+ProofreadScope = Literal["selection", "document"]
+ChunkedTaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+
+class ProofreadChunk(BaseModel):
+    index: int = Field(..., ge=0)
+    start: int = Field(..., ge=0)
+    end: int = Field(..., ge=0)
+    text: str = Field(..., min_length=1)
+
+
+class ChunkedProofreadIssue(ProofreadIssue):
+    chunk_index: int = Field(..., ge=0)
+    global_start: int | None = Field(default=None, ge=0)
+    global_end: int | None = Field(default=None, ge=0)
+
+
+class ChunkedProofreadRequest(ProofreadRequest):
+    scope: ProofreadScope = "selection"
+    chunk_size: int = Field(default=3000, ge=500, le=10000)
+
+
+class ChunkedProofreadResult(BaseModel):
+    task_id: str | None = None
+    scope: ProofreadScope
+    status: ChunkedTaskStatus
+    total_chunks: int
+    completed_chunks: int
+    failed_chunks: int
+    issues: list[ChunkedProofreadIssue]
+    error_message: str | None = None
+
+
 class SessionResponse(BaseModel):
     session_id: str
     created_at: str

@@ -341,7 +341,7 @@ npm run dev-server
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
 - 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
-- 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；SSE 不可用时前端轮询任务状态。
+- 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数、失败原因和累计问题数。
 - 点击停止审校会中断当前请求并取消后端异步任务。
 - `npm run lint` 通过。

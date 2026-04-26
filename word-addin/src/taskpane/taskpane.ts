@@ -1,4 +1,4 @@
-/* global AbortController, Office, clearTimeout, localStorage, setTimeout */
+/* global AbortController, Office, clearInterval, clearTimeout, localStorage, setInterval, setTimeout */
 
 import {
   cancelProofreadTask,
@@ -39,6 +39,7 @@ import {
   BookInfo,
   ControlsState,
   PendingProofreadResult,
+  ProofreadStatusEvent,
   ProofreadMode,
   ProofreadScope,
   ProviderAPI,
@@ -69,6 +70,9 @@ let clearHistoryConfirmTimer: number | null = null;
 let isClearHistoryArmed = false;
 let taskState: TaskState = "idle";
 let isApplyingToWord = false;
+let activeChunkTimer: number | null = null;
+let activeChunkStartedAtMs = 0;
+let activeChunkProgress: ProofreadStatusEvent | null = null;
 
 Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
@@ -114,6 +118,7 @@ async function clearCurrentResult() {
   }
 
   pendingResult = null;
+  stopChunkElapsedTimer();
   setBusy(false);
   resetProgress();
   renderEmptyResult("尚未开始审校");
@@ -161,6 +166,7 @@ export async function proofreadSelection() {
   currentTaskId = null;
   pendingResult = null;
   taskState = "running";
+  stopChunkElapsedTimer();
   setBusy(true);
   updateActionButtons();
   showMessage(
@@ -193,11 +199,7 @@ export async function proofreadSelection() {
         controls.providerApi,
         controls.proofreadMode,
         controls.reasoningEnabled,
-        (progress) => {
-          showMessage(progress.message, "default");
-          appendProgressStatus(progress);
-          renderEmptyResult(formatProgressResult(progress));
-        },
+        renderChunkedProgress,
         (createdTaskId) => {
           currentTaskId = createdTaskId;
         },
@@ -290,6 +292,7 @@ export async function proofreadSelection() {
     });
     showMessage(`审校失败：${getErrorMessage(error)}`, "error");
   } finally {
+    stopChunkElapsedTimer();
     currentAbortController = null;
     currentTaskId = null;
     setBusy(false);
@@ -332,6 +335,8 @@ async function applyPendingResultToWord() {
 }
 
 function cancelCurrentProofread() {
+  stopChunkElapsedTimer();
+
   if (currentAbortController) {
     currentAbortController.abort();
   }
@@ -341,6 +346,83 @@ function cancelCurrentProofread() {
       // The local abort is enough for UI state; task cancellation is best effort.
     });
   }
+}
+
+function renderChunkedProgress(progress: ProofreadStatusEvent) {
+  showMessage(progress.message, "default");
+  appendProgressStatus(progress);
+  renderEmptyResult(formatProgressResult(updateChunkElapsedTimer(progress)));
+}
+
+function updateChunkElapsedTimer(progress: ProofreadStatusEvent): ProofreadStatusEvent {
+  if (progress.stage === "chunk_started") {
+    startChunkElapsedTimer(progress);
+    return getActiveChunkProgress() || progress;
+  }
+
+  if (progress.stage === "heartbeat" && typeof progress.chunk_index === "number") {
+    syncChunkElapsedTimer(progress);
+    return getActiveChunkProgress() || progress;
+  }
+
+  if (isChunkElapsedTimerStopStage(progress.stage)) {
+    stopChunkElapsedTimer();
+  }
+
+  return progress;
+}
+
+function startChunkElapsedTimer(progress: ProofreadStatusEvent) {
+  stopChunkElapsedTimer();
+  activeChunkProgress = progress;
+  activeChunkStartedAtMs = Date.now() - (progress.elapsed_seconds || 0) * 1000;
+  activeChunkTimer = setInterval(renderActiveChunkElapsed, 1000);
+}
+
+function syncChunkElapsedTimer(progress: ProofreadStatusEvent) {
+  if (!activeChunkProgress || activeChunkProgress.chunk_index !== progress.chunk_index) {
+    startChunkElapsedTimer(progress);
+    return;
+  }
+
+  activeChunkProgress = progress;
+  if (typeof progress.elapsed_seconds === "number") {
+    activeChunkStartedAtMs = Date.now() - progress.elapsed_seconds * 1000;
+  }
+}
+
+function renderActiveChunkElapsed() {
+  const progress = getActiveChunkProgress();
+  if (progress) {
+    renderEmptyResult(formatProgressResult(progress));
+  }
+}
+
+function getActiveChunkProgress(): ProofreadStatusEvent | null {
+  if (!activeChunkProgress) {
+    return null;
+  }
+
+  return {
+    ...activeChunkProgress,
+    elapsed_seconds: Math.max(0, (Date.now() - activeChunkStartedAtMs) / 1000),
+  };
+}
+
+function stopChunkElapsedTimer() {
+  if (activeChunkTimer !== null) {
+    clearInterval(activeChunkTimer);
+  }
+
+  activeChunkTimer = null;
+  activeChunkProgress = null;
+  activeChunkStartedAtMs = 0;
+}
+
+function isChunkElapsedTimerStopStage(stage: string): boolean {
+  return ["chunk_completed", "chunk_failed", "completed", "cancelled", "error", "failed"].includes(
+    stage
+  );
 }
 
 function saveStoppedOrFailedHistory(input: {

@@ -1,1 +1,1 @@
-"""FastAPI backend for the Word AI proofreader MVP."""
+"""FastAPI backend for the Word AI proofreader."""

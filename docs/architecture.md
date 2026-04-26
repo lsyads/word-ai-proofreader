@@ -238,7 +238,7 @@ GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。长时间运行的 chunk 会周期性发送 `heartbeat`，前端用它展示当前块等待时长。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
+事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。前端收到 `chunk_started` 后本地每秒刷新当前块等待时长；长时间运行的 chunk 会周期性发送 `heartbeat`，用于保活和校准进度。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
 
 ## 后端到 AI Provider
 

@@ -54,20 +54,20 @@ word-addin/
 - `src/taskpane/taskpane.html`
   - 任务窗格 HTML。
   - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、深度思考开关、Responses/Chat API 切换、批注/修订模式切换、审校范围切换、“AI 审校”、“应用到 Word”、审校结果展示区域、历史记录管理按钮。
-  - 当前 MVP 不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
+  - 当前不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
 
 - `src/taskpane/taskpane.css`
   - 任务窗格样式。
   - 控制页面布局、按钮、状态消息、审校结果列表。
 
 - `src/taskpane/taskpane.ts`
-  - 当前 MVP 的核心前端逻辑。
+  - 当前的核心前端逻辑。
   - `Office.onReady` 后绑定“AI 审校”、“应用到 Word”、“清空当前结果”、历史清空/导出/导入按钮。
   - 点击后内部流程：
     1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
     2. 检查 Word 批注 API 能力。
     3. 按审校范围读取当前 Word 选区或正文文本。
-    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度。
+    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度；收到 `chunk_started` 后本地每秒刷新当前块耗时。
     5. 审校完成后只在任务窗格展示结果，等待用户点击“应用到 Word”。
     6. 批注模式：对有 `start/end` 的 issue 用 `search(original)` 找到原文片段并插入单条批注；定位失败的问题合并为范围起点汇总批注。
     7. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。

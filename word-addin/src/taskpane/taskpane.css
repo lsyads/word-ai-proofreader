@@ -76,12 +76,23 @@ body {
   font-weight: 600;
 }
 
-.control-select {
+.control-input,
+.control-select,
+.control-textarea {
   border: 1px solid #8a8886;
   border-radius: 4px;
+  box-sizing: border-box;
   color: #323130;
+  font: inherit;
   min-height: 34px;
   padding: 4px 8px;
+  width: 100%;
+}
+
+.control-textarea {
+  line-height: 1.5;
+  min-height: 84px;
+  resize: vertical;
 }
 
 .history-actions {

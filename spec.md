@@ -58,6 +58,10 @@ Request:
 ```json
 {
   "text": "需要审校的 Word 选区文本",
+  "book": {
+    "title": "书名",
+    "introduction": "可选书籍介绍"
+  },
   "session_id": "session_xxx",
   "provider_api": "responses",
   "proofread_mode": "fast",
@@ -90,8 +94,10 @@ Response:
 
 - `category`：问题类别，第一版允许自由字符串，例如 `typo`、`grammar`、`style`、`fact`。
 - `severity`：严重程度，使用 `low`、`medium`、`high`。
+- `book`：必填。`title` 为书名，去掉首尾空白后不能为空；`introduction` 为可选书籍介绍，空白会归一为 `null`。缺少 `book` 或空书名返回 422。
 - `provider_api`：可选，支持 `responses`、`chat`；未传时使用后端环境变量 `AI_PROVIDER_API`，默认 `responses`。
 - `proofread_mode`：可选，支持 `fast`、`thinking`；默认 `fast`。`fast` 只抓明显问题、优先响应速度；`thinking` 更细审、使用更高输出上限，优先审校质量。两种模式均不限制返回条数。
+- 后端会把书名和书籍介绍作为 prompt 背景传给 AI；书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回可定位 issue。
 - AI 原始输出不包含 `start`、`end`、`comment`，只包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。
 - `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
 - 纯空白差异过滤：如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端会过滤该 issue，不返回给 Word 插件。
@@ -188,7 +194,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
 
 `AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、非 JSON 返回、schema 不匹配统一转换为后端 502。`AI_FAST_MAX_TOKENS` 用于快速审校，`AI_THINKING_MAX_TOKENS` 用于深度审校。
-`BACKEND_LOG_LEVEL` 默认 `INFO`，用于打印请求模式、文本长度、provider 状态、问题数和定位数量；不得打印 API Key 或选中文本全文。
+`BACKEND_LOG_LEVEL` 默认 `INFO`，用于打印请求模式、文本长度、provider 状态、问题数和定位数量，不打印选中文本全文。临时设为 `DEBUG` 时会打印后端和 AI provider 调试报文，可能包含选区文本、书名、介绍和 AI 输出；任何模式都不得打印 API Key、`Authorization` 或 Bearer token。
 
 本地 oMLX：
 
@@ -206,7 +212,7 @@ Responses 流式接口 smoke test：
 curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
-  -d '{"text":"这是一段需要审校的文本。","session_id":"session_xxx","context":{"source":"manual-curl"}}'
+  -d '{"text":"这是一段需要审校的文本。","book":{"title":"测试书名","introduction":"这是一部用于联调的测试图书。"},"session_id":"session_xxx","context":{"source":"manual-curl"}}'
 ```
 
 插件：
@@ -237,6 +243,8 @@ npm run dev-server
 - 空文本请求 `POST /api/proofread` 返回 422。
 - 未配置 `AI_API_KEY` 时，后端返回 mock `issues[]`。
 - 配置 `AI_API_KEY` 时，后端按 `provider_api` 调用真实 Responses API 或 Chat Completions；AI provider 异常时返回 502，且错误信息不包含 Key 或 Authorization header。
+- 缺少 `book` 或 `book.title` 为空时，`POST /api/proofread` 返回 422。
+- `BACKEND_LOG_LEVEL=INFO` 不打印完整请求/返回正文；`DEBUG` 会打印后端和 AI provider 调试报文，但不包含 API Key、`Authorization` 或 Bearer token。
 - `POST /api/sessions` 返回唯一 `session_id`。
 - Responses 请求不携带 `previous_response_id`；同一 `session_id` 的多次审校互不续接上下文。
 - AI 输出不包含 `start/end` 时，后端能按 `original` 计算 `start/end`。
@@ -247,7 +255,7 @@ npm run dev-server
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - `npm run lint` 通过。
 - `npm run build` 通过。
-- Word 中空选区点击“AI 审校”时显示错误，不调用后端。
+- Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。
 - 后端不可用时显示错误，不插入空批注。
 - 后端返回非空 `issues[]` 时，批注模式对可定位问题逐条插入原文片段批注，对不可定位问题插入 fallback 汇总批注。
 - 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置；无 `replacement` 或定位失败的问题插入 fallback 汇总批注。

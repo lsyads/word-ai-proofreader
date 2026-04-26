@@ -5,7 +5,7 @@ import re
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from app.schemas import ProofreadIssue
+from app.schemas import BookInfo, ProofreadIssue
 from app.services.ai_client import AIClientError, AIStreamEvent, proofread_with_ai, stream_proofread_with_ai
 from app.settings import get_settings
 
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def proofread_text(
     text: str,
+    book: BookInfo,
     session_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -39,6 +40,7 @@ async def proofread_text(
         )
         result = await proofread_with_ai(
             text,
+            book,
             provider_api=provider_api,
             proofread_mode=proofread_mode,
         )
@@ -50,6 +52,7 @@ async def proofread_text(
 
 async def stream_proofread_text(
     text: str,
+    book: BookInfo,
     session_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -82,6 +85,7 @@ async def stream_proofread_text(
 
     async for event in stream_proofread_with_ai(
         text,
+        book,
         provider_api=provider_api,
         proofread_mode=proofread_mode,
     ):

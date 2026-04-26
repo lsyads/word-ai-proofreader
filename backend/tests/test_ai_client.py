@@ -1,10 +1,11 @@
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
 
-from app.schemas import ProofreadIssue
+from app.schemas import BookInfo, ProofreadIssue
 from app.services.ai_client import AIClientError, proofread_with_ai, stream_proofread_with_ai
 from app.settings import Settings
 
@@ -125,12 +126,16 @@ def settings():
     )
 
 
+def book():
+    return BookInfo(title="测试书名", introduction="这是一部测试图书。")
+
+
 def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=response_payload())
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    result = asyncio.run(proofread_with_ai("这是一段文本。", settings=settings()))
+    result = asyncio.run(proofread_with_ai("这是一段文本。", book(), settings=settings()))
 
     assert result.issues == [
         ProofreadIssue(
@@ -157,6 +162,8 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert "previous_response_id" not in call["json"]
     assert "这是一段文本。" in call["json"]["input"]
     assert "<text>\n这是一段文本。\n</text>" in call["json"]["input"]
+    assert '"title":"测试书名"' in call["json"]["input"]
+    assert '"introduction":"这是一部测试图书。"' in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
     assert "comment" not in call["json"]["input"]
 
@@ -166,7 +173,7 @@ def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
     FakeAsyncClient.response = FakeResponse(payload=response_payload())
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    result = asyncio.run(proofread_with_ai("文本", settings=settings(), proofread_mode="thinking"))
+    result = asyncio.run(proofread_with_ai("文本", book(), settings=settings(), proofread_mode="thinking"))
 
     assert result.response_id == "resp-1"
     assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 32768
@@ -178,7 +185,7 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     FakeAsyncClient.response = FakeResponse(payload=chat_payload())
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    result = asyncio.run(proofread_with_ai("这是一段文本。", provider_api="chat", settings=settings()))
+    result = asyncio.run(proofread_with_ai("这是一段文本。", book(), provider_api="chat", settings=settings()))
 
     assert result.response_id == "chatcmpl-1"
     assert result.issues == [
@@ -195,12 +202,12 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.test/v1/chat/completions"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
-    assert call["json"]["response_format"] == {"type": "json_object"}
     assert call["json"]["max_tokens"] == 16384
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
+    assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
 
 
 def test_proofread_with_ai_raises_for_responses_unsupported(monkeypatch):
@@ -209,7 +216,7 @@ def test_proofread_with_ai_raises_for_responses_unsupported(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
     with pytest.raises(AIClientError, match="Responses API"):
-        asyncio.run(proofread_with_ai("文本", settings=settings()))
+        asyncio.run(proofread_with_ai("文本", book(), settings=settings()))
 
 
 def test_proofread_with_ai_raises_for_non_json_response_body(monkeypatch):
@@ -218,7 +225,7 @@ def test_proofread_with_ai_raises_for_non_json_response_body(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
     with pytest.raises(AIClientError, match="response body was not valid JSON"):
-        asyncio.run(proofread_with_ai("文本", settings=settings()))
+        asyncio.run(proofread_with_ai("文本", book(), settings=settings()))
 
 
 def test_proofread_with_ai_raises_for_invalid_issue_schema(monkeypatch):
@@ -227,7 +234,39 @@ def test_proofread_with_ai_raises_for_invalid_issue_schema(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
     with pytest.raises(AIClientError, match="issues did not match"):
-        asyncio.run(proofread_with_ai("文本", settings=settings()))
+        asyncio.run(proofread_with_ai("文本", book(), settings=settings()))
+
+
+def test_proofread_with_ai_debug_logs_provider_payloads_without_key(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=response_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.DEBUG, logger="app")
+
+    asyncio.run(proofread_with_ai("调试文本", book(), settings=settings()))
+
+    logs = caplog.text
+    assert "AI responses request payload" in logs
+    assert "AI responses response payload" in logs
+    assert "调试文本" in logs
+    assert "测试书名" in logs
+    assert "test-key" not in logs
+    assert "Authorization" not in logs
+    assert "Bearer" not in logs
+
+
+def test_proofread_with_ai_info_logs_do_not_include_provider_payloads(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=response_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.INFO, logger="app")
+
+    asyncio.run(proofread_with_ai("不应出现在 INFO 的正文", book(), settings=settings()))
+
+    logs = caplog.text
+    assert "AI responses request started" in logs
+    assert "AI responses request payload" not in logs
+    assert "不应出现在 INFO 的正文" not in logs
 
 
 def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):
@@ -254,7 +293,7 @@ def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):
     FakeAsyncClient.stream_response = FakeStreamResponse(lines=lines)
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
 
-    events = asyncio.run(_collect_stream_events(stream_proofread_with_ai("文本", settings=settings())))
+    events = asyncio.run(_collect_stream_events(stream_proofread_with_ai("文本", book(), settings=settings())))
 
     assert [event.event for event in events] == ["status", "status", "status", "result", "status"]
     assert events[3].data["response_id"] == "resp-stream"
@@ -264,7 +303,7 @@ def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):
 
 def test_stream_proofread_with_ai_rejects_chat_mode():
     with pytest.raises(AIClientError, match="not SSE"):
-        asyncio.run(_collect_stream_events(stream_proofread_with_ai("文本", settings=settings(), provider_api="chat")))
+        asyncio.run(_collect_stream_events(stream_proofread_with_ai("文本", book(), settings=settings(), provider_api="chat")))
 
 
 async def _collect_stream_events(stream):

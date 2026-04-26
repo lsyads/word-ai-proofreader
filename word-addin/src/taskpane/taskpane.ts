@@ -1,4 +1,4 @@
-/* global AbortController, AbortSignal, Blob, URL, clearTimeout, document, Office, Word, HTMLElement, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, Response, TextDecoder, fetch, localStorage, setTimeout */
+/* global AbortController, AbortSignal, Blob, URL, clearTimeout, document, Office, Word, HTMLElement, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Response, TextDecoder, fetch, localStorage, setTimeout */
 
 interface ProofreadIssue {
   id: string;
@@ -25,6 +25,11 @@ interface SessionResponse {
   created_at: string;
 }
 
+interface BookInfo {
+  title: string;
+  introduction?: string | null;
+}
+
 type TaskState = "idle" | "running" | "succeeded" | "failed" | "cancelled";
 type ProviderAPI = "responses" | "chat";
 type ProofreadMode = "fast" | "thinking";
@@ -35,6 +40,8 @@ interface ProofreadHistoryEntry {
   sessionId: string;
   createdAt: string;
   textPreview: string;
+  bookTitle: string;
+  bookIntroductionPreview: string;
   status: TaskState;
   issueCount: number;
   locatedIssueCount: number;
@@ -59,6 +66,8 @@ const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v1";
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v1";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v1";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v1";
+const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v1";
+const BOOK_INTRODUCTION_STORAGE_KEY = "word-ai-proofreader-book-introduction-v1";
 const MAX_HISTORY_ENTRIES = 20;
 const CLEAR_HISTORY_CONFIRM_MS = 4000;
 
@@ -76,6 +85,8 @@ Office.onReady((info) => {
     getButton("export-history").onclick = exportHistory;
     getButton("import-history").onclick = () => getInput("history-file").click();
     getInput("history-file").onchange = importHistory;
+    getInput("book-title").oninput = persistBookInfo;
+    getTextArea("book-introduction").oninput = persistBookInfo;
     getSelect("provider-api").onchange = persistControls;
     getSelect("proofread-mode").onchange = persistControls;
     getSelect("application-mode").onchange = persistControls;
@@ -138,6 +149,11 @@ export async function proofreadSelection() {
     return;
   }
 
+  const book = getValidatedBookInfo();
+  if (!book) {
+    return;
+  }
+
   if (!Office.context.requirements.isSetSupported("WordApi", "1.4")) {
     showMessage("当前 Word 环境不支持批注 API，无法完成审校。", "error");
     return;
@@ -165,6 +181,7 @@ export async function proofreadSelection() {
     selectedText = await getSelectedText();
     const proofreadResult = await requestProofread(
       selectedText,
+      book,
       (status) => {
         showMessage(status.message, "default");
         appendProgressStatus(status);
@@ -188,6 +205,7 @@ export async function proofreadSelection() {
     saveHistoryEntry({
       status: taskState,
       text: selectedText,
+      book,
       issues: proofreadResult.issues,
       insertedComment: applicationSummary.commentCount + applicationSummary.fallbackCount > 0,
       locatedIssueCount: applicationSummary.commentCount + applicationSummary.revisionCount,
@@ -209,6 +227,7 @@ export async function proofreadSelection() {
       saveHistoryEntry({
         status: taskState,
         text: selectedText,
+        book,
         issues: [],
         insertedComment: false,
         locatedIssueCount: 0,
@@ -226,6 +245,7 @@ export async function proofreadSelection() {
     saveHistoryEntry({
       status: taskState,
       text: selectedText,
+      book,
       issues: [],
       insertedComment: false,
       locatedIssueCount: 0,
@@ -402,28 +422,33 @@ async function applyRevisionsForIssues(
 
 async function requestProofread(
   text: string,
+  book: BookInfo,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
   if (getProviderApi() === "chat") {
     onStatus({ stage: "api", message: "正在请求 Chat Completions 接口" });
-    return requestProofreadJson(text, signal);
+    return requestProofreadJson(text, book, signal);
   }
 
   try {
     onStatus({ stage: "api", message: "正在请求流式接口" });
-    return await requestProofreadStream(text, onStatus, signal);
+    return await requestProofreadStream(text, book, onStatus, signal);
   } catch (error) {
     if (isAbortError(error)) {
       throw error;
     }
 
     onStatus({ stage: "fallback", message: "流式接口不可用，正在回退到普通接口" });
-    return requestProofreadJson(text, signal);
+    return requestProofreadJson(text, book, signal);
   }
 }
 
-async function requestProofreadJson(text: string, signal: AbortSignal): Promise<ProofreadResponse> {
+async function requestProofreadJson(
+  text: string,
+  book: BookInfo,
+  signal: AbortSignal
+): Promise<ProofreadResponse> {
   const response = await fetch(`${API_BASE_URL}/api/proofread`, {
     method: "POST",
     signal,
@@ -432,6 +457,7 @@ async function requestProofreadJson(text: string, signal: AbortSignal): Promise<
     },
     body: JSON.stringify({
       text,
+      book,
       session_id: currentSessionId,
       provider_api: getProviderApi(),
       proofread_mode: getProofreadMode(),
@@ -450,6 +476,7 @@ async function requestProofreadJson(text: string, signal: AbortSignal): Promise<
 
 async function requestProofreadStream(
   text: string,
+  book: BookInfo,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
@@ -462,6 +489,7 @@ async function requestProofreadStream(
     },
     body: JSON.stringify({
       text,
+      book,
       session_id: currentSessionId,
       provider_api: getProviderApi(),
       proofread_mode: getProofreadMode(),
@@ -716,6 +744,7 @@ function formatStage(stage: string): string {
 function saveHistoryEntry(input: {
   status: TaskState;
   text: string;
+  book: BookInfo;
   issues: ProofreadIssue[];
   insertedComment: boolean;
   locatedIssueCount: number;
@@ -733,6 +762,8 @@ function saveHistoryEntry(input: {
     sessionId: currentSessionId,
     createdAt: new Date().toISOString(),
     textPreview: input.text.trim().slice(0, 40),
+    bookTitle: input.book.title,
+    bookIntroductionPreview: (input.book.introduction || "").trim().slice(0, 40),
     status: input.status,
     issueCount: input.issues.length,
     locatedIssueCount: input.locatedIssueCount,
@@ -819,6 +850,9 @@ function normalizeHistoryEntries(entries: unknown[]): ProofreadHistoryEntry[] {
         sessionId: typeof entry.sessionId === "string" ? entry.sessionId : "",
         createdAt: typeof entry.createdAt === "string" ? entry.createdAt : new Date().toISOString(),
         textPreview: typeof entry.textPreview === "string" ? entry.textPreview : "",
+        bookTitle: typeof entry.bookTitle === "string" ? entry.bookTitle : "",
+        bookIntroductionPreview:
+          typeof entry.bookIntroductionPreview === "string" ? entry.bookIntroductionPreview : "",
         status: isTaskState(entry.status) ? entry.status : "succeeded",
         issueCount: typeof entry.issueCount === "number" ? entry.issueCount : issues.length,
         locatedIssueCount:
@@ -859,13 +893,17 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
       ? `修订 ${entry.revisionCount} / 回退 ${entry.fallbackCount}`
       : `批注 / 回退 ${entry.fallbackCount}`;
   const modeText = `${formatProofreadMode(entry.proofreadMode)} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
+  const bookText = entry.bookTitle ? `《${entry.bookTitle}》` : "未记录书名";
   const commentText = entry.insertedComment ? "已插入批注" : "未插入批注";
   const errorText = entry.errorMessage ? `：${entry.errorMessage}` : "";
 
-  return `${createdAt} / ${statusLabels[entry.status]} / ${modeText} / ${issueText} / ${locatedText} / ${actionText} / ${commentText}${errorText}`;
+  return `${createdAt} / ${bookText} / ${statusLabels[entry.status]} / ${modeText} / ${issueText} / ${locatedText} / ${actionText} / ${commentText}${errorText}`;
 }
 
 function initializeControls() {
+  getInput("book-title").value = localStorage.getItem(BOOK_TITLE_STORAGE_KEY) || "";
+  getTextArea("book-introduction").value =
+    localStorage.getItem(BOOK_INTRODUCTION_STORAGE_KEY) || "";
   getSelect("provider-api").value = readStoredProviderApi();
   getSelect("proofread-mode").value = readStoredProofreadMode();
   getSelect("application-mode").value = readStoredApplicationMode();
@@ -875,6 +913,31 @@ function persistControls() {
   localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
+}
+
+function persistBookInfo() {
+  localStorage.setItem(BOOK_TITLE_STORAGE_KEY, getInput("book-title").value);
+  localStorage.setItem(BOOK_INTRODUCTION_STORAGE_KEY, getTextArea("book-introduction").value);
+}
+
+function getValidatedBookInfo(): BookInfo | null {
+  const titleInput = getInput("book-title");
+  const title = titleInput.value.trim();
+  const introduction = getTextArea("book-introduction").value.trim();
+
+  if (!title) {
+    showMessage("请先填写书名。", "error");
+    titleInput.focus();
+    return null;
+  }
+
+  titleInput.value = title;
+  getTextArea("book-introduction").value = introduction;
+  persistBookInfo();
+  return {
+    title,
+    introduction: introduction || null,
+  };
 }
 
 function getProviderApi(): ProviderAPI {
@@ -1035,6 +1098,8 @@ function setBusy(isBusy: boolean) {
   getButton("clear-history").disabled = isBusy;
   getButton("export-history").disabled = isBusy;
   getButton("import-history").disabled = isBusy;
+  getInput("book-title").disabled = isBusy;
+  getTextArea("book-introduction").disabled = isBusy;
   getSelect("provider-api").disabled = isBusy;
   getSelect("proofread-mode").disabled = isBusy;
   getSelect("application-mode").disabled = isBusy;
@@ -1060,6 +1125,10 @@ function getSelect(id: string): HTMLSelectElement {
 
 function getInput(id: string): HTMLInputElement {
   return document.getElementById(id) as HTMLInputElement;
+}
+
+function getTextArea(id: string): HTMLTextAreaElement {
+  return document.getElementById(id) as HTMLTextAreaElement;
 }
 
 function getErrorMessage(error: unknown): string {

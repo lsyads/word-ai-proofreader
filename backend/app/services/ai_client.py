@@ -9,7 +9,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import ValidationError
 
-from app.schemas import ProofreadIssue
+from app.schemas import BookInfo, ProofreadIssue
 from app.settings import Settings, get_settings
 
 ProviderAPI = Literal["responses", "chat"]
@@ -117,6 +117,7 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 
 async def proofread_with_ai(
     text: str,
+    book: BookInfo,
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -125,12 +126,13 @@ async def proofread_with_ai(
     provider_api = _resolve_provider_api(settings, provider_api)
 
     if provider_api == "chat":
-        return await _proofread_with_chat(text, settings, proofread_mode=proofread_mode)
+        return await _proofread_with_chat(text, book, settings, proofread_mode=proofread_mode)
 
     _ensure_responses_api(settings)
 
     payload = _build_responses_payload(
         text,
+        book,
         settings,
         proofread_mode=proofread_mode,
     )
@@ -142,10 +144,13 @@ async def proofread_with_ai(
         payload["max_output_tokens"],
     )
 
+    _debug_log_json("AI responses request payload", payload)
+    headers = _auth_headers(settings)
+
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
             _responses_url(settings),
-            headers=_auth_headers(settings),
+            headers=headers,
             json=payload,
         )
 
@@ -157,6 +162,7 @@ async def proofread_with_ai(
     except ValueError as exc:
         raise AIClientError("AI provider response body was not valid JSON") from exc
 
+    _debug_log_json("AI responses response payload", data)
     result = _parse_response_payload(data)
     logger.info(
         "AI responses payload parsed issue_count=%s response_id_present=%s",
@@ -168,6 +174,7 @@ async def proofread_with_ai(
 
 async def stream_proofread_with_ai(
     text: str,
+    book: BookInfo,
     settings: Settings | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
@@ -182,6 +189,7 @@ async def stream_proofread_with_ai(
 
     payload = _build_responses_payload(
         text,
+        book,
         settings,
         proofread_mode=proofread_mode,
         stream=True,
@@ -195,11 +203,14 @@ async def stream_proofread_with_ai(
         payload["max_output_tokens"],
     )
 
+    _debug_log_json("AI responses stream request payload", payload)
+    headers = _auth_headers(settings)
+
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         async with client.stream(
             "POST",
             _responses_url(settings),
-            headers=_auth_headers(settings),
+            headers=headers,
             json=payload,
         ) as response:
             logger.info("AI responses stream connected status_code=%s", response.status_code)
@@ -229,6 +240,10 @@ async def stream_proofread_with_ai(
 
                 if event_name == "response.completed":
                     provider_response = _coerce_dict(data.get("response"))
+                    _debug_log_json(
+                        "AI responses stream completed payload",
+                        {"response": provider_response, "output_text": output_text},
+                    )
                     result = _parse_response_payload(provider_response, fallback_content=output_text)
                     logger.info(
                         "AI responses stream completed issue_count=%s response_id_present=%s",
@@ -246,6 +261,7 @@ async def stream_proofread_with_ai(
                     continue
 
                 if event_name in {"response.failed", "response.incomplete"}:
+                    _debug_log_json("AI responses stream terminal event payload", data)
                     raise AIClientError(f"AI provider Responses API returned {event_name}")
 
 
@@ -255,11 +271,12 @@ def _ensure_responses_api(settings: Settings) -> None:
 
 async def _proofread_with_chat(
     text: str,
+    book: BookInfo,
     settings: Settings,
     proofread_mode: ProofreadMode,
 ) -> AIProofreadResult:
     _ensure_api_key(settings)
-    payload = _build_chat_payload(text, settings, proofread_mode=proofread_mode)
+    payload = _build_chat_payload(text, book, settings, proofread_mode=proofread_mode)
     logger.info(
         "AI chat request started model=%s proofread_mode=%s text_len=%s max_tokens=%s",
         settings.openai_model,
@@ -268,10 +285,13 @@ async def _proofread_with_chat(
         payload["max_tokens"],
     )
 
+    _debug_log_json("AI chat request payload", payload)
+    headers = _auth_headers(settings)
+
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
             _chat_url(settings),
-            headers=_auth_headers(settings),
+            headers=headers,
             json=payload,
         )
 
@@ -283,6 +303,7 @@ async def _proofread_with_chat(
     except ValueError as exc:
         raise AIClientError("AI provider response body was not valid JSON") from exc
 
+    _debug_log_json("AI chat response payload", data)
     result = _parse_chat_payload(data)
     logger.info(
         "AI chat payload parsed issue_count=%s response_id_present=%s",
@@ -294,13 +315,14 @@ async def _proofread_with_chat(
 
 def _build_responses_payload(
     text: str,
+    book: BookInfo,
     settings: Settings,
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": settings.openai_model,
-        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text)}",
+        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
         "temperature": 0.2,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
@@ -314,6 +336,7 @@ def _build_responses_payload(
 
 def _build_chat_payload(
     text: str,
+    book: BookInfo,
     settings: Settings,
     proofread_mode: ProofreadMode = "fast",
 ) -> dict[str, Any]:
@@ -321,7 +344,7 @@ def _build_chat_payload(
         "model": settings.openai_model,
         "messages": [
             {"role": "system", "content": _build_system_prompt(proofread_mode)},
-            {"role": "user", "content": _build_user_prompt(text)},
+            {"role": "user", "content": _build_user_prompt(text, book)},
         ],
         "temperature": 0.2,
         "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
@@ -334,20 +357,36 @@ def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
 
 
-def _build_user_prompt(text: str) -> str:
+def _build_user_prompt(text: str, book: BookInfo) -> str:
+    book_context = json.dumps(
+        book.model_dump(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return f"""
 请审校下面 <text> 标签内的 Word 选区文本。
+
+书籍背景信息如下，仅用于理解文本语境，不属于待审正文：
+<book>
+{book_context}
+</book>
 
 注意：
 1. <text> 和 </text> 只是边界标记，不属于正文。
 2. 只审校标签内文本。
 3. original 必须来自标签内文本的原文片段。
-4. 不要输出标签外的内容。
+4. 不要对 <book> 中的书名或介绍本身输出问题。
+5. 不要输出标签外的内容。
 
 <text>
 {text}
 </text>
 """.strip()
+
+
+def _debug_log_json(message: str, payload: Any) -> None:
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("%s: %s", message, json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> int:

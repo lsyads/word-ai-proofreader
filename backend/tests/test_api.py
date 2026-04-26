@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +11,7 @@ from app.services.sessions import clear_sessions_for_tests
 
 
 client = TestClient(app)
+BOOK = {"title": "测试书名", "introduction": "这是一部测试图书。"}
 
 
 def setup_function():
@@ -34,6 +36,10 @@ def parse_sse_events(body: str):
     return events
 
 
+def proofread_payload(text: str, **extra):
+    return {"text": text, "book": BOOK, **extra}
+
+
 def test_health_returns_ok():
     response = client.get("/health")
 
@@ -54,7 +60,22 @@ def test_create_session_returns_unique_session_ids():
 
 
 def test_proofread_rejects_blank_text():
-    response = client.post("/api/proofread", json={"text": "   "})
+    response = client.post("/api/proofread", json=proofread_payload("   "))
+
+    assert response.status_code == 422
+
+
+def test_proofread_rejects_missing_book():
+    response = client.post("/api/proofread", json={"text": "这是一段文本。"})
+
+    assert response.status_code == 422
+
+
+def test_proofread_rejects_blank_book_title():
+    response = client.post(
+        "/api/proofread",
+        json={"text": "这是一段文本。", "book": {"title": "   ", "introduction": "介绍"}},
+    )
 
     assert response.status_code == 422
 
@@ -64,7 +85,7 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
 
     response = client.post(
         "/api/proofread",
-        json={"text": "这是一段需要审校的文本。", "context": {"source": "word-addin"}},
+        json=proofread_payload("这是一段需要审校的文本。", context={"source": "word-addin"}),
     )
 
     assert response.status_code == 200
@@ -85,11 +106,13 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
 def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
         assert provider_api == "responses"
         assert proofread_mode == "fast"
+        assert book.title == "测试书名"
         return AIProofreadResult(
             response_id="resp-1",
             issues=[
@@ -107,7 +130,7 @@ def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "这是一段需要定位的文本。"})
+    response = client.post("/api/proofread", json=proofread_payload("这是一段需要定位的文本。"))
 
     assert response.status_code == 200
     issue = response.json()["issues"][0]
@@ -119,6 +142,7 @@ def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
 def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -139,7 +163,7 @@ def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "这是一段文本。"})
+    response = client.post("/api/proofread", json=proofread_payload("这是一段文本。"))
 
     assert response.status_code == 200
     issue = response.json()["issues"][0]
@@ -151,6 +175,7 @@ def test_proofread_normalizes_empty_replacement_to_null(monkeypatch):
 def test_proofread_filters_whitespace_only_changes(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -179,7 +204,7 @@ def test_proofread_filters_whitespace_only_changes(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "这里有 A B，还有错字。"})
+    response = client.post("/api/proofread", json=proofread_payload("这里有 A B，还有错字。"))
 
     assert response.status_code == 200
     issues = response.json()["issues"]
@@ -191,6 +216,7 @@ def test_proofread_filters_whitespace_only_changes(monkeypatch):
 def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -217,7 +243,7 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "重复内容，重复内容。"})
+    response = client.post("/api/proofread", json=proofread_payload("重复内容，重复内容。"))
 
     assert response.status_code == 200
     assert [(issue["start"], issue["end"]) for issue in response.json()["issues"]] == [(0, 2), (5, 7)]
@@ -226,6 +252,7 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
 def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -245,7 +272,7 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "这是一段文本。"})
+    response = client.post("/api/proofread", json=proofread_payload("这是一段文本。"))
 
     assert response.status_code == 200
     issue = response.json()["issues"][0]
@@ -256,10 +283,12 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
 def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
         assert text == "这是一段需要真实审校的文本。"
+        assert book.title == "测试书名"
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
         return AIProofreadResult(
@@ -282,7 +311,7 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
 
     response = client.post(
         "/api/proofread",
-        json={"text": "这是一段需要真实审校的文本。", "proofread_mode": "thinking"},
+        json=proofread_payload("这是一段需要真实审校的文本。", proofread_mode="thinking"),
     )
 
     assert response.status_code == 200
@@ -294,6 +323,7 @@ def test_proofread_responses_mode_does_not_require_session(monkeypatch):
 
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -306,9 +336,9 @@ def test_proofread_responses_mode_does_not_require_session(monkeypatch):
 
     session_id = client.post("/api/sessions").json()["session_id"]
 
-    first = client.post("/api/proofread", json={"text": "第一段文本。", "session_id": session_id})
-    second = client.post("/api/proofread", json={"text": "第二段文本。", "session_id": session_id})
-    third = client.post("/api/proofread", json={"text": "第三段文本。", "session_id": "missing-session"})
+    first = client.post("/api/proofread", json=proofread_payload("第一段文本。", session_id=session_id))
+    second = client.post("/api/proofread", json=proofread_payload("第二段文本。", session_id=session_id))
+    third = client.post("/api/proofread", json=proofread_payload("第三段文本。", session_id="missing-session"))
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -321,6 +351,7 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
 
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -337,11 +368,11 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
 
     first = client.post(
         "/api/proofread",
-        json={"text": "第一段文本。", "provider_api": "chat", "proofread_mode": "thinking"},
+        json=proofread_payload("第一段文本。", provider_api="chat", proofread_mode="thinking"),
     )
     second = client.post(
         "/api/proofread",
-        json={"text": "第二段文本。", "provider_api": "chat", "session_id": "missing-session"},
+        json=proofread_payload("第二段文本。", provider_api="chat", session_id="missing-session"),
     )
 
     assert first.status_code == 200
@@ -355,6 +386,7 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
 def test_proofread_converts_ai_client_error_to_502(monkeypatch):
     async def fake_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
@@ -363,20 +395,51 @@ def test_proofread_converts_ai_client_error_to_502(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test-key")
     monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
 
-    response = client.post("/api/proofread", json={"text": "这是一段文本。"})
+    response = client.post("/api/proofread", json=proofread_payload("这是一段文本。"))
 
     assert response.status_code == 502
     assert response.json() == {"detail": "AI provider returned HTTP 500"}
 
 
+def test_proofread_debug_logs_request_and_response_without_api_key(monkeypatch, caplog):
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    caplog.set_level(logging.DEBUG, logger="app")
+
+    response = client.post("/api/proofread", json=proofread_payload("调试文本。"))
+
+    assert response.status_code == 200
+    logs = caplog.text
+    assert "proofread request body" in logs
+    assert "proofread response body" in logs
+    assert "调试文本。" in logs
+    assert "测试书名" in logs
+    assert "Authorization" not in logs
+    assert "Bearer" not in logs
+
+
+def test_proofread_info_logs_do_not_include_full_body(monkeypatch, caplog):
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    caplog.set_level(logging.INFO, logger="app")
+
+    response = client.post("/api/proofread", json=proofread_payload("不应出现在 INFO 的正文。"))
+
+    assert response.status_code == 200
+    logs = caplog.text
+    assert "proofread request received" in logs
+    assert "proofread request body" not in logs
+    assert "不应出现在 INFO 的正文。" not in logs
+
+
 def test_proofread_stream_returns_status_events_and_result(monkeypatch):
     async def fake_stream_proofread_text(
         text,
+        book,
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
     ):
         assert text == "这是一段需要真实审校的文本。"
+        assert book.title == "测试书名"
         assert session_id == "session-test"
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
@@ -405,12 +468,12 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
 
     response = client.post(
         "/api/proofread/stream",
-        json={
-            "text": "这是一段需要真实审校的文本。",
-            "session_id": "session-test",
-            "provider_api": "responses",
-            "proofread_mode": "thinking",
-        },
+        json=proofread_payload(
+            "这是一段需要真实审校的文本。",
+            session_id="session-test",
+            provider_api="responses",
+            proofread_mode="thinking",
+        ),
     )
 
     assert response.status_code == 200
@@ -430,7 +493,7 @@ def test_proofread_stream_returns_status_events_and_result(monkeypatch):
 def test_proofread_stream_rejects_chat_mode():
     response = client.post(
         "/api/proofread/stream",
-        json={"text": "这是一段文本。", "provider_api": "chat"},
+        json=proofread_payload("这是一段文本。", provider_api="chat"),
     )
 
     assert response.status_code == 400
@@ -442,10 +505,12 @@ def test_proofread_stream_rejects_chat_mode():
 def test_proofread_stream_does_not_require_session(monkeypatch):
     async def fake_stream_proofread_with_ai(
         text,
+        book,
         provider_api=None,
         proofread_mode="fast",
     ):
         assert text == "这是一段文本。"
+        assert book.title == "测试书名"
         assert provider_api == "responses"
         assert proofread_mode == "fast"
         yield AIStreamEvent("result", {"issues": [], "response_id": "resp-1"})
@@ -455,7 +520,7 @@ def test_proofread_stream_does_not_require_session(monkeypatch):
 
     response = client.post(
         "/api/proofread/stream",
-        json={"text": "这是一段文本。", "session_id": "missing-session"},
+        json=proofread_payload("这是一段文本。", session_id="missing-session"),
     )
 
     assert response.status_code == 200
@@ -467,6 +532,7 @@ def test_proofread_stream_does_not_require_session(monkeypatch):
 def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
     async def fake_stream_proofread_text(
         text,
+        book,
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
@@ -477,7 +543,7 @@ def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
 
     monkeypatch.setattr(proofread_service, "stream_proofread_text", fake_stream_proofread_text)
 
-    response = client.post("/api/proofread/stream", json={"text": "这是一段文本。"})
+    response = client.post("/api/proofread/stream", json=proofread_payload("这是一段文本。"))
 
     assert response.status_code == 200
 

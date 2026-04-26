@@ -63,9 +63,11 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
         request.provider_api or "default",
         request.proofread_mode,
     )
+    _debug_log_json("proofread request body", request.model_dump())
     try:
         issues = await proofread_service.proofread_text(
             request.text,
+            request.book,
             session_id=request.session_id,
             provider_api=request.provider_api,
             proofread_mode=request.proofread_mode,
@@ -85,7 +87,9 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
         len(issues),
         _count_located_issues(issues),
     )
-    return ProofreadResponse(issues=issues)
+    response = ProofreadResponse(issues=issues)
+    _debug_log_json("proofread response body", response.model_dump())
+    return response
 
 
 @app.post("/api/proofread/stream")
@@ -104,6 +108,7 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
         provider_api,
         request.proofread_mode,
     )
+    _debug_log_json("proofread stream request body", request.model_dump())
     return StreamingResponse(
         _proofread_event_stream(request),
         media_type="text/event-stream",
@@ -119,6 +124,7 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
     try:
         async for event in proofread_service.stream_proofread_text(
             request.text,
+            request.book,
             session_id=request.session_id,
             provider_api=request.provider_api,
             proofread_mode=request.proofread_mode,
@@ -130,6 +136,7 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
                     len(issues) if isinstance(issues, list) else 0,
                     _count_located_issue_dicts(issues) if isinstance(issues, list) else 0,
                 )
+                _debug_log_json("proofread stream result body", event.data)
             yield _format_sse(event.event, event.data)
     except AIClientError as exc:
         logger.warning(
@@ -139,7 +146,9 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
             exc,
             exc_info=True,
         )
-        yield _format_sse("error", {"message": str(exc)})
+        error_data = {"message": str(exc)}
+        _debug_log_json("proofread stream error body", error_data)
+        yield _format_sse("error", error_data)
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
@@ -168,3 +177,8 @@ def _count_located_issue_dicts(issues: list[Any]) -> int:
         for issue in issues
         if isinstance(issue, dict) and issue.get("start") is not None and issue.get("end") is not None
     )
+
+
+def _debug_log_json(message: str, payload: Any) -> None:
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("%s: %s", message, json.dumps(payload, ensure_ascii=False, default=str))

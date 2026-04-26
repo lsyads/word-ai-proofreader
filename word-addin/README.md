@@ -48,7 +48,7 @@ word-addin/
 
 - `src/taskpane/taskpane.html`
   - 任务窗格 HTML。
-  - 定义标题、状态提示、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、“AI 审校”按钮、审校结果展示区域、历史记录管理按钮。
+  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、“AI 审校”按钮、审校结果展示区域、历史记录管理按钮。
   - 当前 MVP 不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
 
 - `src/taskpane/taskpane.css`
@@ -59,14 +59,15 @@ word-addin/
   - 当前 MVP 的核心前端逻辑。
   - `Office.onReady` 后绑定“AI 审校”、新建对话、历史清空/导出/导入按钮。
   - 点击后内部流程：
-    1. 检查 Word 批注 API 能力。
-    2. 读取当前 Word 选区文本。
-    3. 带上 `provider_api` 和 `proofread_mode` 请求同源接口：Responses 模式用 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接用 `/api/proofread`。
-    4. 批注模式：对有 `start/end` 的 issue 用 `selection.search(original)` 找到原文片段并插入单条批注。
-    5. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
-    6. 对无法定位或无 `replacement` 的 issue 调用 `selection.insertComment(...)` 插入 fallback 汇总批注。
-    7. 在任务窗格展示审校结果、定位状态或错误。
-    8. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON。
+    1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
+    2. 检查 Word 批注 API 能力。
+    3. 读取当前 Word 选区文本。
+    4. 带上 `book`、`provider_api` 和 `proofread_mode` 请求同源接口：Responses 模式用 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接用 `/api/proofread`。
+    5. 批注模式：对有 `start/end` 的 issue 用 `selection.search(original)` 找到原文片段并插入单条批注。
+    6. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
+    7. 对无法定位或无 `replacement` 的 issue 调用 `selection.insertComment(...)` 插入 fallback 汇总批注。
+    8. 在任务窗格展示审校结果、定位状态或错误。
+    9. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；历史记录会显示审校时的书名。
 
 - `assets/`
   - 插件图标和 logo。
@@ -98,6 +99,8 @@ https://localhost:3000/taskpane.html
 POST /api/proofread/stream
 POST /api/proofread
 ```
+
+请求体包含必填 `book.title` 和可选 `book.introduction`，后端会把它们作为 prompt 背景传给 AI；书名为空时前端会直接提示，不读取 Word 选区，也不调用后端审校接口。
 
 Webpack dev server 转发：
 
@@ -160,7 +163,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 ```bash
 curl --noproxy localhost -k -X POST https://localhost:3000/api/proofread \
   -H 'Content-Type: application/json' \
-  -d '{"text":"这是一段需要审校的文本。"}'
+  -d '{"text":"这是一段需要审校的文本。","book":{"title":"测试书名","introduction":"这是一部用于联调的测试图书。"}}'
 ```
 
 ## 测试与构建

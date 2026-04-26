@@ -18,6 +18,7 @@
 - Word 任务窗格提供一个正式入口：“AI 审校”。
 - 插件打开时会创建一个本地 session；点击“新建对话”会创建新的本地 session。后端不使用 session 续接 AI 上下文。
 - 插件内部读取当前 Word 选区文本。
+- 插件提供书籍信息输入：书名必填，介绍可选，并保存在本地用于同一本书连续审校；书籍信息会作为 prompt 背景传给后端。
 - 插件可切换“快速审校/深度审校”和 `Responses/Chat` API。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
 - 插件调用后端 `POST /api/proofread`。
@@ -59,7 +60,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 
 API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 
-后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、问题数和定位数量等调试信息，不打印 API Key 或选中文本全文。需要更细定位过程时可临时设为 `DEBUG`。
+后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、问题数和定位数量等元信息，不打印 API Key 或选中文本全文。临时设为 `DEBUG` 时会打印 `/api/proofread`、`/api/proofread/stream`、AI provider 请求与返回报文，便于本地调试；DEBUG 日志会包含选区文本、书名、介绍和 AI 返回内容，但仍不会打印 API Key、`Authorization` 或 Bearer token，不建议生产开启。
 
 ## 启动 oMLX 本地 AI 服务
 
@@ -125,7 +126,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 SESSION_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
 curl --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread \
   -H 'Content-Type: application/json' \
-  -d "{\"text\":\"这是一段需要审校的文本。\",\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
+  -d "{\"text\":\"这是一段需要审校的文本。\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
 ```
 
 流式审校接口 smoke test。预期会依次看到 `status`、`result` 等 SSE 事件：
@@ -134,7 +135,7 @@ curl --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread \
 curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
-  -d "{\"text\":\"这是一段需要审校的文本。\",\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
+  -d "{\"text\":\"这是一段需要审校的文本。\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
 ```
 
 ## 启动 Word 插件
@@ -172,7 +173,7 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 3. 启动 `word-addin` dev server。
 4. 运行 `npm run start` 旁加载插件到 Word。
 5. 在 Word 文档中选中一段文本。
-6. 打开任务窗格，按需选择“快速审校/深度审校”、`Responses/Chat` 和“批注模式/修订模式”。
+6. 打开任务窗格，填写书名，按需填写书籍介绍，并选择“快速审校/深度审校”、`Responses/Chat` 和“批注模式/修订模式”。
 7. 点击“AI 审校”。
 8. 确认任务窗格“运行过程”区域先逐条显示阶段进度，再显示审校结果。
 9. 如果选择批注模式且后端返回非空 `issues[]`，确认可定位问题批注在对应原文片段上；不可定位问题会作为 fallback 汇总批注插在当前选区。

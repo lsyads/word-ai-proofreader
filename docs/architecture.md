@@ -56,6 +56,10 @@ Content-Type: application/json
 ```json
 {
   "text": "需要审校的 Word 选区文本",
+  "book": {
+    "title": "书名",
+    "introduction": "可选书籍介绍"
+  },
   "session_id": "session_8d7f...",
   "provider_api": "responses",
   "proofread_mode": "fast",
@@ -86,7 +90,7 @@ Response:
 
 `issues` 为空表示未发现明显问题。插件此时只更新任务窗格，不插入 Word 批注。
 
-`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。
 
 AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
 
@@ -109,6 +113,10 @@ Accept: text/event-stream
 ```json
 {
   "text": "需要审校的 Word 选区文本",
+  "book": {
+    "title": "书名",
+    "introduction": "可选书籍介绍"
+  },
   "session_id": "session_8d7f...",
   "provider_api": "responses",
   "proofread_mode": "fast",
@@ -171,7 +179,7 @@ Content-Type: application/json
 ```json
 {
   "model": "Qwen3.6-35B-A3B-4.4bit-msq",
-  "input": "系统审校要求...\n\n请审校以下 Word 选区文本：\n需要审校的 Word 选区文本",
+  "input": "系统审校要求...\n\n书籍背景信息...\n\n<text>\n需要审校的 Word 选区文本\n</text>",
   "temperature": 0.2,
   "max_output_tokens": 16384,
   "text": {
@@ -230,13 +238,11 @@ Content-Type: application/json
   "model": "Qwen3.6-35B-A3B-4.4bit-msq",
   "messages": [
     {"role": "system", "content": "系统审校要求..."},
-    {"role": "user", "content": "请审校以下 Word 选区文本：\n需要审校的 Word 选区文本"}
+    {"role": "user", "content": "书籍背景信息...\n\n<text>\n需要审校的 Word 选区文本\n</text>"}
   ],
   "temperature": 0.2,
   "max_tokens": 16384,
-  "response_format": {
-    "type": "json_object"
-  }
+  "reasoning": {"enabled": false}
 }
 ```
 
@@ -329,4 +335,8 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端使用 `AbortController` 中断当前请求。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名，但不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。
+
+## 调试日志
+
+后端 `BACKEND_LOG_LEVEL=INFO` 时只记录请求入口、provider、模式、文本长度、HTTP 状态、问题数和定位数量等元信息，不记录选区正文。临时设为 `DEBUG` 时，会额外记录后端请求/返回体、AI provider 请求 payload、普通响应 JSON、流式完成响应和错误事件；这些内容可能包含选区文本、书名、介绍和 AI 输出。日志 helper 不记录 API Key、`Authorization` 或 Bearer token。DEBUG 仅用于本地调试，不建议生产开启。

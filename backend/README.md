@@ -35,6 +35,7 @@ backend/
 - `app/schemas.py`
   - 定义 API 请求和响应模型。
   - `ProofreadRequest` 校验 `text` 不能为空。
+  - `ProofreadRequest` 必须携带 `book.title`；`book.introduction` 可选。书籍信息用于 prompt 背景，不属于待审正文。
   - `ProofreadRequest` 可携带 `session_id`、`provider_api`、`proofread_mode`；`session_id` 仅用于兼容插件请求，不用于续接 AI 上下文。
   - `ProofreadIssue` 定义单条审校问题结构。
   - `ProofreadResponse` 固定返回 `{ "issues": [...] }`。
@@ -57,7 +58,7 @@ backend/
 - `app/services/ai_client.py`
   - OpenAI 兼容 Responses API 与 Chat Completions client。
   - Responses 模式使用 `/v1/responses` 和 `text.format.type=json_object`，不发送 `previous_response_id`。
-  - Chat 模式使用 `/v1/chat/completions` 和 `response_format.type=json_object`。
+  - Chat 模式使用 `/v1/chat/completions`，并从 `choices[0].message.content` 读取 JSON。
   - 统一将 provider HTTP 错误、非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
@@ -97,6 +98,10 @@ backend/
 ```json
 {
   "text": "需要审校的 Word 选区文本",
+  "book": {
+    "title": "书名",
+    "introduction": "可选书籍介绍"
+  },
   "session_id": "session_xxx",
   "provider_api": "responses",
   "proofread_mode": "fast",
@@ -125,7 +130,7 @@ backend/
 }
 ```
 
-AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但仍要求 AI 只审校请求里的 Word 选区文本。AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。
 
 ### `POST /api/proofread/stream`
 
@@ -189,13 +194,13 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 - `AI_API_KEY` 有值时走真实 OpenAI 兼容 Responses API 或 Chat Completions。
 - `AI_PROVIDER_API=responses` 表示默认使用 `/v1/responses`；也可在请求中传 `provider_api=chat` 临时切到 `/chat/completions`。
 - `AI_FAST_MAX_TOKENS` 和 `AI_THINKING_MAX_TOKENS` 分别控制快速审校与深度审校的输出上限。
-- `BACKEND_LOG_LEVEL` 控制后端日志级别，默认 `INFO`；调试定位细节时可设为 `DEBUG`。
+- `BACKEND_LOG_LEVEL` 控制后端日志级别，默认 `INFO`；本地调试报文时可临时设为 `DEBUG`。
 - 本地真实 AI 联调推荐先运行仓库根目录的 `./scripts/start-omlx.sh`，默认 oMLX 地址为 `http://127.0.0.1:8001/v1`，并会将 `Qwen3.6-35B-A3B-4.4bit-msq` 配置为 default + pinned 以便启动时预加载。
 - `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - `BACKEND_CORS_ORIGINS` 使用英文逗号分隔。
 - 真实 API Key 不要提交到 Git，不要写入 README、manifest、前端源码或构建产物。
 
-日志会打印请求入口、provider、审校模式、文本长度、AI HTTP 状态、问题数和定位数量。日志不会打印 API Key、Authorization header 或选中文本全文。
+`INFO` 日志会打印请求入口、provider、审校模式、文本长度、AI HTTP 状态、问题数和定位数量，不打印选中文本全文。`DEBUG` 日志会打印后端请求/返回体、AI provider 请求 payload 和返回内容，可能包含选区文本、书名、介绍和 AI 输出；所有模式都不会打印 API Key、Authorization header 或 Bearer token。DEBUG 仅建议本地调试使用，不建议生产开启。
 
 ## 本地运行
 

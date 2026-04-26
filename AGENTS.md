@@ -22,6 +22,7 @@
 - `backend/`：Python FastAPI 后端服务，负责接收文本、调用 AI 审校能力、返回结构化审校结果。
 - `docs/`：项目补充文档；临时联调记录、临时排障说明放在 `docs/tmp/`。
 - `word-addin/`：Office.js + TypeScript + Webpack 的 Word 插件，负责读取 Word 选区、调用后端接口、把审校建议插入为 Word 批注。
+忽略.gitignore中的文件
 
 ## 开发约定
 

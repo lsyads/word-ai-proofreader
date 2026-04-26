@@ -80,7 +80,7 @@ backend/
   - 统一将 provider HTTP 错误、无法清理解析的非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
-  - 创建轻量本地 session ID，用于兼容当前插件启动和“新建对话”流程。
+  - 创建轻量本地 session ID，用于兼容当前插件启动和“清空当前结果”流程。
   - 不保存 AI 上下文、不保存 provider `response.id`。
 
 - `requirements.txt`
@@ -232,7 +232,7 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 
 ### `POST /api/sessions`
 
-创建新的本地 session ID，用于兼容插件启动和“新建对话”流程。后端不保存 AI 上下文，也不会把上一轮 provider `response.id` 作为 `previous_response_id` 发给 `/v1/responses`；每次审校都是独立请求。
+创建新的本地 session ID，用于兼容插件启动和“清空当前结果”流程。后端不保存 AI 上下文，也不会把上一轮 provider `response.id` 作为 `previous_response_id` 发给 `/v1/responses`；每次审校都是独立请求。
 
 响应：
 

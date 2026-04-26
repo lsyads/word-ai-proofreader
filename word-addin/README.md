@@ -62,7 +62,7 @@ word-addin/
 
 - `src/taskpane/taskpane.ts`
   - 当前 MVP 的核心前端逻辑。
-  - `Office.onReady` 后绑定“AI 审校”、“应用到 Word”、新建对话、历史清空/导出/导入按钮。
+  - `Office.onReady` 后绑定“AI 审校”、“应用到 Word”、“清空当前结果”、历史清空/导出/导入按钮。
   - 点击后内部流程：
     1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
     2. 检查 Word 批注 API 能力。

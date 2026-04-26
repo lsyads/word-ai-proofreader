@@ -74,7 +74,7 @@ Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
     getButton("proofread").onclick = proofreadSelection;
     getButton("apply-to-word").onclick = applyPendingResultToWord;
-    getButton("new-conversation").onclick = newConversation;
+    getButton("new-conversation").onclick = clearCurrentResult;
     getButton("clear-history").onclick = clearHistory;
     getButton("export-history").onclick = exportHistory;
     getButton("import-history").onclick = () => getInput("history-file").click();
@@ -102,13 +102,13 @@ async function initializeSession() {
   try {
     const session = await createSession();
     currentSessionId = session.session_id;
-    showMessage("已创建 AI 对话，请选择 Word 文本开始审校。", "default");
+    showMessage("已创建审校会话，请选择 Word 文本开始审校。", "default");
   } catch (error) {
-    showMessage(`创建 AI 对话失败：${getErrorMessage(error)}`, "error");
+    showMessage(`创建审校会话失败：${getErrorMessage(error)}`, "error");
   }
 }
 
-async function newConversation() {
+async function clearCurrentResult() {
   if (taskState === "running") {
     cancelCurrentProofread();
   }
@@ -123,10 +123,10 @@ async function newConversation() {
     const session = await createSession();
     currentSessionId = session.session_id;
     taskState = "idle";
-    showMessage("已新建 AI 对话，请选择 Word 文本开始审校。", "success");
+    showMessage("已清空当前结果，请选择 Word 文本开始审校。", "success");
   } catch (error) {
     taskState = "failed";
-    showMessage(`新建 AI 对话失败：${getErrorMessage(error)}`, "error");
+    showMessage(`清空当前结果失败：${getErrorMessage(error)}`, "error");
   }
 }
 

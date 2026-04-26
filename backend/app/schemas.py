@@ -69,7 +69,14 @@ class ProofreadResponse(BaseModel):
 
 
 ProofreadScope = Literal["selection", "document"]
-ChunkedTaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+ChunkedTaskStatus = Literal[
+    "queued",
+    "running",
+    "succeeded",
+    "partial_succeeded",
+    "failed",
+    "cancelled",
+]
 
 
 class ProofreadChunk(BaseModel):

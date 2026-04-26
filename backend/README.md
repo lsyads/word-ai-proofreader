@@ -67,7 +67,8 @@ backend/
 - `app/services/tasks.py`
   - V2 内存异步任务服务。
   - 使用模块级内存 dict 保存任务状态、进度、聚合结果和 SSE 事件。
-  - 顺序处理 chunk；支持查询、SSE 订阅和取消。
+  - 顺序处理 chunk；支持查询、SSE 订阅、heartbeat 和取消。
+  - 部分 chunk 失败但至少一个 chunk 成功时，任务状态为 `partial_succeeded`。
   - 任务仅用于本地运行期，服务重启后不可恢复。
 
 - `app/services/ai_client.py`
@@ -221,10 +222,10 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 
 - `POST /api/proofread/tasks`：创建内存异步任务，返回 `task_id` 和初始进度。
 - `GET /api/proofread/tasks/{task_id}`：查询任务状态、进度和聚合结果。
-- `GET /api/proofread/tasks/{task_id}/events`：订阅任务 SSE，事件包括 `queued`、`running`、`chunk_started`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。
+- `GET /api/proofread/tasks/{task_id}/events`：订阅任务 SSE，事件包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。
 - `DELETE /api/proofread/tasks/{task_id}`：标记取消任务；当前 chunk 完成后停止后续 chunk。
 
-任务只保存在后端内存中；服务重启或任务被清理后，查询会返回 404。
+任务只保存在后端内存中；服务重启或任务被清理后，查询会返回 404。部分分块失败但仍有可用结果时，最终状态为 `partial_succeeded`，响应会保留已完成 chunk 的问题和失败块数。
 
 ### `POST /api/sessions`
 

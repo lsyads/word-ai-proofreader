@@ -1,11 +1,12 @@
 import json
 import logging
+import asyncio
 from fastapi.testclient import TestClient
 
 import app.services.proofread as proofread_service
 from app.services import tasks as task_service
 from app.main import app
-from app.schemas import ProofreadIssue
+from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
 from app.services.ai_client import AIClientError, AIProofreadResult, AIStreamEvent
 from app.services.sessions import clear_sessions_for_tests
 
@@ -687,10 +688,39 @@ def test_proofread_task_records_failed_chunk_and_continues(monkeypatch):
 
     assert status_response.status_code == 200
     payload = status_response.json()
-    assert payload["status"] == "succeeded"
+    assert payload["status"] == "partial_succeeded"
     assert payload["completed_chunks"] == 2
     assert payload["failed_chunks"] == 1
     assert "chunk_failed" in [event["event"] for event in events]
+
+
+def test_proofread_task_emits_heartbeat(monkeypatch):
+    monkeypatch.setattr(task_service, "HEARTBEAT_INTERVAL_SECONDS", 0.001)
+
+    async def run_heartbeat():
+        task = task_service.ProofreadTask(
+            task_id="task-test",
+            request=ChunkedProofreadRequest(
+                text="甲" * 3000,
+                book=BookInfo.model_validate(BOOK),
+                scope="document",
+            ),
+            status="running",
+            total_chunks=1,
+        )
+        chunk = task_service.chunking.ProofreadChunk(index=0, start=0, end=3000, text="甲" * 3000)
+        heartbeat_task = asyncio.create_task(task_service._emit_heartbeats(task, chunk))
+        await asyncio.sleep(0.003)
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        return task.events
+
+    events = asyncio.run(run_heartbeat())
+
+    assert "heartbeat" in [event.event for event in events]
 
 
 def test_proofread_task_fails_when_all_chunks_fail(monkeypatch):

@@ -7,7 +7,7 @@
 ## V2 范围
 
 - 包含：Word 选区读取、本地 session 流程、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、纯空白差异过滤、逐条精准批注、修订模式替换、快速/深度审校、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
-- 新增：当前选区超过 5000 字自动分块审校；全书正文按约 3000 字自动分块审校；分块任务使用后端内存异步任务、SSE 进度和轮询兜底；全书结果支持批注模式和修订模式。
+- 新增：当前选区超过 5000 字自动分块审校；全书正文按约 3000 字自动分块审校；分块任务使用后端内存异步任务、SSE 进度、heartbeat 和轮询兜底；全书结果支持二次确认后批注或修订。
 - 不包含：登录、云端审校历史、跨服务重启恢复任务、页眉页脚/脚注/文本框扫描、token 级模型文本流、无人工确认地默认改正文。
 - 第一版后端使用 OpenAI 兼容接口；没有 `AI_API_KEY` 时返回 mock 结果，保证本地可联调。
 - 本地真实 AI 联调可使用 oMLX 启动 OpenAI 兼容服务，默认地址为 `http://127.0.0.1:8001/v1`。
@@ -23,7 +23,7 @@ Word 选区
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
   -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
   -> backend 在单段或分块文本中搜索 issue.original 并填充 start/end；分块结果额外填充 global_start/global_end
-  -> word-addin 按应用方式插入批注或生成 Word 修订，定位失败时回退汇总批注
+  -> word-addin 先展示结果，用户确认后按应用方式插入批注或生成 Word 修订
 ```
 
 ### 前端
@@ -215,7 +215,7 @@ GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。
+事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
 
 ### `POST /api/sessions`
 
@@ -241,10 +241,11 @@ Response:
 4. 实现 OpenAI 兼容 Responses API 与 Chat Completions client，配置 `AI_API_KEY` 后请求对应 provider API 并解析精简 JSON。
 5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
 6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
-7. 后端返回问题时，插件按应用方式处理：批注模式按 `start/end` 或 `global_start/global_end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订；全书修订按全局位置倒序应用；定位失败或无 `replacement` 的问题汇总插入 fallback 批注；未发现问题时只更新任务窗格，不插入批注。
-8. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
-9. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
-10. 补充后端测试、插件 lint/build 验证和本地联调说明。
+7. 后端返回问题时，插件先展示结果，不立即写回 Word；用户点击“应用到 Word”后，批注模式按 `start/end` 或 `global_start/global_end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将可定位且有 `replacement` 的问题替换为 Word 原生修订。
+8. 定位失败或无 `replacement` 的问题默认只在任务窗格显示为“未定位”；只有用户点击“插入未定位汇总批注”时，才插入一条简短汇总批注。
+9. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
+10. 插件支持新建对话、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入。
+11. 补充后端测试、插件 lint/build 验证和本地联调说明。
 
 ## 本地运行
 
@@ -310,7 +311,9 @@ npm run dev-server
 3. 选中一段正文，或准备使用“全书正文”范围。
 4. 点击“AI 审校”。
 5. 确认任务窗格“运行过程”区域显示阶段进度；长选区和全书正文显示分块进度，并在“审校结果”区域显示最终结果。
-6. 如果存在审校问题，确认可定位问题批注在对应原文片段上；定位失败问题会作为一条 fallback 汇总批注；如果没有问题，确认不会插入批注。
+6. 如果存在审校问题，确认审校完成后只在任务窗格展示结果，不立即写入 Word。
+7. 点击“应用到 Word”后，确认可定位问题批注在对应原文片段上；修订模式下确认可定位且有 `replacement` 的问题生成 Word 修订。
+8. 未定位问题默认只在任务窗格展示；点击“插入未定位汇总批注”后才插入汇总批注。
 7. 点击“新建对话”，确认任务窗格清空当前结果，并创建新的本地 session。
 8. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
 9. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
@@ -335,14 +338,16 @@ npm run dev-server
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
 - 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
-- 任务 SSE 返回分块进度；SSE 不可用时前端轮询任务状态。
+- 任务 SSE 返回分块进度和 `heartbeat`；SSE 不可用时前端轮询任务状态。
+- 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数。
 - 点击停止审校会中断当前请求并取消后端异步任务。
 - `npm run lint` 通过。
 - `npm run build` 通过。
 - Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。
 - 后端不可用时显示错误，不插入空批注。
-- 后端返回非空 `issues[]` 时，批注模式对可定位问题逐条插入原文片段批注，对不可定位问题插入 fallback 汇总批注。
-- 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置；无 `replacement` 或定位失败的问题插入 fallback 汇总批注。
+- 后端返回非空 `issues[]` 时，插件只展示结果；点击“应用到 Word”后才对可定位问题逐条插入批注或修订。
+- 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置。
+- 无 `replacement` 或定位失败的问题默认不写入正文；点击“插入未定位汇总批注”后才汇总插入。
 - 后端返回空 `issues[]` 时，插件显示未发现明显问题，且不插入批注。
 - 审校运行中点击“停止审校”时，插件中断请求、恢复按钮、不插入批注。
-- 插件本地保存最近 20 条审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON。
+- 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；开发阶段不兼容旧历史数据。

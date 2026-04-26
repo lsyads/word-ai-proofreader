@@ -81,6 +81,8 @@ async def proofread_chunked(
     if completed_chunks == 0 and failed_chunks > 0:
         result_status = "failed"
         error_message = "All chunks failed to proofread."
+    elif completed_chunks > 0 and failed_chunks > 0:
+        result_status = "partial_succeeded"
 
     return ChunkedProofreadResult(
         task_id=task_id,

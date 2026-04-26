@@ -19,6 +19,7 @@ from app.services.ai_client import AIClientError, AIStreamEvent
 from app.services.proofread import proofread_text
 
 MAX_TASKS = 50
+HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 class ProofreadTaskNotFound(KeyError):
@@ -140,6 +141,7 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                 ),
             )
 
+            heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk))
             try:
                 chunk_issues = await proofread_text(
                     chunk.text,
@@ -161,6 +163,12 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                     ),
                 )
                 continue
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
             task.completed_chunks += 1
             task.issues.extend(chunking.globalize_issues(chunk, chunk_issues))
@@ -186,9 +194,10 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
             _emit(task, "error", _progress_payload(task, "审校任务失败。"))
             return
 
-        task.status = "succeeded"
+        task.status = "partial_succeeded" if task.failed_chunks > 0 else "succeeded"
         _touch(task)
-        _emit(task, "completed", _progress_payload(task, "审校任务完成。"))
+        message = "审校任务部分完成。" if task.status == "partial_succeeded" else "审校任务完成。"
+        _emit(task, "completed", _progress_payload(task, message))
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)
@@ -252,6 +261,27 @@ def _mark_cancelled(task: ProofreadTask) -> None:
     _emit(task, "cancelled", _progress_payload(task, "审校任务已停止。"))
 
 
+async def _emit_heartbeats(task: ProofreadTask, chunk: chunking.ProofreadChunk) -> None:
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        if task.cancel_requested or _is_terminal(task.status):
+            return
+
+        _emit(
+            task,
+            "heartbeat",
+            _progress_payload(
+                task,
+                f"第 {chunk.index + 1}/{task.total_chunks} 块仍在审校。",
+                extra={
+                    "chunk_index": chunk.index,
+                    "chunk_start": chunk.start,
+                    "chunk_end": chunk.end,
+                },
+            ),
+        )
+
+
 def _touch(task: ProofreadTask) -> None:
     task.updated_at = _now_iso()
 
@@ -261,7 +291,7 @@ def _now_iso() -> str:
 
 
 def _is_terminal(status: ChunkedTaskStatus) -> bool:
-    return status in {"succeeded", "failed", "cancelled"}
+    return status in {"succeeded", "partial_succeeded", "failed", "cancelled"}
 
 
 def _trim_tasks() -> None:

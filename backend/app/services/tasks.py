@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator
@@ -20,6 +22,7 @@ from app.services.proofread import proofread_text
 
 MAX_TASKS = 50
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+logger = logging.getLogger(__name__)
 
 
 class ProofreadTaskNotFound(KeyError):
@@ -127,6 +130,7 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                 _mark_cancelled(task)
                 return
 
+            chunk_started_at = time.monotonic()
             _emit(
                 task,
                 "chunk_started",
@@ -137,11 +141,13 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                         "chunk_index": chunk.index,
                         "chunk_start": chunk.start,
                         "chunk_end": chunk.end,
+                        "chunk_len": len(chunk.text),
+                        "elapsed_seconds": 0,
                     },
                 ),
             )
 
-            heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk))
+            heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk, chunk_started_at))
             try:
                 chunk_issues = await proofread_text(
                     chunk.text,
@@ -153,13 +159,36 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
             except AIClientError as exc:
                 task.failed_chunks += 1
                 _touch(task)
+                elapsed_seconds = _elapsed_seconds(chunk_started_at)
+                logger.warning(
+                    "chunked proofread chunk failed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s completed_chunks=%s failed_chunks=%s total_chunks=%s error_type=%s error_message=%s",
+                    task.task_id,
+                    chunk.index,
+                    chunk.start,
+                    chunk.end,
+                    len(chunk.text),
+                    elapsed_seconds,
+                    task.completed_chunks,
+                    task.failed_chunks,
+                    task.total_chunks,
+                    type(exc).__name__,
+                    str(exc),
+                    exc_info=True,
+                )
                 _emit(
                     task,
                     "chunk_failed",
                     _progress_payload(
                         task,
                         f"第 {chunk.index + 1} 块审校失败，已继续后续分块。",
-                        extra={"chunk_index": chunk.index, "error_message": str(exc)},
+                        extra={
+                            "chunk_index": chunk.index,
+                            "chunk_start": chunk.start,
+                            "chunk_end": chunk.end,
+                            "chunk_len": len(chunk.text),
+                            "elapsed_seconds": elapsed_seconds,
+                            "error_message": str(exc),
+                        },
                     ),
                 )
                 continue
@@ -173,13 +202,31 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
             task.completed_chunks += 1
             task.issues.extend(chunking.globalize_issues(chunk, chunk_issues))
             _touch(task)
+            elapsed_seconds = _elapsed_seconds(chunk_started_at)
+            logger.info(
+                "chunked proofread chunk completed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s issue_count=%s",
+                task.task_id,
+                chunk.index,
+                chunk.start,
+                chunk.end,
+                len(chunk.text),
+                elapsed_seconds,
+                len(chunk_issues),
+            )
             _emit(
                 task,
                 "chunk_completed",
                 _progress_payload(
                     task,
                     f"第 {chunk.index + 1} 块审校完成。",
-                    extra={"chunk_index": chunk.index, "issue_count": len(task.issues)},
+                    extra={
+                        "chunk_index": chunk.index,
+                        "chunk_start": chunk.start,
+                        "chunk_end": chunk.end,
+                        "chunk_len": len(chunk.text),
+                        "elapsed_seconds": elapsed_seconds,
+                        "issue_count": len(task.issues),
+                    },
                 ),
             )
 
@@ -191,17 +238,43 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
             task.status = "failed"
             task.error_message = "All chunks failed to proofread."
             _touch(task)
+            logger.warning(
+                "chunked proofread task failed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_message=%s",
+                task.task_id,
+                task.total_chunks,
+                task.completed_chunks,
+                task.failed_chunks,
+                task.error_message,
+            )
             _emit(task, "error", _progress_payload(task, "审校任务失败。"))
             return
 
         task.status = "partial_succeeded" if task.failed_chunks > 0 else "succeeded"
         _touch(task)
         message = "审校任务部分完成。" if task.status == "partial_succeeded" else "审校任务完成。"
+        if task.status == "partial_succeeded":
+            logger.warning(
+                "chunked proofread task partially succeeded task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s issue_count=%s",
+                task.task_id,
+                task.total_chunks,
+                task.completed_chunks,
+                task.failed_chunks,
+                len(task.issues),
+            )
         _emit(task, "completed", _progress_payload(task, message))
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)
         _touch(task)
+        logger.exception(
+            "chunked proofread task crashed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_type=%s error_message=%s",
+            task.task_id,
+            task.total_chunks,
+            task.completed_chunks,
+            task.failed_chunks,
+            type(exc).__name__,
+            str(exc),
+        )
         _emit(task, "error", _progress_payload(task, "审校任务失败。", extra={"error_message": str(exc)}))
 
 
@@ -261,7 +334,13 @@ def _mark_cancelled(task: ProofreadTask) -> None:
     _emit(task, "cancelled", _progress_payload(task, "审校任务已停止。"))
 
 
-async def _emit_heartbeats(task: ProofreadTask, chunk: chunking.ProofreadChunk) -> None:
+async def _emit_heartbeats(
+    task: ProofreadTask,
+    chunk: chunking.ProofreadChunk,
+    chunk_started_at: float | None = None,
+) -> None:
+    chunk_started_at = chunk_started_at if chunk_started_at is not None else time.monotonic()
+
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         if task.cancel_requested or _is_terminal(task.status):
@@ -277,6 +356,8 @@ async def _emit_heartbeats(task: ProofreadTask, chunk: chunking.ProofreadChunk) 
                     "chunk_index": chunk.index,
                     "chunk_start": chunk.start,
                     "chunk_end": chunk.end,
+                    "chunk_len": len(chunk.text),
+                    "elapsed_seconds": _elapsed_seconds(chunk_started_at),
                 },
             ),
         )
@@ -288,6 +369,10 @@ def _touch(task: ProofreadTask) -> None:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _elapsed_seconds(started_at: float) -> float:
+    return round(time.monotonic() - started_at, 1)
 
 
 def _is_terminal(status: ChunkedTaskStatus) -> bool:

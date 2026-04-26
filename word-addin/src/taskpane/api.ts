@@ -160,7 +160,21 @@ export function formatProgressResult(status: ProofreadStatusEvent): string {
   const completed = status.completed_chunks || 0;
   const failed = status.failed_chunks || 0;
   const issueCount = status.issue_count || 0;
-  return `${status.message} 进度 ${completed}/${status.total_chunks}，失败 ${failed} 块，累计问题 ${issueCount} 条。`;
+  const details = [
+    `进度 ${completed}/${status.total_chunks}`,
+    `失败 ${failed} 块`,
+    `累计问题 ${issueCount} 条`,
+  ];
+
+  if (typeof status.elapsed_seconds === "number") {
+    details.push(`当前块耗时 ${formatElapsedSeconds(status.elapsed_seconds)}`);
+  }
+
+  if (status.error_message) {
+    details.push(`失败原因：${status.error_message}`);
+  }
+
+  return `${status.message} ${details.join("，")}。`;
 }
 
 export function isAbortError(error: unknown): boolean {
@@ -447,6 +461,9 @@ function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
     chunk_index: typeof payload.chunk_index === "number" ? payload.chunk_index : undefined,
     chunk_start: typeof payload.chunk_start === "number" ? payload.chunk_start : undefined,
     chunk_end: typeof payload.chunk_end === "number" ? payload.chunk_end : undefined,
+    chunk_len: typeof payload.chunk_len === "number" ? payload.chunk_len : undefined,
+    elapsed_seconds:
+      typeof payload.elapsed_seconds === "number" ? payload.elapsed_seconds : undefined,
     error_message: typeof payload.error_message === "string" ? payload.error_message : undefined,
   };
 }
@@ -494,6 +511,16 @@ async function getResponseErrorMessage(response: Response): Promise<string> {
 
 function formatStageMessage(stage: string): string {
   return stage;
+}
+
+function formatElapsedSeconds(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)} 秒`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return `${minutes} 分 ${remainingSeconds} 秒`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

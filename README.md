@@ -28,7 +28,7 @@
 - AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置。
 - 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`；插件用全局位置计算重复原文的 occurrence，避免长文或全书中误命中。
 - 审校完成后先展示结果，不立即写回 Word；用户确认后点击“应用到 Word”，插件才按当前“批注模式/修订模式”插入批注或生成修订。
-- 可定位问题会逐条写回对应原文片段；未定位或无法修订的问题默认只在任务窗格标记“未定位”，用户可按需点击“插入未定位汇总批注”。
+- 可定位问题会逐条写回对应原文片段；修订模式下可定位且有 `replacement` 的问题生成 Word 修订，可定位但无 `replacement` 的问题回退为原位批注；未定位问题会在“应用到 Word”时合并为一条范围起点汇总批注。
 - 插件支持停止当前审校，并在本地保存最近 20 条新 schema 审校历史用于回看、清空、另存为 JSON 和导入 JSON；开发阶段不兼容旧历史数据。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
 
@@ -62,11 +62,11 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 
 当前前端 V2 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
 
-V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。长时间运行的 chunk 会通过 `heartbeat` 事件持续提示；部分 chunk 失败但有结果时，任务状态为 `partial_succeeded`。
+V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。长时间运行的 chunk 会通过 `heartbeat` 事件持续提示当前块等待时长；部分 chunk 失败但有结果时，任务状态为 `partial_succeeded`，后端 INFO 级别日志和前端进度区都会显示失败 chunk 的编号、范围、耗时和错误信息。
 
 API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 
-后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、问题数和定位数量等元信息，不打印 API Key 或选中文本全文。临时设为 `DEBUG` 时会打印 `/api/proofread`、`/api/proofread/stream`、AI provider 请求与返回报文，便于本地调试；DEBUG 日志会包含选区文本、书名、介绍和 AI 返回内容，但仍不会打印 API Key、`Authorization` 或 Bearer token，不建议生产开启。
+后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因等信息，不打印 API Key 或完整请求正文。AI 返回报文可能包含 `original` 原文摘录，便于联调定位；模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符时，后端会先清理再做结构校验。临时设为 `DEBUG` 时会额外打印 `/api/proofread`、`/api/proofread/stream` 和 AI provider 请求报文；DEBUG 日志会包含选区文本、书名、介绍和 AI 返回内容，但仍不会打印 API Key、`Authorization` 或 Bearer token，不建议生产开启。
 
 ## 启动 oMLX 本地 AI 服务
 
@@ -195,7 +195,7 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 8. 确认任务窗格“运行过程”区域先逐条显示阶段进度；长选区或全书会显示分块进度、失败块数和累计问题数。
 9. 审校完成后，确认任务窗格只展示结果，不会立即新增 Word 批注或修订。
 10. 点击“应用到 Word”，确认可定位问题批注在对应原文片段上；选择修订模式时，有 `replacement` 且可定位的问题会在 Word 审阅面板中显示为可接受/拒绝的修订。
-11. 未定位问题默认只显示在任务窗格；点击“插入未定位汇总批注”后，才会插入一条汇总批注。
+11. 未定位问题会先显示在任务窗格；点击“应用到 Word”后，统一插入一条锚定在审校范围起点第一个非空字符的汇总批注。
 12. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注或修订。
 12. 点击“新建对话”，确认任务窗格清空当前结果，并创建新的本地 session。
 13. 审校运行中点击“停止审校”，确认提示“当前分块完成后结束”，请求停止、不会插入批注或修订，并在历史记录中保存为已停止。

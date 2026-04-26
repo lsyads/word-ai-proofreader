@@ -648,7 +648,7 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
     assert len(payload["issues"]) == 2
 
 
-def test_proofread_task_records_failed_chunk_and_continues(monkeypatch):
+def test_proofread_task_records_failed_chunk_and_continues(monkeypatch, caplog):
     async def fake_proofread_text(
         text,
         book,
@@ -672,6 +672,7 @@ def test_proofread_task_records_failed_chunk_and_continues(monkeypatch):
         ]
 
     monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+    caplog.set_level(logging.INFO, logger="app.services.tasks")
 
     create_response = client.post(
         "/api/proofread/tasks",
@@ -692,6 +693,62 @@ def test_proofread_task_records_failed_chunk_and_continues(monkeypatch):
     assert payload["completed_chunks"] == 2
     assert payload["failed_chunks"] == 1
     assert "chunk_failed" in [event["event"] for event in events]
+    failed_event = next(event for event in events if event["event"] == "chunk_failed")
+    assert failed_event["data"]["error_message"] == "chunk failed"
+    assert failed_event["data"]["chunk_start"] == 3000
+    assert failed_event["data"]["chunk_end"] == 6000
+    assert failed_event["data"]["chunk_len"] == 3000
+    assert isinstance(failed_event["data"]["elapsed_seconds"], float | int)
+    assert "chunked proofread chunk failed" in caplog.text
+    assert "chunk_index=1" in caplog.text
+    assert "chunk_start=3000" in caplog.text
+    assert "chunk_end=6000" in caplog.text
+    assert "elapsed_seconds=" in caplog.text
+    assert "chunk failed" in caplog.text
+    assert "乙乙乙乙乙" not in caplog.text
+
+
+def test_proofread_task_logs_unhandled_task_crash(monkeypatch, caplog):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return [
+            ProofreadIssue(
+                id="issue-1",
+                category="typo",
+                severity="low",
+                original=text[:1],
+                suggestion="建议",
+                start=0,
+                end=1,
+            )
+        ]
+
+    def crash_globalize_issues(chunk, issues):
+        raise RuntimeError("globalize exploded")
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+    monkeypatch.setattr(task_service.chunking, "globalize_issues", crash_globalize_issues)
+    caplog.set_level(logging.INFO, logger="app.services.tasks")
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload("甲" * 3000, scope="document", chunk_size=3000),
+    )
+
+    task_id = create_response.json()["task_id"]
+    events = parse_sse_events(client.get(f"/api/proofread/tasks/{task_id}/events").text)
+    status_response = client.get(f"/api/proofread/tasks/{task_id}")
+
+    assert status_response.json()["status"] == "failed"
+    assert events[-1]["event"] == "error"
+    assert "chunked proofread task crashed" in caplog.text
+    assert task_id in caplog.text
+    assert "globalize exploded" in caplog.text
 
 
 def test_proofread_task_emits_heartbeat(monkeypatch):
@@ -720,7 +777,10 @@ def test_proofread_task_emits_heartbeat(monkeypatch):
 
     events = asyncio.run(run_heartbeat())
 
-    assert "heartbeat" in [event.event for event in events]
+    heartbeat = next(event for event in events if event.event == "heartbeat")
+    assert isinstance(heartbeat.data["elapsed_seconds"], float | int)
+    assert heartbeat.data["chunk_start"] == 0
+    assert heartbeat.data["chunk_end"] == 3000
 
 
 def test_proofread_task_fails_when_all_chunks_fail(monkeypatch):

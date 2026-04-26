@@ -69,13 +69,15 @@ backend/
   - 使用模块级内存 dict 保存任务状态、进度、聚合结果和 SSE 事件。
   - 顺序处理 chunk；支持查询、SSE 订阅、heartbeat 和取消。
   - 部分 chunk 失败但至少一个 chunk 成功时，任务状态为 `partial_succeeded`。
+  - chunk 失败时会在 INFO 可见的 warning 日志中记录任务 ID、chunk 编号、范围和错误原因，不记录正文全文。
   - 任务仅用于本地运行期，服务重启后不可恢复。
 
 - `app/services/ai_client.py`
   - OpenAI 兼容 Responses API 与 Chat Completions client。
   - Responses 模式使用 `/v1/responses` 和 `text.format.type=json_object`，不发送 `previous_response_id`。
   - Chat 模式使用 `/v1/chat/completions`，并从 `choices[0].message.content` 读取 JSON。
-  - 统一将 provider HTTP 错误、非 JSON 响应、schema 不匹配转换为 `AIClientError`。
+  - 对模型返回的 Markdown 代码块、前后解释、尾随逗号和未转义控制字符做有限清理，再统一校验 schema。
+  - 统一将 provider HTTP 错误、无法清理解析的非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
   - 创建轻量本地 session ID，用于兼容当前插件启动和“新建对话”流程。
@@ -269,7 +271,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 - `BACKEND_CORS_ORIGINS` 使用英文逗号分隔。
 - 真实 API Key 不要提交到 Git，不要写入 README、manifest、前端源码或构建产物。
 
-`INFO` 日志会打印请求入口、provider、审校模式、文本长度、AI HTTP 状态、问题数和定位数量，不打印选中文本全文。`DEBUG` 日志会打印后端请求/返回体、AI provider 请求 payload 和返回内容，可能包含选区文本、书名、介绍和 AI 输出；所有模式都不会打印 API Key、Authorization header 或 Bearer token。DEBUG 仅建议本地调试使用，不建议生产开启。
+`INFO` 日志会打印请求入口、provider、审校模式、文本长度、AI HTTP 状态、AI provider 返回报文、问题数、定位数量、分块失败编号、chunk 耗时和错误原因，不打印完整请求正文。AI 返回报文可能包含 `original` 原文摘录，便于联调定位。`DEBUG` 日志会额外打印后端请求体和 AI provider 请求 payload，可能包含完整选区文本、书名、介绍和 AI 输出；所有模式都不会打印 API Key、Authorization header 或 Bearer token。DEBUG 仅建议本地调试使用，不建议生产开启。
 
 ## 本地运行
 

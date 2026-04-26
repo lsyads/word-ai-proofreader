@@ -181,6 +181,7 @@ async def proofread_with_ai(
     except ValueError as exc:
         raise AIClientError("AI provider response body was not valid JSON") from exc
 
+    _info_log_json("AI responses response payload", data)
     _debug_log_json("AI responses response payload", data)
     result = _parse_response_payload(data)
     logger.info(
@@ -259,6 +260,10 @@ async def stream_proofread_with_ai(
 
                 if event_name == "response.completed":
                     provider_response = _coerce_dict(data.get("response"))
+                    _info_log_json(
+                        "AI responses stream completed payload",
+                        {"response": provider_response, "output_text": output_text},
+                    )
                     _debug_log_json(
                         "AI responses stream completed payload",
                         {"response": provider_response, "output_text": output_text},
@@ -280,6 +285,7 @@ async def stream_proofread_with_ai(
                     continue
 
                 if event_name in {"response.failed", "response.incomplete"}:
+                    _info_log_json("AI responses stream terminal event payload", data)
                     _debug_log_json("AI responses stream terminal event payload", data)
                     raise AIClientError(f"AI provider Responses API returned {event_name}")
 
@@ -322,6 +328,7 @@ async def _proofread_with_chat(
     except ValueError as exc:
         raise AIClientError("AI provider response body was not valid JSON") from exc
 
+    _info_log_json("AI chat response payload", data)
     _debug_log_json("AI chat response payload", data)
     result = _parse_chat_payload(data)
     logger.info(
@@ -406,6 +413,38 @@ def _build_user_prompt(text: str, book: BookInfo) -> str:
 def _debug_log_json(message: str, payload: Any) -> None:
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("%s: %s", message, json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _info_log_json(message: str, payload: Any) -> None:
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "%s: %s",
+            message,
+            json.dumps(_redact_sensitive_payload(payload), ensure_ascii=False, default=str),
+        )
+
+
+def _redact_sensitive_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if _is_sensitive_key(key) else _redact_sensitive_payload(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_redact_sensitive_payload(item) for item in value]
+
+    return value
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return normalized in {
+        "authorization",
+        "api_key",
+        "access_token",
+        "refresh_token",
+    } or normalized.endswith("_key")
 
 
 def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> int:
@@ -522,10 +561,7 @@ def _parse_sse_event(event_name: str, data_lines: list[str]) -> dict[str, Any]:
 
 
 def _parse_issues(content: str) -> list[ProofreadIssue]:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise AIClientError("AI provider response was not valid JSON") from exc
+    parsed = _parse_provider_json_content(content)
 
     if not isinstance(parsed, dict) or not isinstance(parsed.get("issues"), list):
         raise AIClientError("AI provider response did not match the expected schema")
@@ -537,6 +573,141 @@ def _parse_issues(content: str) -> list[ProofreadIssue]:
 
     logger.debug("AI issues parsed issue_count=%s content_len=%s", len(issues), len(content))
     return issues
+
+
+def _parse_provider_json_content(content: str) -> Any:
+    candidates = _json_content_candidates(content)
+    first_error: json.JSONDecodeError | None = None
+
+    for index, candidate in enumerate(candidates):
+        try:
+            parsed = json.loads(candidate)
+            if index > 0:
+                logger.warning("AI provider response JSON required cleanup before parsing")
+            return parsed
+        except json.JSONDecodeError as exc:
+            first_error = first_error or exc
+
+        try:
+            parsed = json.loads(candidate, strict=False)
+            logger.warning(
+                "AI provider response JSON required lenient parsing error_message=%s",
+                str(first_error or ""),
+            )
+            return parsed
+        except json.JSONDecodeError:
+            continue
+
+    raise AIClientError("AI provider response was not valid JSON") from first_error
+
+
+def _json_content_candidates(content: str) -> list[str]:
+    stripped = content.strip()
+    candidates = [stripped]
+    without_fence = _strip_markdown_json_fence(stripped)
+
+    if without_fence != stripped:
+        candidates.append(without_fence)
+
+    extracted = _extract_first_json_object(without_fence)
+    if extracted and extracted not in candidates:
+        candidates.append(extracted)
+
+    cleaned_candidates = list(candidates)
+    for candidate in candidates:
+        cleaned = _remove_trailing_commas(candidate)
+        if cleaned != candidate and cleaned not in cleaned_candidates:
+            cleaned_candidates.append(cleaned)
+
+    return cleaned_candidates
+
+
+def _strip_markdown_json_fence(content: str) -> str:
+    lines = content.splitlines()
+
+    if len(lines) >= 2 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+
+    return content
+
+
+def _extract_first_json_object(content: str) -> str | None:
+    start = content.find("{")
+
+    if start == -1:
+        return None
+
+    in_string = False
+    escaped = False
+    depth = 0
+
+    for index in range(start, len(content)):
+        char = content[index]
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : index + 1].strip()
+
+    return None
+
+
+def _remove_trailing_commas(content: str) -> str:
+    cleaned: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+
+    while index < len(content):
+        char = content[index]
+
+        if escaped:
+            cleaned.append(char)
+            escaped = False
+            index += 1
+            continue
+
+        if char == "\\":
+            cleaned.append(char)
+            escaped = True
+            index += 1
+            continue
+
+        if char == '"':
+            cleaned.append(char)
+            in_string = not in_string
+            index += 1
+            continue
+
+        if char == "," and not in_string:
+            lookahead = index + 1
+            while lookahead < len(content) and content[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(content) and content[lookahead] in "]}":
+                index += 1
+                continue
+
+        cleaned.append(char)
+        index += 1
+
+    return "".join(cleaned)
 
 
 def _coerce_dict(value: Any) -> dict[str, Any]:

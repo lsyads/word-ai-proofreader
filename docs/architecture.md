@@ -237,7 +237,7 @@ GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数。长时间运行的 chunk 会周期性发送 `heartbeat`。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
+事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。长时间运行的 chunk 会周期性发送 `heartbeat`，前端用它展示当前块等待时长。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
 
 ## 后端到 AI Provider
 
@@ -298,7 +298,7 @@ Provider Response:
 }
 ```
 
-AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析时先尝试标准 JSON；如果模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符，后端会抽取并清理 JSON 后再做 schema 校验。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
 
 ### 2. Chat Completions 调用
 
@@ -398,14 +398,13 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 ```text
 批注模式 + start/end 可定位 -> 在 original 对应原文片段插入逐条批注
 修订模式 + start/end 可定位 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
-修订模式 + 无 replacement 或定位失败 -> 只在任务窗格标记未定位
-批注模式 + 定位失败 -> 只在任务窗格标记未定位
-用户点击“插入未定位汇总批注” -> 插入一条简短汇总批注
+修订模式 + start/end 可定位 + 无 replacement -> 在 original 对应原文片段插入逐条批注
+定位失败 -> 在“应用到 Word”时合并为一条简短汇总批注
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`。当前选区分块仍在选区范围内搜索；全书分块在 `document.body` 中搜索。插件用全局位置计算重复 `original` 的 occurrence，降低长文中误命中的风险。
+分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`。当前选区分块仍在选区范围内搜索；全书分块在 `document.body` 中搜索。插件用全局位置计算重复 `original` 的 occurrence，降低长文中误命中的风险。未定位汇总批注锚定在审校范围起点的第一个非空字符；当前选区使用选区内第一个非空字符，全书使用正文第一个非空字符，找不到非空字符时退回范围起点。
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
@@ -419,4 +418,4 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 ## 调试日志
 
-后端 `BACKEND_LOG_LEVEL=INFO` 时只记录请求入口、provider、模式、文本长度、HTTP 状态、问题数和定位数量等元信息，不记录选区正文。临时设为 `DEBUG` 时，会额外记录后端请求/返回体、AI provider 请求 payload、普通响应 JSON、流式完成响应和错误事件；这些内容可能包含选区文本、书名、介绍和 AI 输出。日志 helper 不记录 API Key、`Authorization` 或 Bearer token。DEBUG 仅用于本地调试，不建议生产开启。
+后端 `BACKEND_LOG_LEVEL=INFO` 时记录请求入口、provider、模式、文本长度、HTTP 状态、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因，不记录完整请求正文。AI 返回报文可能包含 `original` 原文摘录，用于联调定位。临时设为 `DEBUG` 时，会额外记录后端请求体和 AI provider 请求 payload；这些内容可能包含完整选区文本、书名、介绍和 AI 输出。日志 helper 不记录 API Key、`Authorization` 或 Bearer token。DEBUG 仅用于本地调试，不建议生产开启。

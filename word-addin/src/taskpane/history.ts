@@ -120,7 +120,7 @@ export function saveAppliedResultHistory(input: {
     text: input.result.sourceText,
     book: input.result.book,
     issues: input.result.issues,
-    insertedComment: input.summary.commentCount > 0,
+    insertedComment: input.summary.commentCount > 0 || input.summary.fallbackCount > 0,
     appliedToWord: true,
     locatedIssueCount: input.summary.commentCount + input.summary.revisionCount,
     revisionCount: input.summary.revisionCount,

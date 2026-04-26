@@ -50,7 +50,6 @@ import {
   ensureWordCommentSupport,
   getDocumentBodyText,
   getSelectedText,
-  insertUnlocatedSummaryComment,
 } from "./word";
 
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
@@ -74,7 +73,6 @@ Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
     getButton("proofread").onclick = proofreadSelection;
     getButton("apply-to-word").onclick = applyPendingResultToWord;
-    getButton("insert-unlocated-summary").onclick = insertPendingUnlocatedSummary;
     getButton("new-conversation").onclick = newConversation;
     getButton("clear-history").onclick = clearHistory;
     getButton("export-history").onclick = exportHistory;
@@ -248,9 +246,14 @@ export async function proofreadSelection() {
     refreshHistory();
     updateActionButtons();
 
+    const hasUnlocatedIssues = issues.some(
+      (issue) => typeof issue.start !== "number" || typeof issue.end !== "number"
+    );
     showMessage(
       issues.length > 0
-        ? "审校完成，请确认结果后点击“应用到 Word”。"
+        ? hasUnlocatedIssues
+          ? "审校完成，请确认结果后点击“应用到 Word”；未定位问题会合并为汇总批注。"
+          : "审校完成，请确认结果后点击“应用到 Word”。"
         : "审校完成，未发现明显问题。",
       status === "partial_succeeded" ? "default" : "success"
     );
@@ -316,32 +319,6 @@ async function applyPendingResultToWord() {
     showMessage(formatCompletionMessage(summary), "success");
   } catch (error) {
     showMessage(`应用失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    isApplyingToWord = false;
-    setBusy(false);
-    updateActionButtons();
-  }
-}
-
-async function insertPendingUnlocatedSummary() {
-  if (!pendingResult || isApplyingToWord) {
-    return;
-  }
-
-  isApplyingToWord = true;
-  setBusy(true, { applying: true });
-  updateActionButtons();
-
-  try {
-    const summary = await insertUnlocatedSummaryComment(pendingResult.issues, pendingResult.scope);
-    showMessage(
-      summary.fallbackCount > 0
-        ? `已插入 ${summary.fallbackCount} 条未定位建议的汇总批注。`
-        : "当前没有未定位建议需要汇总。",
-      "success"
-    );
-  } catch (error) {
-    showMessage(`插入未定位汇总批注失败：${getErrorMessage(error)}`, "error");
   } finally {
     isApplyingToWord = false;
     setBusy(false);
@@ -588,16 +565,6 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
 
 function updateActionButtons() {
   const canApply = Boolean(pendingResult && pendingResult.issues.length > 0 && !isApplyingToWord);
-  const hasUnlocated = Boolean(pendingResult && hasUnlocatedIssues() && !isApplyingToWord);
 
   getButton("apply-to-word").disabled = !canApply || taskState === "running";
-  getButton("insert-unlocated-summary").disabled = !hasUnlocated || taskState === "running";
-}
-
-function hasUnlocatedIssues(): boolean {
-  return Boolean(
-    pendingResult?.issues.some(
-      (issue) => typeof issue.start !== "number" || typeof issue.end !== "number"
-    )
-  );
 }

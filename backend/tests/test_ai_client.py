@@ -237,6 +237,48 @@ def test_proofread_with_ai_raises_for_invalid_issue_schema(monkeypatch):
         asyncio.run(proofread_with_ai("文本", book(), settings=settings()))
 
 
+def test_proofread_with_ai_accepts_unescaped_tabs_in_provider_json(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(
+        payload=chat_payload(
+            content=(
+                '{"issues":[{"id":"issue-1","category":"fact","severity":"high",'
+                '"original":"空腹血糖受损\t\tADA\t5.6~7.0",'
+                '"replacement":null,"suggestion":"需人工核查表格内容。"}]}'
+            )
+        )
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.INFO, logger="app")
+
+    result = asyncio.run(proofread_with_ai("文本", book(), provider_api="chat", settings=settings()))
+
+    assert result.issues[0].original == "空腹血糖受损\t\tADA\t5.6~7.0"
+    assert "required lenient parsing" in caplog.text
+
+
+def test_proofread_with_ai_extracts_json_from_markdown_and_explanatory_text(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(
+        payload=response_payload(
+            content=(
+                "下面是审校结果：\n```json\n"
+                '{"issues":[{"id":"issue-1","category":"typo","severity":"low",'
+                '"original":"错字","replacement":"改字","suggestion":"应改为改字",}],}\n'
+                "```\n请查收。"
+            )
+        )
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.INFO, logger="app")
+
+    result = asyncio.run(proofread_with_ai("文本", book(), settings=settings()))
+
+    assert result.issues[0].original == "错字"
+    assert result.issues[0].replacement == "改字"
+    assert "required cleanup" in caplog.text
+
+
 def test_proofread_with_ai_debug_logs_provider_payloads_without_key(monkeypatch, caplog):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=response_payload())
@@ -255,18 +297,38 @@ def test_proofread_with_ai_debug_logs_provider_payloads_without_key(monkeypatch,
     assert "Bearer" not in logs
 
 
-def test_proofread_with_ai_info_logs_do_not_include_provider_payloads(monkeypatch, caplog):
+def test_proofread_with_ai_info_logs_provider_response_without_request_body_or_key(monkeypatch, caplog):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=response_payload())
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     caplog.set_level(logging.INFO, logger="app")
 
-    asyncio.run(proofread_with_ai("不应出现在 INFO 的正文", book(), settings=settings()))
+    asyncio.run(proofread_with_ai("请求正文不应出现在 INFO", book(), settings=settings()))
 
     logs = caplog.text
     assert "AI responses request started" in logs
     assert "AI responses request payload" not in logs
-    assert "不应出现在 INFO 的正文" not in logs
+    assert "AI responses response payload" in logs
+    assert "错字" in logs
+    assert "请求正文不应出现在 INFO" not in logs
+    assert "test-key" not in logs
+    assert "Authorization" not in logs
+    assert "Bearer" not in logs
+
+
+def test_proofread_with_ai_info_logs_chat_provider_response(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.INFO, logger="app")
+
+    asyncio.run(proofread_with_ai("请求正文不应出现在 INFO", book(), provider_api="chat", settings=settings()))
+
+    logs = caplog.text
+    assert "AI chat response payload" in logs
+    assert "错字" in logs
+    assert "请求正文不应出现在 INFO" not in logs
+    assert "test-key" not in logs
 
 
 def test_stream_proofread_with_ai_converts_provider_sse(monkeypatch):

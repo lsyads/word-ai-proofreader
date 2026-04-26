@@ -43,6 +43,8 @@ export interface ProofreadStatusEvent {
   chunk_index?: number;
   chunk_start?: number;
   chunk_end?: number;
+  chunk_len?: number;
+  elapsed_seconds?: number;
   error_message?: string;
 }
 

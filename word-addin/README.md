@@ -1,6 +1,6 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 MVP 提供一个任务窗格入口：“AI 审校”。用户在 Word 中选中文本后点击按钮，插件在 Responses 模式调用后端 `/api/proofread/stream`，在 Chat 模式调用 `/api/proofread`，并按应用方式处理结果：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；不可定位建议回退为当前选区汇总批注。
+`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围。审校完成后先在任务窗格展示结果，用户点击“应用到 Word”后才写回：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；不可定位建议合并为一条范围起点汇总批注。
 
 ## 目录结构
 
@@ -9,9 +9,14 @@ word-addin/
 ├── assets/
 ├── src/
 │   └── taskpane/
+│       ├── api.ts
+│       ├── history.ts
+│       ├── render.ts
 │       ├── taskpane.css
 │       ├── taskpane.html
-│       └── taskpane.ts
+│       ├── taskpane.ts
+│       ├── types.ts
+│       └── word.ts
 ├── .eslintrc.json
 ├── babel.config.json
 ├── manifest.xml
@@ -48,7 +53,7 @@ word-addin/
 
 - `src/taskpane/taskpane.html`
   - 任务窗格 HTML。
-  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、“AI 审校”按钮、审校结果展示区域、历史记录管理按钮。
+  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、Responses/Chat API 切换、批注/修订模式切换、审校范围切换、“AI 审校”、“应用到 Word”、审校结果展示区域、历史记录管理按钮。
   - 当前 MVP 不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
 
 - `src/taskpane/taskpane.css`
@@ -57,16 +62,16 @@ word-addin/
 
 - `src/taskpane/taskpane.ts`
   - 当前 MVP 的核心前端逻辑。
-  - `Office.onReady` 后绑定“AI 审校”、新建对话、历史清空/导出/导入按钮。
+  - `Office.onReady` 后绑定“AI 审校”、“应用到 Word”、新建对话、历史清空/导出/导入按钮。
   - 点击后内部流程：
     1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
     2. 检查 Word 批注 API 能力。
-    3. 读取当前 Word 选区文本。
-    4. 带上 `book`、`provider_api` 和 `proofread_mode` 请求同源接口：Responses 模式用 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接用 `/api/proofread`。
-    5. 批注模式：对有 `start/end` 的 issue 用 `selection.search(original)` 找到原文片段并插入单条批注。
-    6. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
-    7. 对无法定位或无 `replacement` 的 issue 调用 `selection.insertComment(...)` 插入 fallback 汇总批注。
-    8. 在任务窗格展示审校结果、定位状态或错误。
+    3. 按审校范围读取当前 Word 选区或正文文本。
+    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度。
+    5. 审校完成后只在任务窗格展示结果，等待用户点击“应用到 Word”。
+    6. 批注模式：对有 `start/end` 的 issue 用 `search(original)` 找到原文片段并插入单条批注；定位失败的问题合并为范围起点汇总批注。
+    7. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
+    8. 修订模式中可定位但无 `replacement` 的 issue 回退为原位批注；定位失败的问题合并为范围起点汇总批注。
     9. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；历史记录会显示审校时的书名。
 
 - `assets/`

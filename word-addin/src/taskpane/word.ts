@@ -2,6 +2,9 @@
 
 import { ApplicationMode, IssueApplicationSummary, ProofreadIssue, ProofreadScope } from "./types";
 
+type SearchRoot = Word.Body | Word.Range;
+const FALLBACK_COMMENT_PREVIEW_LIMIT = 10;
+
 export async function getSelectedText(): Promise<string> {
   return Word.run(async (context) => {
     const selection = context.document.getSelection();
@@ -49,24 +52,6 @@ export async function applyIssuesToScope(
   return applyIssuesToSelection(sourceText, issues, applicationMode);
 }
 
-export async function insertUnlocatedSummaryComment(
-  issues: ProofreadIssue[],
-  scope: ProofreadScope
-): Promise<IssueApplicationSummary> {
-  const unlocatedIssues = issues.filter((issue) => !hasUsableLocation(issue));
-  if (unlocatedIssues.length === 0) {
-    return { commentCount: 0, revisionCount: 0, fallbackCount: 0 };
-  }
-
-  return Word.run(async (context) => {
-    const target =
-      scope === "document" ? context.document.body.getRange() : context.document.getSelection();
-    target.insertComment(formatFallbackComment(unlocatedIssues));
-    await context.sync();
-    return { commentCount: 0, revisionCount: 0, fallbackCount: unlocatedIssues.length };
-  });
-}
-
 function applyIssuesToSelection(
   selectedText: string,
   issues: ProofreadIssue[],
@@ -97,19 +82,19 @@ function insertCommentsForIssues(
   scope: ProofreadScope
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
-    const searchRoot =
-      scope === "document" ? context.document.body : context.document.getSelection();
+    const searchRoot = getSearchRoot(context, scope);
     const pendingSearches: Array<{
       issue: ProofreadIssue;
       occurrenceIndex: number;
       searchResults: Word.RangeCollection;
     }> = [];
+    const summaryIssues: ProofreadIssue[] = [];
+    const fallbackAnchorSearch = createFallbackAnchorSearch(searchRoot, sourceText);
     let commentCount = 0;
-    let fallbackCount = 0;
 
     for (const issue of issues) {
       if (!isIssueLocatable(sourceText, issue)) {
-        fallbackCount += 1;
+        summaryIssues.push(issue);
         continue;
       }
 
@@ -132,7 +117,7 @@ function insertCommentsForIssues(
       const targetRange = searchResults.items[occurrenceIndex];
 
       if (!targetRange) {
-        fallbackCount += 1;
+        summaryIssues.push(issue);
         return;
       }
 
@@ -140,8 +125,14 @@ function insertCommentsForIssues(
       commentCount += 1;
     });
 
+    if (summaryIssues.length > 0) {
+      getFallbackAnchorRange(searchRoot, scope, fallbackAnchorSearch).insertComment(
+        formatFallbackComment(summaryIssues)
+      );
+    }
+
     await context.sync();
-    return { commentCount, revisionCount: 0, fallbackCount };
+    return { commentCount, revisionCount: 0, fallbackCount: summaryIssues.length };
   });
 }
 
@@ -152,20 +143,27 @@ function applyRevisionsForIssues(
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
     const document = context.document;
-    const searchRoot = scope === "document" ? document.body : document.getSelection();
-    const pendingSearches: Array<{
+    const searchRoot = getSearchRoot(context, scope);
+    const pendingRevisionSearches: Array<{
       issue: ProofreadIssue;
       occurrenceIndex: number;
       searchResults: Word.RangeCollection;
     }> = [];
+    const pendingCommentSearches: Array<{
+      issue: ProofreadIssue;
+      occurrenceIndex: number;
+      searchResults: Word.RangeCollection;
+    }> = [];
+    const summaryIssues: ProofreadIssue[] = [];
+    const fallbackAnchorSearch = createFallbackAnchorSearch(searchRoot, sourceText);
     let revisionCount = 0;
-    let fallbackCount = 0;
+    let commentCount = 0;
 
     document.load("changeTrackingMode");
 
     for (const issue of issues) {
-      if (!isIssueLocatable(sourceText, issue) || !hasReplacement(issue)) {
-        fallbackCount += 1;
+      if (!isIssueLocatable(sourceText, issue)) {
+        summaryIssues.push(issue);
         continue;
       }
 
@@ -179,7 +177,45 @@ function applyRevisionsForIssues(
         matchWholeWord: false,
       });
       searchResults.load("items");
-      pendingSearches.push({ issue, occurrenceIndex, searchResults });
+
+      if (hasReplacement(issue)) {
+        pendingRevisionSearches.push({ issue, occurrenceIndex, searchResults });
+      } else {
+        pendingCommentSearches.push({ issue, occurrenceIndex, searchResults });
+      }
+    }
+
+    await context.sync();
+
+    const revisionApplications: Array<{ issue: ProofreadIssue; targetRange: Word.Range }> = [];
+
+    pendingRevisionSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
+      const targetRange = searchResults.items[occurrenceIndex];
+
+      if (!targetRange) {
+        summaryIssues.push(issue);
+        return;
+      }
+
+      revisionApplications.push({ issue, targetRange });
+    });
+
+    pendingCommentSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
+      const targetRange = searchResults.items[occurrenceIndex];
+
+      if (!targetRange) {
+        summaryIssues.push(issue);
+        return;
+      }
+
+      targetRange.insertComment(formatIssueComment(issue));
+      commentCount += 1;
+    });
+
+    if (summaryIssues.length > 0) {
+      getFallbackAnchorRange(searchRoot, scope, fallbackAnchorSearch).insertComment(
+        formatFallbackComment(summaryIssues)
+      );
     }
 
     await context.sync();
@@ -187,20 +223,13 @@ function applyRevisionsForIssues(
     const originalTrackingMode = document.changeTrackingMode;
 
     try {
-      if (pendingSearches.length > 0) {
+      if (revisionApplications.length > 0) {
         document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
 
-        pendingSearches
+        revisionApplications
           .sort((left, right) => (right.issue.start || 0) - (left.issue.start || 0))
-          .forEach(({ issue, occurrenceIndex, searchResults }) => {
-            const targetRange = searchResults.items[occurrenceIndex];
-
-            if (!targetRange || !issue.replacement) {
-              fallbackCount += 1;
-              return;
-            }
-
-            targetRange.insertText(issue.replacement, Word.InsertLocation.replace);
+          .forEach(({ issue, targetRange }) => {
+            targetRange.insertText(issue.replacement as string, Word.InsertLocation.replace);
             revisionCount += 1;
           });
 
@@ -211,8 +240,54 @@ function applyRevisionsForIssues(
       await context.sync();
     }
 
-    return { commentCount: 0, revisionCount, fallbackCount };
+    return { commentCount, revisionCount, fallbackCount: summaryIssues.length };
   });
+}
+
+function getSearchRoot(context: Word.RequestContext, scope: ProofreadScope): SearchRoot {
+  return scope === "document" ? context.document.body : context.document.getSelection();
+}
+
+function createFallbackAnchorSearch(
+  searchRoot: SearchRoot,
+  sourceText: string
+): { occurrenceIndex: number; searchResults: Word.RangeCollection | null } {
+  const firstVisibleOffset = findFirstNonWhitespaceOffset(sourceText);
+
+  if (firstVisibleOffset === -1) {
+    return { occurrenceIndex: 0, searchResults: null };
+  }
+
+  const anchorText = sourceText[firstVisibleOffset];
+  const searchResults = searchRoot.search(anchorText, {
+    matchCase: true,
+    matchWholeWord: false,
+  });
+  searchResults.load("items");
+
+  return {
+    occurrenceIndex: getOccurrenceIndexBeforeOffset(sourceText, anchorText, firstVisibleOffset),
+    searchResults,
+  };
+}
+
+function getFallbackAnchorRange(
+  searchRoot: SearchRoot,
+  scope: ProofreadScope,
+  anchorSearch: { occurrenceIndex: number; searchResults: Word.RangeCollection | null }
+): Word.Range {
+  const anchorRange = anchorSearch.searchResults?.items[anchorSearch.occurrenceIndex];
+
+  if (anchorRange) {
+    return anchorRange;
+  }
+
+  return scope === "document" ? (searchRoot as Word.Body).getRange() : (searchRoot as Word.Range);
+}
+
+function findFirstNonWhitespaceOffset(text: string): number {
+  const match = /\S/.exec(text);
+  return match ? match.index : -1;
 }
 
 function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
@@ -268,7 +343,14 @@ function formatIssueComment(issue: ProofreadIssue): string {
 }
 
 function formatFallbackComment(issues: ProofreadIssue[]): string {
-  return `AI 审校：以下 ${issues.length} 条建议未能定位到具体原文片段，已汇总为单条批注。\n\n${formatComment(issues)}`;
+  const visibleIssues = issues.slice(0, FALLBACK_COMMENT_PREVIEW_LIMIT);
+  const remainingCount = issues.length - visibleIssues.length;
+  const remainingMessage =
+    remainingCount > 0
+      ? `\n\n另有 ${remainingCount} 条未定位建议，请在任务窗格中查看完整结果。`
+      : "";
+
+  return `AI 审校：以下 ${issues.length} 条建议未能定位到具体原文片段，已汇总为单条批注。\n\n${formatComment(visibleIssues)}${remainingMessage}`;
 }
 
 function formatComment(issues: ProofreadIssue[]): string {

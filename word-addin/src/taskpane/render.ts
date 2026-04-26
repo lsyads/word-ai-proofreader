@@ -149,7 +149,7 @@ export function renderHistoryEntry(entry: ProofreadHistoryEntry) {
 }
 
 export function formatCompletionMessage(summary: IssueApplicationSummary): string {
-  return `应用完成，已精准批注 ${summary.commentCount} 条，已生成修订 ${summary.revisionCount} 条，未定位 ${summary.fallbackCount} 条。`;
+  return `应用完成，已精准批注 ${summary.commentCount} 条，已生成修订 ${summary.revisionCount} 条，未定位汇总 ${summary.fallbackCount} 条。`;
 }
 
 export function showMessage(message: string, type: "default" | "error" | "success" = "default") {

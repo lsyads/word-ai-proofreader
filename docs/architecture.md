@@ -394,13 +394,14 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 
 ## 批注与修订应用规则
 
-插件拿到最终 `issues` 后先渲染结果，不立即写入 Word。用户点击“应用到 Word”后才按当前应用方式写回：
+插件拿到最终 `issues` 后先渲染结果，不立即写入 Word。任务窗格会默认选中全部问题，并支持按严重程度、类别、定位状态和是否有 `replacement` 筛选；用户可以逐条勾选、批量选择，并点击单条“定位”在 Word 中选中对应原文。用户点击“应用 N 条到 Word”后才按当前应用方式写回已勾选问题：
 
 ```text
-批注模式 + start/end 可定位 -> 在 original 对应原文片段插入逐条批注
-修订模式 + start/end 可定位 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
-修订模式 + start/end 可定位 + 无 replacement -> 在 original 对应原文片段插入逐条批注
-定位失败 -> 在“应用到 Word”时合并为一条简短汇总批注
+已勾选 + 批注模式 + start/end 可定位 -> 在 original 对应原文片段插入逐条批注
+已勾选 + 修订模式 + start/end 可定位 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
+已勾选 + 修订模式 + start/end 可定位 + 无 replacement -> 在 original 对应原文片段插入逐条批注
+已勾选 + 定位失败 -> 在“应用 N 条到 Word”时合并为一条简短汇总批注
+未勾选 -> 不写回 Word
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
@@ -409,13 +410,13 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
-批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数、未定位数和是否已应用。开发阶段历史记录使用新 localStorage key，不兼容旧历史数据。
+批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数、未定位数、是否已应用、`selectedIssueIds` 和 `skippedIssueCount`。开发阶段历史记录使用新 schema，不兼容旧历史数据。
 
 ## 停止审校和历史记录
 
 插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端显示“正在停止审校，当前分块完成后结束”，使用 `AbortController` 中断当前请求；如果当前是分块任务，还会调用 `DELETE /api/proofread/tasks/{task_id}` 标记后端任务取消。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数和应用统计，但不承担 AI 上下文续接；后端每次审校都发起独立 AI 请求。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数、已选问题 ID、跳过数量和应用统计；导入时只接受当前开发版 schema。历史记录不承担 AI 上下文续接，后端每次审校都发起独立 AI 请求。
 
 ## 调试日志
 

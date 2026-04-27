@@ -9,6 +9,7 @@ import {
   requestChunkedProofreadTask,
   requestProofread,
 } from "./api";
+import { appendDebugLog, clearDebugLog } from "./debug";
 import {
   clearHistoryEntries,
   exportHistoryEntries,
@@ -20,6 +21,9 @@ import {
 } from "./history";
 import {
   appendProgressStatus,
+  BulkSelectionAction,
+  createDefaultFilterState,
+  formatApplyButtonLabel,
   formatComment,
   formatCompletionMessage,
   getButton,
@@ -38,7 +42,11 @@ import {
   ApplicationMode,
   BookInfo,
   ControlsState,
+  IssueFilterState,
+  IssueReviewState,
   PendingProofreadResult,
+  ProofreadHistoryEntry,
+  ProofreadIssue,
   ProofreadStatusEvent,
   ProofreadMode,
   ProofreadScope,
@@ -51,6 +59,7 @@ import {
   ensureWordCommentSupport,
   getDocumentBodyText,
   getSelectedText,
+  selectIssueInScope,
 } from "./word";
 
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
@@ -66,6 +75,7 @@ let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
 let currentTaskId: string | null = null;
 let pendingResult: PendingProofreadResult | null = null;
+let issueReviewState: IssueReviewState | null = null;
 let clearHistoryConfirmTimer: number | null = null;
 let isClearHistoryArmed = false;
 let taskState: TaskState = "idle";
@@ -79,6 +89,7 @@ Office.onReady((info) => {
     getButton("proofread").onclick = proofreadSelection;
     getButton("apply-to-word").onclick = applyPendingResultToWord;
     getButton("new-conversation").onclick = clearCurrentResult;
+    getButton("clear-debug-log").onclick = clearDebugLog;
     getButton("clear-history").onclick = clearHistory;
     getButton("export-history").onclick = exportHistory;
     getButton("import-history").onclick = () => getInput("history-file").click();
@@ -118,6 +129,7 @@ async function clearCurrentResult() {
   }
 
   pendingResult = null;
+  issueReviewState = null;
   stopChunkElapsedTimer();
   setBusy(false);
   resetProgress();
@@ -165,6 +177,7 @@ export async function proofreadSelection() {
   currentAbortController = abortController;
   currentTaskId = null;
   pendingResult = null;
+  issueReviewState = null;
   taskState = "running";
   stopChunkElapsedTimer();
   setBusy(true);
@@ -243,7 +256,11 @@ export async function proofreadSelection() {
       reasoningEnabled: controls.reasoningEnabled,
       issues,
     };
-    renderResult(issues, formatComment(issues));
+    issueReviewState = {
+      selectedIssueIds: issues.map((issue) => issue.id),
+      filter: createDefaultFilterState(),
+    };
+    renderCurrentPendingResult();
     taskState = status;
     savePendingResultHistory({
       result: pendingResult,
@@ -302,19 +319,20 @@ export async function proofreadSelection() {
 }
 
 async function applyPendingResultToWord() {
-  if (!pendingResult || pendingResult.issues.length === 0 || isApplyingToWord) {
+  const selectedIssues = getSelectedIssues();
+  if (!pendingResult || selectedIssues.length === 0 || isApplyingToWord) {
     return;
   }
 
   isApplyingToWord = true;
   setBusy(true, { applying: true });
   updateActionButtons();
-  showMessage("正在应用到 Word...", "default");
+  showMessage(`正在应用到 Word，${formatIssueApplicationPreview(selectedIssues)}。`, "default");
 
   try {
     const summary = await applyIssuesToScope(
       pendingResult.sourceText,
-      pendingResult.issues,
+      selectedIssues,
       pendingResult.scope,
       getApplicationMode()
     );
@@ -322,6 +340,7 @@ async function applyPendingResultToWord() {
       result: pendingResult,
       summary,
       applicationMode: getApplicationMode(),
+      selectedIssueIds: selectedIssues.map((issue) => issue.id),
     });
     refreshHistory();
     showMessage(formatCompletionMessage(summary), "success");
@@ -332,6 +351,150 @@ async function applyPendingResultToWord() {
     setBusy(false);
     updateActionButtons();
   }
+}
+
+function renderCurrentPendingResult() {
+  if (!pendingResult || !issueReviewState) {
+    return;
+  }
+
+  renderResult(pendingResult.issues, formatComment(pendingResult.issues), {
+    sourceText: pendingResult.sourceText,
+    reviewState: issueReviewState,
+    applicationMode: getApplicationMode(),
+    onToggleIssue: updateIssueSelection,
+    onBulkSelect: updateBulkSelection,
+    onFilterChange: updateIssueFilter,
+    onLocateIssue: locateIssue,
+  });
+  updateActionButtons();
+}
+
+function updateIssueSelection(issueId: string, selected: boolean) {
+  if (!issueReviewState || !pendingResult) {
+    return;
+  }
+
+  const selectedIssueIds = issueReviewState.selectedIssueIds.filter((id) => id !== issueId);
+  if (selected && pendingResult.issues.some((issue) => issue.id === issueId)) {
+    selectedIssueIds.push(issueId);
+  }
+
+  issueReviewState = {
+    ...issueReviewState,
+    selectedIssueIds,
+  };
+  renderCurrentPendingResult();
+}
+
+function updateBulkSelection(action: BulkSelectionAction) {
+  if (!issueReviewState || !pendingResult) {
+    return;
+  }
+
+  let selectedIssueIds: string[] = [];
+  if (action === "all") {
+    selectedIssueIds = pendingResult.issues.map((issue) => issue.id);
+  }
+  if (action === "high-medium") {
+    selectedIssueIds = pendingResult.issues
+      .filter((issue) => issue.severity === "high" || issue.severity === "medium")
+      .map((issue) => issue.id);
+  }
+  if (action === "replaceable") {
+    selectedIssueIds = pendingResult.issues
+      .filter(
+        (issue) => typeof issue.replacement === "string" && issue.replacement.trim().length > 0
+      )
+      .map((issue) => issue.id);
+  }
+
+  issueReviewState = {
+    ...issueReviewState,
+    selectedIssueIds,
+  };
+  renderCurrentPendingResult();
+}
+
+function updateIssueFilter(filter: IssueFilterState) {
+  if (!issueReviewState) {
+    return;
+  }
+
+  issueReviewState = {
+    ...issueReviewState,
+    filter,
+  };
+  renderCurrentPendingResult();
+}
+
+async function locateIssue(issue: ProofreadIssue) {
+  if (!pendingResult) {
+    appendDebugLog("warn", "定位已跳过：当前没有待应用结果", {
+      issueId: issue.id,
+    });
+    return;
+  }
+
+  appendDebugLog("info", "开始定位 Word 原文", {
+    issueId: issue.id,
+    category: issue.category,
+    severity: issue.severity,
+    scope: pendingResult.scope,
+    start: issue.start,
+    end: issue.end,
+    originalLength: issue.original.length,
+    sourceTextLength: pendingResult.sourceText.length,
+  });
+
+  try {
+    await selectIssueInScope(pendingResult.sourceText, issue, pendingResult.scope);
+    appendDebugLog("info", "定位完成", {
+      issueId: issue.id,
+    });
+    showMessage("已定位到 Word 原文。", "success");
+  } catch (error) {
+    appendDebugLog("error", "定位失败", {
+      issueId: issue.id,
+      error,
+    });
+    showMessage(`定位失败：${getErrorMessage(error)}`, "error");
+  }
+}
+
+function getSelectedIssues(): ProofreadIssue[] {
+  if (!pendingResult || !issueReviewState) {
+    return [];
+  }
+
+  const selectedIssueIdSet = new Set(issueReviewState.selectedIssueIds);
+  return pendingResult.issues.filter((issue) => selectedIssueIdSet.has(issue.id));
+}
+
+function formatIssueApplicationPreview(issues: ProofreadIssue[]): string {
+  const revisionCount =
+    getApplicationMode() === "revision"
+      ? issues.filter((issue) => isLocatedIssue(issue) && hasReplacement(issue)).length
+      : 0;
+  const commentCount = issues.filter((issue) => {
+    if (!isLocatedIssue(issue)) {
+      return false;
+    }
+
+    return getApplicationMode() === "comment" || !hasReplacement(issue);
+  }).length;
+  const fallbackCount = issues.filter((issue) => !isLocatedIssue(issue)).length;
+  const skippedCount = pendingResult ? pendingResult.issues.length - issues.length : 0;
+
+  return `预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，未定位汇总 ${fallbackCount} 条，跳过 ${skippedCount} 条`;
+}
+
+function isLocatedIssue(issue: ProofreadIssue): boolean {
+  return typeof issue.start === "number" && typeof issue.end === "number";
+}
+
+function hasReplacement(issue: ProofreadIssue): boolean {
+  return typeof issue.replacement === "string" && issue.replacement.trim().length > 0;
 }
 
 function cancelCurrentProofread() {
@@ -452,12 +615,24 @@ function saveStoppedOrFailedHistory(input: {
     reasoningEnabled: input.controls.reasoningEnabled,
     applicationMode: input.controls.applicationMode,
     sessionId: currentSessionId || "",
+    selectedIssueIds: [],
+    skippedIssueCount: 0,
     errorMessage: input.errorMessage,
   });
 }
 
 function refreshHistory() {
-  renderHistory(getHistoryEntries(), renderHistoryEntry);
+  renderHistory(getHistoryEntries(), openHistoryEntry);
+}
+
+function openHistoryEntry(entry: ProofreadHistoryEntry) {
+  pendingResult = null;
+  issueReviewState = {
+    selectedIssueIds: entry.selectedIssueIds,
+    filter: createDefaultFilterState(),
+  };
+  renderHistoryEntry(entry);
+  updateActionButtons();
 }
 
 function initializeControls() {
@@ -477,6 +652,10 @@ function persistControls() {
   localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
   localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
+
+  if (pendingResult && issueReviewState) {
+    renderCurrentPendingResult();
+  }
 }
 
 function persistBookInfo() {
@@ -664,7 +843,10 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
 }
 
 function updateActionButtons() {
-  const canApply = Boolean(pendingResult && pendingResult.issues.length > 0 && !isApplyingToWord);
+  const selectedCount = getSelectedIssues().length;
+  const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord);
+  const applyButton = getButton("apply-to-word");
 
-  getButton("apply-to-word").disabled = !canApply || taskState === "running";
+  applyButton.disabled = !canApply || taskState === "running";
+  applyButton.querySelector(".ms-Button-label").textContent = formatApplyButtonLabel(selectedCount);
 }

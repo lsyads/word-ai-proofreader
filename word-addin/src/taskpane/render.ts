@@ -1,8 +1,11 @@
 /* global document, HTMLElement, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement */
 
+import { appendDebugLog } from "./debug";
 import {
   ApplicationMode,
   IssueApplicationSummary,
+  IssueFilterState,
+  IssueReviewState,
   ProofreadHistoryEntry,
   ProofreadIssue,
   ProofreadMode,
@@ -12,7 +15,24 @@ import {
   TaskState,
 } from "./types";
 
-export function renderResult(issues: ProofreadIssue[], commentText: string) {
+export type BulkSelectionAction = "all" | "none" | "high-medium" | "replaceable";
+
+export interface ResultRenderOptions {
+  sourceText?: string;
+  reviewState?: IssueReviewState;
+  applicationMode?: ApplicationMode;
+  readonly?: boolean;
+  onToggleIssue?: (issueId: string, selected: boolean) => void;
+  onBulkSelect?: (action: BulkSelectionAction) => void;
+  onFilterChange?: (filter: IssueFilterState) => void;
+  onLocateIssue?: (issue: ProofreadIssue) => void;
+}
+
+export function renderResult(
+  issues: ProofreadIssue[],
+  commentText: string,
+  options: ResultRenderOptions = {}
+) {
   const result = getElement("result");
 
   if (issues.length === 0) {
@@ -21,21 +41,48 @@ export function renderResult(issues: ProofreadIssue[], commentText: string) {
     return;
   }
 
+  const reviewState = options.reviewState || {
+    selectedIssueIds: issues.map((issue) => issue.id),
+    filter: createDefaultFilterState(),
+  };
+  const selectedIssueIdSet = new Set(reviewState.selectedIssueIds);
+  const sortedIssues = sortIssuesBySeverity(issues);
+  const visibleIssues = sortedIssues.filter((issue) => matchesFilter(issue, reviewState.filter));
+  const selectedIssues = sortedIssues.filter((issue) => selectedIssueIdSet.has(issue.id));
+  const summary = formatSelectionSummary(
+    sortedIssues,
+    selectedIssues,
+    options.applicationMode || "comment"
+  );
+
   result.className = "result-list";
-  result.innerHTML = issues
-    .map(
-      (issue, index) => `
-        <article class="result-item">
-          <p class="result-item-title">${index + 1}. ${escapeHtml(issue.category)} / ${escapeHtml(issue.severity)}
-            <span class="location-status">${escapeHtml(formatLocationStatus(issue))}</span>
-          </p>
-          <p><b>原文：</b>${escapeHtml(issue.original || "未提供")}</p>
-          <p><b>替换为：</b>${escapeHtml(issue.replacement || "无直接替换文本")}</p>
-          <p><b>建议：</b>${escapeHtml(issue.suggestion || "未提供")}</p>
-        </article>
-      `
-    )
-    .join("");
+  result.innerHTML = `
+    ${renderReviewToolbar(sortedIssues, visibleIssues, reviewState, summary, Boolean(options.readonly))}
+    <div class="result-items">
+      ${visibleIssues
+        .map((issue, index) =>
+          renderIssueItem({
+            issue,
+            displayIndex: sortedIssues.indexOf(issue) + 1 || index + 1,
+            selected: selectedIssueIdSet.has(issue.id),
+            sourceText: options.sourceText,
+            readonly: Boolean(options.readonly),
+          })
+        )
+        .join("")}
+    </div>
+  `;
+
+  bindResultEvents(result, visibleIssues, reviewState, options);
+}
+
+export function createDefaultFilterState(): IssueFilterState {
+  return {
+    severity: "all",
+    category: "all",
+    location: "all",
+    replacement: "all",
+  };
 }
 
 export function formatComment(issues: ProofreadIssue[]): string {
@@ -56,6 +103,10 @@ export function formatComment(issues: ProofreadIssue[]): string {
   });
 
   return lines.join("\n");
+}
+
+export function formatApplyButtonLabel(selectedCount: number): string {
+  return selectedCount > 0 ? `应用 ${selectedCount} 条到 Word` : "应用到 Word";
 }
 
 export function renderEmptyResult(message: string) {
@@ -141,7 +192,14 @@ export function renderHistory(
 export function renderHistoryEntry(entry: ProofreadHistoryEntry) {
   resetProgress();
   appendProgressStatus({ stage: entry.status, message: formatHistoryMeta(entry) });
-  renderResult(entry.issues, formatComment(entry.issues));
+  renderResult(entry.issues, formatComment(entry.issues), {
+    reviewState: {
+      selectedIssueIds: entry.selectedIssueIds,
+      filter: createDefaultFilterState(),
+    },
+    applicationMode: entry.applicationMode,
+    readonly: true,
+  });
   showMessage(
     `已打开历史记录：${formatHistoryMeta(entry)}`,
     entry.status === "failed" ? "error" : "default"
@@ -202,6 +260,272 @@ export function formatProofreadScope(scope: ProofreadScope): string {
   return scope === "document" ? "全书正文" : "当前选区";
 }
 
+function renderReviewToolbar(
+  issues: ProofreadIssue[],
+  visibleIssues: ProofreadIssue[],
+  reviewState: IssueReviewState,
+  summary: string,
+  readonly: boolean
+): string {
+  const categories = Array.from(new Set(issues.map((issue) => issue.category))).sort();
+
+  return `
+    <div class="result-toolbar">
+      <div class="result-summary">${escapeHtml(summary)}</div>
+      <div class="result-filters">
+        <label>
+          <span>严重程度</span>
+          <select class="control-select result-filter" data-filter="severity" ${readonly ? "disabled" : ""}>
+            ${renderFilterOption("all", "全部", reviewState.filter.severity)}
+            ${renderFilterOption("high-medium", "高/中风险", reviewState.filter.severity)}
+            ${renderFilterOption("high", "高风险", reviewState.filter.severity)}
+            ${renderFilterOption("medium", "中风险", reviewState.filter.severity)}
+            ${renderFilterOption("low", "低风险", reviewState.filter.severity)}
+          </select>
+        </label>
+        <label>
+          <span>类别</span>
+          <select class="control-select result-filter" data-filter="category" ${readonly ? "disabled" : ""}>
+            ${renderFilterOption("all", "全部", reviewState.filter.category)}
+            ${categories
+              .map((category) =>
+                renderFilterOption(category, category, reviewState.filter.category)
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>
+          <span>定位</span>
+          <select class="control-select result-filter" data-filter="location" ${readonly ? "disabled" : ""}>
+            ${renderFilterOption("all", "全部", reviewState.filter.location)}
+            ${renderFilterOption("located", "已定位", reviewState.filter.location)}
+            ${renderFilterOption("unlocated", "未定位", reviewState.filter.location)}
+          </select>
+        </label>
+        <label>
+          <span>替换</span>
+          <select class="control-select result-filter" data-filter="replacement" ${readonly ? "disabled" : ""}>
+            ${renderFilterOption("all", "全部", reviewState.filter.replacement)}
+            ${renderFilterOption("with-replacement", "可直接替换", reviewState.filter.replacement)}
+            ${renderFilterOption("needs-review", "需人工核查", reviewState.filter.replacement)}
+          </select>
+        </label>
+      </div>
+      <div class="result-bulk-actions">
+        <button class="ms-Button result-bulk" type="button" data-action="all" ${readonly ? "disabled" : ""}>全选</button>
+        <button class="ms-Button result-bulk" type="button" data-action="none" ${readonly ? "disabled" : ""}>全不选</button>
+        <button class="ms-Button result-bulk" type="button" data-action="high-medium" ${readonly ? "disabled" : ""}>只选高/中风险</button>
+        <button class="ms-Button result-bulk" type="button" data-action="replaceable" ${readonly ? "disabled" : ""}>只选可直接替换项</button>
+      </div>
+      <div class="result-visible-count">当前显示 ${visibleIssues.length}/${issues.length} 条</div>
+    </div>
+  `;
+}
+
+function renderIssueItem(input: {
+  issue: ProofreadIssue;
+  displayIndex: number;
+  selected: boolean;
+  sourceText?: string;
+  readonly: boolean;
+}): string {
+  const issue = input.issue;
+  const locatable = input.sourceText
+    ? isIssueLocatable(input.sourceText, issue)
+    : isLocatedIssue(issue);
+  const canLocate = Boolean(input.sourceText && locatable && !input.readonly);
+  const needsReview = !hasReplacement(issue);
+  const statusClass = locatable ? "is-located" : "is-unlocated";
+  const replacementClass = needsReview ? "needs-review" : "has-replacement";
+
+  return `
+    <article class="result-item ${statusClass} ${replacementClass}">
+      <div class="result-item-heading">
+        <label class="issue-select">
+          <input type="checkbox" data-issue-id="${escapeHtml(issue.id)}" ${
+            input.selected ? "checked" : ""
+          } ${input.readonly ? "disabled" : ""} />
+          <span>${input.displayIndex}. ${escapeHtml(issue.category)} / ${escapeHtml(issue.severity)}</span>
+        </label>
+        <span class="location-status">${escapeHtml(formatLocationStatus(issue, locatable))}</span>
+      </div>
+      <p><b>原文：</b>${escapeHtml(issue.original || "未提供")}</p>
+      <p><b>替换为：</b>${escapeHtml(issue.replacement || "无直接替换文本，需人工核查")}</p>
+      <p><b>建议：</b>${escapeHtml(issue.suggestion || "未提供")}</p>
+      ${renderContextPreview(input.sourceText, issue)}
+      <button class="ms-Button locate-issue" type="button" data-locate-id="${escapeHtml(issue.id)}" ${
+        canLocate ? "" : "disabled"
+      }>定位</button>
+    </article>
+  `;
+}
+
+function bindResultEvents(
+  result: HTMLElement,
+  visibleIssues: ProofreadIssue[],
+  reviewState: IssueReviewState,
+  options: ResultRenderOptions
+) {
+  result.querySelectorAll("[data-issue-id]").forEach((item) => {
+    item.addEventListener("change", () => {
+      const input = item as HTMLInputElement;
+      options.onToggleIssue?.(input.getAttribute("data-issue-id") || "", input.checked);
+    });
+  });
+
+  result.querySelectorAll(".result-bulk").forEach((item) => {
+    item.addEventListener("click", () => {
+      const action = (item as HTMLElement).getAttribute("data-action") as BulkSelectionAction;
+      options.onBulkSelect?.(action);
+    });
+  });
+
+  result.querySelectorAll(".result-filter").forEach((item) => {
+    item.addEventListener("change", () => {
+      const select = item as HTMLSelectElement;
+      const filterKey = select.getAttribute("data-filter");
+      const nextFilter = { ...reviewState.filter };
+
+      if (filterKey === "severity") {
+        nextFilter.severity = select.value as IssueFilterState["severity"];
+      }
+      if (filterKey === "category") {
+        nextFilter.category = select.value;
+      }
+      if (filterKey === "location") {
+        nextFilter.location = select.value as IssueFilterState["location"];
+      }
+      if (filterKey === "replacement") {
+        nextFilter.replacement = select.value as IssueFilterState["replacement"];
+      }
+
+      options.onFilterChange?.(nextFilter);
+    });
+  });
+
+  result.querySelectorAll("[data-locate-id]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const issueId = (item as HTMLElement).getAttribute("data-locate-id");
+      const target = visibleIssues.find((issue) => issue.id === issueId);
+
+      appendDebugLog("info", "定位按钮已点击", {
+        issueId,
+        foundInVisibleIssues: Boolean(target),
+      });
+
+      if (target) {
+        options.onLocateIssue?.(target);
+      }
+    });
+  });
+}
+
+function sortIssuesBySeverity(issues: ProofreadIssue[]): ProofreadIssue[] {
+  const severityRank: Record<ProofreadIssue["severity"], number> = {
+    high: 0,
+    medium: 1,
+    low: 2,
+  };
+
+  return issues
+    .map((issue, index) => ({ issue, index }))
+    .sort((left, right) => {
+      const severityDiff = severityRank[left.issue.severity] - severityRank[right.issue.severity];
+      return severityDiff === 0 ? left.index - right.index : severityDiff;
+    })
+    .map((entry) => entry.issue);
+}
+
+function matchesFilter(issue: ProofreadIssue, filter: IssueFilterState): boolean {
+  if (filter.severity === "high-medium" && issue.severity === "low") {
+    return false;
+  }
+
+  if (
+    filter.severity !== "all" &&
+    filter.severity !== "high-medium" &&
+    issue.severity !== filter.severity
+  ) {
+    return false;
+  }
+
+  if (filter.category !== "all" && issue.category !== filter.category) {
+    return false;
+  }
+
+  const located = isLocatedIssue(issue);
+  if (filter.location === "located" && !located) {
+    return false;
+  }
+  if (filter.location === "unlocated" && located) {
+    return false;
+  }
+
+  const replaceable = hasReplacement(issue);
+  if (filter.replacement === "with-replacement" && !replaceable) {
+    return false;
+  }
+  if (filter.replacement === "needs-review" && replaceable) {
+    return false;
+  }
+
+  return true;
+}
+
+function renderFilterOption(value: string, label: string, selectedValue: string): string {
+  return `<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHtml(label)}</option>`;
+}
+
+function renderContextPreview(sourceText: string | undefined, issue: ProofreadIssue): string {
+  if (!sourceText || typeof issue.start !== "number" || typeof issue.end !== "number") {
+    return "";
+  }
+
+  const before = sourceText.slice(Math.max(0, issue.start - 24), issue.start);
+  const original = sourceText.slice(issue.start, issue.end);
+  const after = sourceText.slice(issue.end, Math.min(sourceText.length, issue.end + 24));
+
+  return `<p class="context-preview"><b>上下文：</b>${escapeHtml(before)}<mark>${escapeHtml(original)}</mark>${escapeHtml(after)}</p>`;
+}
+
+function formatSelectionSummary(
+  allIssues: ProofreadIssue[],
+  selectedIssues: ProofreadIssue[],
+  applicationMode: ApplicationMode
+): string {
+  const skippedCount = allIssues.length - selectedIssues.length;
+  const revisionCount =
+    applicationMode === "revision"
+      ? selectedIssues.filter((issue) => isLocatedIssue(issue) && hasReplacement(issue)).length
+      : 0;
+  const commentCount = selectedIssues.filter((issue) => {
+    if (!isLocatedIssue(issue)) {
+      return false;
+    }
+
+    return applicationMode === "comment" || !hasReplacement(issue);
+  }).length;
+  const fallbackCount = selectedIssues.filter((issue) => !isLocatedIssue(issue)).length;
+
+  return `已选 ${selectedIssues.length}/${allIssues.length} 条；预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，未定位汇总 ${fallbackCount} 条，跳过 ${skippedCount} 条。`;
+}
+
+function isLocatedIssue(issue: ProofreadIssue): boolean {
+  return typeof issue.start === "number" && typeof issue.end === "number";
+}
+
+function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
+  if (!sourceText || !isLocatedIssue(issue)) {
+    return false;
+  }
+
+  return sourceText.slice(issue.start as number, issue.end as number) === issue.original;
+}
+
+function hasReplacement(issue: ProofreadIssue): boolean {
+  return typeof issue.replacement === "string" && issue.replacement.trim().length > 0;
+}
+
 function formatStage(stage: string): string {
   const stageLabels: Record<string, string> = {
     api: "接口",
@@ -227,12 +551,12 @@ function formatStage(stage: string): string {
   return `[${stageLabels[stage] || stage}]`;
 }
 
-function formatLocationStatus(issue: ProofreadIssue): string {
-  if (typeof issue.start === "number" && typeof issue.end === "number") {
+function formatLocationStatus(issue: ProofreadIssue, locatable: boolean): string {
+  if (locatable && typeof issue.start === "number" && typeof issue.end === "number") {
     return `已定位 ${issue.start}-${issue.end}`;
   }
 
-  return "未定位";
+  return "未定位，将不会精准写回";
 }
 
 function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
@@ -249,11 +573,12 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
   const issueText = entry.issueCount > 0 ? `${entry.issueCount} 条问题` : "无问题";
   const locatedText =
     entry.issueCount > 0 ? `定位 ${entry.locatedIssueCount}/${entry.issueCount}` : "无需定位";
+  const skippedText = entry.skippedIssueCount > 0 ? ` / 跳过 ${entry.skippedIssueCount}` : "";
   const actionText = entry.appliedToWord
     ? entry.applicationMode === "revision"
-      ? `已应用修订 ${entry.revisionCount} / 未定位 ${entry.fallbackCount}`
-      : `已应用批注 ${entry.locatedIssueCount} / 未定位 ${entry.fallbackCount}`
-    : `未应用 / 未定位 ${entry.fallbackCount}`;
+      ? `已应用修订 ${entry.revisionCount} / 未定位 ${entry.fallbackCount}${skippedText}`
+      : `已应用批注 ${entry.locatedIssueCount} / 未定位 ${entry.fallbackCount}${skippedText}`
+    : `未应用 / 未定位 ${entry.fallbackCount}${skippedText}`;
   const reasoningText = entry.reasoningEnabled ? "深度思考开" : "深度思考关";
   const modeText = `${formatProofreadScope(entry.scope)} / ${formatProofreadMode(entry.proofreadMode)} / ${reasoningText} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
   const chunkText =

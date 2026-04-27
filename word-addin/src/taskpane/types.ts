@@ -94,6 +94,8 @@ export interface ProofreadHistoryEntry {
   failedChunks: number;
   globalLocatedIssueCount: number;
   issues: ProofreadIssue[];
+  selectedIssueIds: string[];
+  skippedIssueCount: number;
   insertedComment: boolean;
   appliedToWord: boolean;
   errorMessage?: string;
@@ -126,6 +128,22 @@ export interface ControlsState {
   reasoningEnabled: boolean;
   applicationMode: ApplicationMode;
   scope: ProofreadScope;
+}
+
+export type IssueSeverityFilter = "all" | "high-medium" | "high" | "medium" | "low";
+export type IssueLocationFilter = "all" | "located" | "unlocated";
+export type IssueReplacementFilter = "all" | "with-replacement" | "needs-review";
+
+export interface IssueFilterState {
+  severity: IssueSeverityFilter;
+  category: string;
+  location: IssueLocationFilter;
+  replacement: IssueReplacementFilter;
+}
+
+export interface IssueReviewState {
+  selectedIssueIds: string[];
+  filter: IssueFilterState;
 }
 
 export const SELECTION_CHUNK_THRESHOLD = 5000;

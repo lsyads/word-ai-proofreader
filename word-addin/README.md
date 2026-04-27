@@ -1,6 +1,6 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围，并支持单独开启“深度思考”以控制后端 Chat `reasoning.enabled`。审校完成后先在任务窗格展示结果，用户点击“应用到 Word”后才写回：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；不可定位建议合并为一条范围起点汇总批注。
+`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围，并支持单独开启“深度思考”以控制后端 Chat `reasoning.enabled`。审校完成后先在任务窗格展示结果，用户可筛选、逐条勾选并定位原文，再点击“应用 N 条到 Word”写回已选问题：批注模式把可定位审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；已选但不可定位建议合并为一条范围起点汇总批注，未选建议不会写回。
 
 ## 目录结构
 
@@ -68,11 +68,13 @@ word-addin/
     2. 检查 Word 批注 API 能力。
     3. 按审校范围读取当前 Word 选区或正文文本。
     4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度；收到 `chunk_started` 后本地每秒刷新当前块耗时。
-    5. 审校完成后只在任务窗格展示结果，等待用户点击“应用到 Word”。
-    6. 批注模式：对有 `start/end` 的 issue 用 `search(original)` 找到原文片段并插入单条批注；定位失败的问题合并为范围起点汇总批注。
-    7. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，对可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
-    8. 修订模式中可定位但无 `replacement` 的 issue 回退为原位批注；定位失败的问题合并为范围起点汇总批注。
-    9. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；历史记录会显示审校时的书名。
+    5. 审校完成后只在任务窗格展示结果，初始化所有 issue 为已选，并支持按严重程度、类别、定位状态和是否可直接替换筛选。
+    6. 用户可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项；“应用到 Word”按钮显示当前已选数量。
+    7. 单条“定位”使用 `search(original)` 和 occurrence 计算选中 Word 原文，不插入批注或修订。
+    8. 批注模式：只对已选且有 `start/end` 的 issue 找到原文片段并插入单条批注；已选但定位失败的问题合并为范围起点汇总批注。
+    9. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，只对已选、可定位且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
+    10. 修订模式中已选、可定位但无 `replacement` 的 issue 回退为原位批注；未选 issue 不写回 Word。
+    11. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；历史记录会显示审校时的书名、已选问题 ID 和跳过数量，开发阶段不兼容旧历史数据。
 
 - `assets/`
   - 插件图标和 logo。

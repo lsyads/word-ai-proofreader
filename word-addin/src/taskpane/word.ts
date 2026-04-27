@@ -1,8 +1,17 @@
 /* global Office, Word */
 
+import { appendDebugLog } from "./debug";
 import { ApplicationMode, IssueApplicationSummary, ProofreadIssue, ProofreadScope } from "./types";
 
 type SearchRoot = Word.Body | Word.Range;
+interface SearchContext {
+  root: SearchRoot;
+  rootKind: "body" | "selection";
+  occurrenceText: string;
+  sourceStart: number;
+  resolvedBy: "body-source-text" | "document-body" | "current-selection";
+}
+
 const FALLBACK_COMMENT_PREVIEW_LIMIT = 10;
 
 export async function getSelectedText(): Promise<string> {
@@ -52,6 +61,75 @@ export async function applyIssuesToScope(
   return applyIssuesToSelection(sourceText, issues, applicationMode);
 }
 
+export async function selectIssueInScope(
+  sourceText: string,
+  issue: ProofreadIssue,
+  scope: ProofreadScope
+): Promise<void> {
+  return Word.run(async (context) => {
+    appendDebugLog("info", "Word.run 定位开始", {
+      issueId: issue.id,
+      scope,
+      start: issue.start,
+      end: issue.end,
+      original: issue.original,
+      sourceTextLength: sourceText.length,
+    });
+
+    if (!isIssueLocatable(sourceText, issue)) {
+      appendDebugLog("warn", "定位前校验失败：sourceText 对应片段与 original 不一致", {
+        issueId: issue.id,
+        expected: issue.original,
+        actual:
+          typeof issue.start === "number" && typeof issue.end === "number"
+            ? sourceText.slice(issue.start, issue.end)
+            : null,
+      });
+      throw new Error("该问题未能定位到 Word 原文。");
+    }
+
+    const searchContext = await createSearchContext(context, scope, sourceText);
+    const targetStart = searchContext.sourceStart + (issue.start as number);
+    const occurrenceIndex = getOccurrenceIndexBeforeOffset(
+      searchContext.occurrenceText,
+      issue.original,
+      targetStart
+    );
+    const searchResults = searchContext.root.search(issue.original, {
+      matchCase: true,
+      matchWholeWord: false,
+    });
+    searchResults.load("items");
+    await context.sync();
+
+    appendDebugLog("info", "Word search 完成", {
+      issueId: issue.id,
+      occurrenceIndex,
+      searchResultCount: searchResults.items.length,
+      resolvedBy: searchContext.resolvedBy,
+      sourceStart: searchContext.sourceStart,
+      targetStart,
+    });
+
+    const targetRange = searchResults.items[occurrenceIndex];
+    if (!targetRange) {
+      appendDebugLog("warn", "Word search 找不到目标 occurrence", {
+        issueId: issue.id,
+        occurrenceIndex,
+        searchResultCount: searchResults.items.length,
+      });
+      throw new Error("未能在当前 Word 范围中找到对应原文。");
+    }
+
+    targetRange.select();
+    await context.sync();
+    appendDebugLog("info", "Word range 已 select", {
+      issueId: issue.id,
+      occurrenceIndex,
+    });
+  });
+}
+
 function applyIssuesToSelection(
   selectedText: string,
   issues: ProofreadIssue[],
@@ -82,14 +160,14 @@ function insertCommentsForIssues(
   scope: ProofreadScope
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
-    const searchRoot = getSearchRoot(context, scope);
+    const searchContext = await createSearchContext(context, scope, sourceText);
     const pendingSearches: Array<{
       issue: ProofreadIssue;
       occurrenceIndex: number;
       searchResults: Word.RangeCollection;
     }> = [];
     const summaryIssues: ProofreadIssue[] = [];
-    const fallbackAnchorSearch = createFallbackAnchorSearch(searchRoot, sourceText);
+    const fallbackAnchorSearch = createFallbackAnchorSearch(searchContext, sourceText);
     let commentCount = 0;
 
     for (const issue of issues) {
@@ -99,11 +177,11 @@ function insertCommentsForIssues(
       }
 
       const occurrenceIndex = getOccurrenceIndexBeforeOffset(
-        sourceText,
+        searchContext.occurrenceText,
         issue.original,
-        issue.start as number
+        searchContext.sourceStart + (issue.start as number)
       );
-      const searchResults = searchRoot.search(issue.original, {
+      const searchResults = searchContext.root.search(issue.original, {
         matchCase: true,
         matchWholeWord: false,
       });
@@ -126,7 +204,7 @@ function insertCommentsForIssues(
     });
 
     if (summaryIssues.length > 0) {
-      getFallbackAnchorRange(searchRoot, scope, fallbackAnchorSearch).insertComment(
+      getFallbackAnchorRange(searchContext, fallbackAnchorSearch).insertComment(
         formatFallbackComment(summaryIssues)
       );
     }
@@ -143,7 +221,7 @@ function applyRevisionsForIssues(
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
     const document = context.document;
-    const searchRoot = getSearchRoot(context, scope);
+    const searchContext = await createSearchContext(context, scope, sourceText);
     const pendingRevisionSearches: Array<{
       issue: ProofreadIssue;
       occurrenceIndex: number;
@@ -155,7 +233,7 @@ function applyRevisionsForIssues(
       searchResults: Word.RangeCollection;
     }> = [];
     const summaryIssues: ProofreadIssue[] = [];
-    const fallbackAnchorSearch = createFallbackAnchorSearch(searchRoot, sourceText);
+    const fallbackAnchorSearch = createFallbackAnchorSearch(searchContext, sourceText);
     let revisionCount = 0;
     let commentCount = 0;
 
@@ -168,11 +246,11 @@ function applyRevisionsForIssues(
       }
 
       const occurrenceIndex = getOccurrenceIndexBeforeOffset(
-        sourceText,
+        searchContext.occurrenceText,
         issue.original,
-        issue.start as number
+        searchContext.sourceStart + (issue.start as number)
       );
-      const searchResults = searchRoot.search(issue.original, {
+      const searchResults = searchContext.root.search(issue.original, {
         matchCase: true,
         matchWholeWord: false,
       });
@@ -213,7 +291,7 @@ function applyRevisionsForIssues(
     });
 
     if (summaryIssues.length > 0) {
-      getFallbackAnchorRange(searchRoot, scope, fallbackAnchorSearch).insertComment(
+      getFallbackAnchorRange(searchContext, fallbackAnchorSearch).insertComment(
         formatFallbackComment(summaryIssues)
       );
     }
@@ -244,12 +322,67 @@ function applyRevisionsForIssues(
   });
 }
 
-function getSearchRoot(context: Word.RequestContext, scope: ProofreadScope): SearchRoot {
-  return scope === "document" ? context.document.body : context.document.getSelection();
+async function createSearchContext(
+  context: Word.RequestContext,
+  scope: ProofreadScope,
+  sourceText: string
+): Promise<SearchContext> {
+  const body = context.document.body;
+  body.load("text");
+  await context.sync();
+
+  const bodyText = body.text || "";
+  const sourceStart = bodyText.indexOf(sourceText);
+
+  if (sourceStart !== -1) {
+    appendDebugLog("info", "已在正文中找回审校 sourceText，后续搜索将使用正文范围", {
+      scope,
+      sourceStart,
+      sourceTextLength: sourceText.length,
+      bodyTextLength: bodyText.length,
+    });
+    return {
+      root: body,
+      rootKind: "body",
+      occurrenceText: bodyText,
+      sourceStart,
+      resolvedBy: scope === "document" ? "document-body" : "body-source-text",
+    };
+  }
+
+  if (scope === "document") {
+    appendDebugLog(
+      "warn",
+      "未能在正文中精确找回 sourceText，文档范围将退回原 sourceText 计算 occurrence",
+      {
+        sourceTextLength: sourceText.length,
+        bodyTextLength: bodyText.length,
+      }
+    );
+    return {
+      root: body,
+      rootKind: "body",
+      occurrenceText: sourceText,
+      sourceStart: 0,
+      resolvedBy: "document-body",
+    };
+  }
+
+  appendDebugLog("warn", "未能在正文中精确找回选区 sourceText，选区范围将退回当前 Word selection", {
+    sourceTextLength: sourceText.length,
+    bodyTextLength: bodyText.length,
+  });
+  return {
+    root: context.document.getSelection(),
+    rootKind: "selection",
+    occurrenceText: sourceText,
+    sourceStart: 0,
+    resolvedBy: "current-selection",
+  };
 }
 
 function createFallbackAnchorSearch(
-  searchRoot: SearchRoot,
+  searchContext: SearchContext,
   sourceText: string
 ): { occurrenceIndex: number; searchResults: Word.RangeCollection | null } {
   const firstVisibleOffset = findFirstNonWhitespaceOffset(sourceText);
@@ -259,21 +392,24 @@ function createFallbackAnchorSearch(
   }
 
   const anchorText = sourceText[firstVisibleOffset];
-  const searchResults = searchRoot.search(anchorText, {
+  const searchResults = searchContext.root.search(anchorText, {
     matchCase: true,
     matchWholeWord: false,
   });
   searchResults.load("items");
 
   return {
-    occurrenceIndex: getOccurrenceIndexBeforeOffset(sourceText, anchorText, firstVisibleOffset),
+    occurrenceIndex: getOccurrenceIndexBeforeOffset(
+      searchContext.occurrenceText,
+      anchorText,
+      searchContext.sourceStart + firstVisibleOffset
+    ),
     searchResults,
   };
 }
 
 function getFallbackAnchorRange(
-  searchRoot: SearchRoot,
-  scope: ProofreadScope,
+  searchContext: SearchContext,
   anchorSearch: { occurrenceIndex: number; searchResults: Word.RangeCollection | null }
 ): Word.Range {
   const anchorRange = anchorSearch.searchResults?.items[anchorSearch.occurrenceIndex];
@@ -282,7 +418,9 @@ function getFallbackAnchorRange(
     return anchorRange;
   }
 
-  return scope === "document" ? (searchRoot as Word.Body).getRange() : (searchRoot as Word.Range);
+  return searchContext.rootKind === "body"
+    ? (searchContext.root as Word.Body).getRange()
+    : (searchContext.root as Word.Range);
 }
 
 function findFirstNonWhitespaceOffset(text: string): number {

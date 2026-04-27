@@ -158,6 +158,8 @@ curl --no-buffer --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/$
 
 ## 启动 Word 插件
 
+Windows 编辑电脑从零安装和本地试点部署见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
 ```bash
 cd word-addin
 npm install

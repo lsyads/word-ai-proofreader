@@ -20,7 +20,7 @@ Word 插件任务窗格
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
-V2 支持统一范围审校：当前选区不超过 5000 字时使用原单段链路；当前选区超过 5000 字或选择“全书正文”时，插件创建后端内存异步任务，后端按约 3000 字顺序分块审校。任务状态只存内存，服务重启后不可恢复。
+V2 支持统一范围审校：当前选区不超过 5000 字时使用原单段链路；当前选区超过 5000 字或选择“全书正文”时，插件创建后端内存异步任务，后端按约 3000 字顺序分块审校。分块优先在段落或句末边界切分，找不到时向后延伸到下一个边界，不硬切自然句。任务状态只存内存，服务重启后不可恢复。
 
 ## Word 插件到后端
 
@@ -299,7 +299,7 @@ Provider Response:
 }
 ```
 
-AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析时先尝试标准 JSON；如果模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符，后端会抽取并清理 JSON 后再做 schema 校验。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析时先尝试标准 JSON；如果模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符，后端会抽取并清理 JSON 后再做 schema 校验。整包解析仍失败时，后端会按单条 issue 抢救可校验条目并跳过坏条目。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
 
 ### 2. Chat Completions 调用
 

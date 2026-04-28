@@ -586,7 +586,7 @@ def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
     response = client.post(
         "/api/proofread/chunked",
         json=proofread_payload(
-            ("甲" * 3000) + ("乙" * 3000),
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
         ),
@@ -628,7 +628,7 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
     create_response = client.post(
         "/api/proofread/tasks",
         json=proofread_payload(
-            ("甲" * 3000) + ("乙" * 3000),
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
         ),
@@ -684,7 +684,7 @@ def test_proofread_task_records_failed_chunk_and_continues(monkeypatch, caplog):
     create_response = client.post(
         "/api/proofread/tasks",
         json=proofread_payload(
-            ("甲" * 3000) + ("乙" * 3000) + ("丙" * 3000),
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。" + ("丙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
         ),
@@ -805,7 +805,7 @@ def test_proofread_task_fails_when_all_chunks_fail(monkeypatch):
     create_response = client.post(
         "/api/proofread/tasks",
         json=proofread_payload(
-            ("甲" * 3000) + ("乙" * 3000),
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
         ),
@@ -835,7 +835,7 @@ def test_proofread_task_can_be_cancelled(monkeypatch):
     create_response = client.post(
         "/api/proofread/tasks",
         json=proofread_payload(
-            ("甲" * 3000) + ("乙" * 3000),
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
         ),

@@ -61,7 +61,7 @@ backend/
 - `app/services/chunking.py`
   - V2 分块审校服务。
   - 当前选区超过 5000 字时按约 3000 字分块；全书正文始终按约 3000 字分块。
-  - 优先在段落换行、句末标点附近切分；找不到边界时硬切。
+  - 优先在段落换行、句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。
   - 每个 chunk 复用 `proofread_text`，并把 chunk 内 `start/end` 转换为全文 `global_start/global_end`。
 
 - `app/services/tasks.py`
@@ -76,7 +76,7 @@ backend/
   - OpenAI 兼容 Responses API 与 Chat Completions client。
   - Responses 模式使用 `/v1/responses` 和 `text.format.type=json_object`，不发送 `previous_response_id`。
   - Chat 模式使用 `/v1/chat/completions`，并从 `choices[0].message.content` 读取 JSON。
-  - 对模型返回的 Markdown 代码块、前后解释、尾随逗号和未转义控制字符做有限清理，再统一校验 schema。
+  - 对模型返回的 Markdown 代码块、前后解释、尾随逗号和未转义控制字符做有限清理；整包解析失败时会按单条 issue 抢救可校验条目，再统一校验 schema。
   - 统一将 provider HTTP 错误、无法清理解析的非 JSON 响应、schema 不匹配转换为 `AIClientError`。
 
 - `app/services/sessions.py`
@@ -93,7 +93,7 @@ backend/
 
 - `tests/test_chunking.py`
   - 分块服务测试。
-  - 覆盖短文本单段、长选区分块、全书分块、边界切分、硬切和全局位置转换。
+  - 覆盖短文本单段、长选区分块、全书分块、边界切分、不硬切自然句和全局位置转换。
 
 - `tests/test_ai_client.py`
   - AI client 单元测试。

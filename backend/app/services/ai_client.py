@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -615,6 +616,15 @@ def _parse_provider_json_content(content: str) -> Any:
         except json.JSONDecodeError:
             continue
 
+    for candidate in candidates:
+        salvaged_issues = _salvage_issue_objects(candidate)
+        if salvaged_issues:
+            logger.warning(
+                "AI provider response JSON required issue-level salvage salvaged_issue_count=%s",
+                len(salvaged_issues),
+            )
+            return {"issues": salvaged_issues}
+
     raise AIClientError("AI provider response was not valid JSON") from first_error
 
 
@@ -725,6 +735,89 @@ def _remove_trailing_commas(content: str) -> str:
         index += 1
 
     return "".join(cleaned)
+
+
+def _salvage_issue_objects(content: str) -> list[dict[str, Any]]:
+    if '"issues"' not in content:
+        return []
+
+    starts = [match.start() for match in re.finditer(r'\{\s*"id"\s*:', content)]
+    if not starts:
+        return []
+
+    issues: list[dict[str, Any]] = []
+    for index, start in enumerate(starts):
+        limit = starts[index + 1] if index + 1 < len(starts) else len(content)
+        fragment = _extract_json_object_from_start(content, start, limit)
+        if not fragment:
+            fragment = content[start:limit].strip().rstrip(",")
+
+        parsed = _parse_issue_fragment(fragment)
+        if parsed is None:
+            continue
+
+        try:
+            ProofreadIssue.model_validate(parsed)
+        except ValidationError:
+            continue
+
+        issues.append(parsed)
+
+    return issues
+
+
+def _extract_json_object_from_start(content: str, start: int, limit: int) -> str | None:
+    in_string = False
+    escaped = False
+    depth = 0
+
+    for index in range(start, limit):
+        char = content[index]
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : index + 1].strip()
+
+    return None
+
+
+def _parse_issue_fragment(fragment: str) -> dict[str, Any] | None:
+    candidates = [fragment]
+    cleaned = _remove_trailing_commas(fragment)
+    if cleaned != fragment:
+        candidates.append(cleaned)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                parsed = json.loads(candidate, strict=False)
+            except json.JSONDecodeError:
+                continue
+
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
 
 
 def _coerce_dict(value: Any) -> dict[str, Any]:

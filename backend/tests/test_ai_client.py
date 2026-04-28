@@ -276,6 +276,53 @@ def test_proofread_with_ai_accepts_unescaped_tabs_in_provider_json(monkeypatch, 
     assert "required lenient parsing" in caplog.text
 
 
+def test_proofread_with_ai_salvages_valid_issues_when_one_issue_is_malformed(monkeypatch, caplog):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(
+        payload=chat_payload(
+            content="""{
+  "issues": [
+    {
+      "id": "issue-1",
+      "category": "fact",
+      "severity": "high",
+      "original": "用HCl调整溶液pH值至5.0",
+      "replacement": null,
+      "suggestion": "CTAB抽提液pH应为8.0，此处调至5.0与要求矛盾，需人工核查。"
+    },
+    {
+      "id": "issue-2",
+      "category": "fact",
+      "severity": "high",
+      "original": "1 μg/mL的双链DNA溶液在260 nm处的吸光度约为0.020",
+      "replacement": null,
+      "suggestion": "模型在这个字段里跑偏了。
+      "original": "即可得到10 mM Tris - HCl（pH= 8.0）和1 mM EDTA的 TE 缓冲液",
+      "replacement": null,
+      "suggestion": "1.21g Tris定容至100mL得到的是100mM Tris，不是10mM，需人工核查。"
+    },
+    {
+      "id": "issue-3",
+      "category": "typo",
+      "severity": "low",
+      "original": "50 mmol/EDTA（pH=8.0）",
+      "replacement": "50 mmol/L EDTA（pH=8.0）",
+      "suggestion": "EDTA浓度单位漏写“L”，属于漏字错误。"
+    }
+  ]
+}"""
+        )
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    caplog.set_level(logging.INFO, logger="app")
+
+    result = asyncio.run(proofread_with_ai("文本", book(), provider_api="chat", settings=settings()))
+
+    assert [issue.id for issue in result.issues] == ["issue-1", "issue-3"]
+    assert result.issues[1].replacement == "50 mmol/L EDTA（pH=8.0）"
+    assert "required issue-level salvage" in caplog.text
+
+
 def test_proofread_with_ai_extracts_json_from_markdown_and_explanatory_text(monkeypatch, caplog):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(

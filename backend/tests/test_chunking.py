@@ -37,13 +37,25 @@ def test_document_always_uses_chunking_and_prefers_paragraph_boundary():
     assert chunks[1].start == chunks[0].end
 
 
-def test_chunking_hard_cuts_when_no_boundary_exists():
+def test_chunking_extends_to_next_sentence_boundary_instead_of_hard_cutting():
+    text = ("甲" * 3000) + "。" + ("乙" * 1200) + "。"
+
+    chunks = chunking.split_text_into_chunks(text, scope="document", chunk_size=3000)
+
+    assert len(chunks) == 2
+    assert chunks[0].end == 3001
+    assert chunks[0].text.endswith("。")
+    assert chunks[1].start == chunks[0].end
+
+
+def test_chunking_keeps_remaining_text_when_no_boundary_exists():
     text = "甲" * 6500
 
     chunks = chunking.split_text_into_chunks(text, scope="document", chunk_size=3000)
 
-    assert [chunk.start for chunk in chunks] == [0, 3000, 6000]
-    assert [chunk.end for chunk in chunks] == [3000, 6000, 6500]
+    assert len(chunks) == 1
+    assert chunks[0].start == 0
+    assert chunks[0].end == len(text)
 
 
 def test_globalize_issues_adds_chunk_offsets():
@@ -83,7 +95,7 @@ def test_proofread_chunked_aggregates_issues():
         ]
 
     request = ChunkedProofreadRequest(
-        text=("甲" * 3000) + ("乙" * 3000),
+        text=("甲" * 2999) + "。" + ("乙" * 2999) + "。",
         book=BOOK,
         scope="document",
         chunk_size=3000,

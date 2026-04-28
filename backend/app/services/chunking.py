@@ -55,8 +55,8 @@ def split_text_into_chunks(
     start = 0
 
     while start < len(text):
-        hard_end = min(start + normalized_size, len(text))
-        end = len(text) if hard_end == len(text) else _find_chunk_boundary(text, start, hard_end)
+        target_end = min(start + normalized_size, len(text))
+        end = len(text) if target_end == len(text) else _find_chunk_boundary(text, start, target_end)
         chunk_text = text[start:end]
 
         if chunk_text.strip():
@@ -154,9 +154,9 @@ def globalize_issues(chunk: ProofreadChunk, issues: list[ProofreadIssue]) -> lis
     ]
 
 
-def _find_chunk_boundary(text: str, start: int, hard_end: int) -> int:
-    window_start = max(start + MIN_CHUNK_SIZE, hard_end - BOUNDARY_LOOKBACK)
-    search_window = text[window_start:hard_end]
+def _find_chunk_boundary(text: str, start: int, target_end: int) -> int:
+    window_start = max(start + MIN_CHUNK_SIZE, target_end - BOUNDARY_LOOKBACK)
+    search_window = text[window_start:target_end]
 
     for boundary in PARAGRAPH_BOUNDARIES:
         relative = search_window.rfind(boundary)
@@ -172,4 +172,23 @@ def _find_chunk_boundary(text: str, start: int, hard_end: int) -> int:
     if best_sentence != -1:
         return window_start + best_sentence
 
-    return hard_end
+    forward_boundary = _find_next_boundary(text, target_end)
+    if forward_boundary != -1:
+        return forward_boundary
+
+    return len(text)
+
+
+def _find_next_boundary(text: str, search_from: int) -> int:
+    best_boundary = -1
+
+    for boundary in PARAGRAPH_BOUNDARIES + SENTENCE_BOUNDARIES:
+        absolute = text.find(boundary, search_from)
+        if absolute == -1:
+            continue
+
+        boundary_end = absolute + len(boundary)
+        if best_boundary == -1 or boundary_end < best_boundary:
+            best_boundary = boundary_end
+
+    return best_boundary

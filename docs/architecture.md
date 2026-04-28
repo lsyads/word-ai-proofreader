@@ -238,7 +238,7 @@ GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。前端收到 `chunk_started` 后本地每秒刷新当前块等待时长；长时间运行的 chunk 会周期性发送 `heartbeat`，用于保活和校准进度。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
+事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_retry_requested`、`chunk_retrying`、`chunk_completed`、`chunk_failed`、`retry_queued`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。前端收到 `chunk_started` 后本地每秒刷新当前块等待时长；长时间运行的 chunk 会周期性发送 `heartbeat`，用于保活和校准进度。当前 chunk 超过前端阈值后，可调用 `POST /api/proofread/tasks/{task_id}/retry-current` 取消当前 AI 调用并重试同一 chunk。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`；任务结束后可调用 `POST /api/proofread/tasks/{task_id}/retry-failed` 只重试失败 chunk。
 
 ## 后端到 AI Provider
 
@@ -414,7 +414,7 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 ## 停止审校和历史记录
 
-插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端显示“正在停止审校，当前分块完成后结束”，使用 `AbortController` 中断当前请求；如果当前是分块任务，还会调用 `DELETE /api/proofread/tasks/{task_id}` 标记后端任务取消。
+插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端显示“正在停止审校，当前分块完成后结束”，使用 `AbortController` 中断当前请求；如果当前是分块任务，还会调用 `DELETE /api/proofread/tasks/{task_id}` 标记后端任务取消，并查询任务快照保留已完成分块返回的 issues。当前 chunk 超过等待阈值后，“重试当前分块”按钮可用；任务结束后仍有失败 chunk 时，“重试失败分块”按钮可用。
 
 插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数、已选问题 ID、跳过数量和应用统计；导入时只接受当前开发版 schema。历史记录不承担 AI 上下文续接，后端每次审校都发起独立 AI 请求。
 

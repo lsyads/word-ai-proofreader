@@ -29,6 +29,10 @@ class ProofreadTaskNotFound(KeyError):
     """Raised when an in-memory proofread task is unavailable."""
 
 
+class ProofreadTaskConflict(RuntimeError):
+    """Raised when a task cannot accept the requested operation now."""
+
+
 @dataclass
 class ProofreadTask:
     task_id: str
@@ -40,6 +44,12 @@ class ProofreadTask:
     issues: list[ChunkedProofreadIssue] = field(default_factory=list)
     error_message: str | None = None
     cancel_requested: bool = False
+    current_chunk_index: int | None = None
+    current_chunk_started_at: float | None = None
+    retry_current_requested: bool = False
+    runner_task: asyncio.Task[Any] | None = None
+    completed_chunk_indices: set[int] = field(default_factory=set)
+    failed_chunk_indices: set[int] = field(default_factory=set)
     created_at: str = field(default_factory=lambda: _now_iso())
     updated_at: str = field(default_factory=lambda: _now_iso())
     events: list[AIStreamEvent] = field(default_factory=list)
@@ -69,7 +79,7 @@ def create_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
             "message": "审校任务已创建。",
         },
     )
-    asyncio.create_task(_run_task(task, chunks))
+    task.runner_task = asyncio.create_task(_run_task(task, chunks))
     return snapshot_task(task)
 
 
@@ -84,6 +94,63 @@ def cancel_task(task_id: str) -> ChunkedProofreadResult:
         task.cancel_requested = True
         task.updated_at = _now_iso()
 
+    return snapshot_task(task)
+
+
+def retry_current_chunk(task_id: str) -> ChunkedProofreadResult:
+    task = _require_task(task_id)
+
+    if task.status != "running" or task.current_chunk_index is None or not task.runner_task:
+        raise ProofreadTaskConflict("No running chunk is available to retry.")
+
+    task.retry_current_requested = True
+    task.runner_task.cancel()
+    _touch(task)
+    _emit(
+        task,
+        "chunk_retry_requested",
+        _progress_payload(
+            task,
+            f"已请求重试第 {task.current_chunk_index + 1}/{task.total_chunks} 块。",
+            extra={"chunk_index": task.current_chunk_index},
+        ),
+    )
+    return snapshot_task(task)
+
+
+def retry_failed_chunks(task_id: str) -> ChunkedProofreadResult:
+    task = _require_task(task_id)
+
+    if task.status in {"queued", "running"}:
+        raise ProofreadTaskConflict("Proofread task is still running.")
+
+    failed_indices = sorted(task.failed_chunk_indices)
+    if not failed_indices:
+        raise ProofreadTaskConflict("Proofread task has no failed chunks to retry.")
+
+    chunks = chunking.split_text_into_chunks(
+        task.request.text,
+        task.request.scope,
+        task.request.chunk_size,
+    )
+    retry_chunks = [chunks[index] for index in failed_indices if index < len(chunks)]
+    if not retry_chunks:
+        raise ProofreadTaskConflict("Failed chunks are no longer available to retry.")
+
+    task.cancel_requested = False
+    task.error_message = None
+    task.status = "queued"
+    _touch(task)
+    _emit(
+        task,
+        "retry_queued",
+        _progress_payload(
+            task,
+            f"已创建失败分块重试任务，共 {len(retry_chunks)} 块。",
+            extra={"retry_chunk_indices": failed_indices},
+        ),
+    )
+    task.runner_task = asyncio.create_task(_run_task(task, retry_chunks, retry_only=True))
     return snapshot_task(task)
 
 
@@ -119,10 +186,19 @@ def clear_tasks_for_tests() -> None:
     _tasks.clear()
 
 
-async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) -> None:
+async def _run_task(
+    task: ProofreadTask,
+    chunks: list[chunking.ProofreadChunk],
+    retry_only: bool = False,
+) -> None:
     task.status = "running"
+    task.runner_task = asyncio.current_task()
     _touch(task)
-    _emit(task, "running", _progress_payload(task, "审校任务开始运行。"))
+    _emit(
+        task,
+        "running",
+        _progress_payload(task, "正在重试失败分块。" if retry_only else "审校任务开始运行。"),
+    )
 
     try:
         for chunk in chunks:
@@ -130,38 +206,13 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                 _mark_cancelled(task)
                 return
 
-            chunk_started_at = time.monotonic()
-            _emit(
-                task,
-                "chunk_started",
-                _progress_payload(
-                    task,
-                    f"正在审校第 {chunk.index + 1}/{task.total_chunks} 块。",
-                    extra={
-                        "chunk_index": chunk.index,
-                        "chunk_start": chunk.start,
-                        "chunk_end": chunk.end,
-                        "chunk_len": len(chunk.text),
-                        "elapsed_seconds": 0,
-                    },
-                ),
-            )
-
-            heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk, chunk_started_at))
             try:
-                proofread_kwargs = {
-                    "session_id": task.request.session_id,
-                    "provider_api": task.request.provider_api,
-                    "proofread_mode": task.request.proofread_mode,
-                }
-                if task.request.reasoning_enabled:
-                    proofread_kwargs["reasoning_enabled"] = True
-
-                chunk_issues = await proofread_text(chunk.text, task.request.book, **proofread_kwargs)
+                chunk_issues = await _proofread_chunk_with_manual_retry(task, chunk)
             except AIClientError as exc:
-                task.failed_chunks += 1
+                task.failed_chunk_indices.add(chunk.index)
+                _sync_chunk_counts(task)
                 _touch(task)
-                elapsed_seconds = _elapsed_seconds(chunk_started_at)
+                elapsed_seconds = _elapsed_seconds_for_task(task)
                 logger.warning(
                     "chunked proofread chunk failed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s completed_chunks=%s failed_chunks=%s total_chunks=%s error_type=%s error_message=%s",
                     task.task_id,
@@ -194,17 +245,14 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
                     ),
                 )
                 continue
-            finally:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
 
-            task.completed_chunks += 1
+            task.failed_chunk_indices.discard(chunk.index)
+            task.completed_chunk_indices.add(chunk.index)
+            _sync_chunk_counts(task)
+            task.issues = [issue for issue in task.issues if issue.chunk_index != chunk.index]
             task.issues.extend(chunking.globalize_issues(chunk, chunk_issues))
             _touch(task)
-            elapsed_seconds = _elapsed_seconds(chunk_started_at)
+            elapsed_seconds = _elapsed_seconds_for_task(task)
             logger.info(
                 "chunked proofread chunk completed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s issue_count=%s",
                 task.task_id,
@@ -278,6 +326,83 @@ async def _run_task(task: ProofreadTask, chunks: list[chunking.ProofreadChunk]) 
             str(exc),
         )
         _emit(task, "error", _progress_payload(task, "审校任务失败。", extra={"error_message": str(exc)}))
+    finally:
+        task.current_chunk_index = None
+        task.current_chunk_started_at = None
+        task.retry_current_requested = False
+        if task.runner_task is asyncio.current_task():
+            task.runner_task = None
+
+
+async def _proofread_chunk_with_manual_retry(
+    task: ProofreadTask,
+    chunk: chunking.ProofreadChunk,
+) -> list[Any]:
+    while True:
+        chunk_started_at = time.monotonic()
+        task.current_chunk_index = chunk.index
+        task.current_chunk_started_at = chunk_started_at
+        _emit(
+            task,
+            "chunk_started",
+            _progress_payload(
+                task,
+                f"正在审校第 {chunk.index + 1}/{task.total_chunks} 块。",
+                extra={
+                    "chunk_index": chunk.index,
+                    "chunk_start": chunk.start,
+                    "chunk_end": chunk.end,
+                    "chunk_len": len(chunk.text),
+                    "elapsed_seconds": 0,
+                },
+            ),
+        )
+
+        heartbeat_task = asyncio.create_task(_emit_heartbeats(task, chunk, chunk_started_at))
+        try:
+            return await _proofread_chunk(task, chunk)
+        except asyncio.CancelledError:
+            if task.retry_current_requested:
+                task.retry_current_requested = False
+                _emit(
+                    task,
+                    "chunk_retrying",
+                    _progress_payload(
+                        task,
+                        f"正在重新审校第 {chunk.index + 1}/{task.total_chunks} 块。",
+                        extra={
+                            "chunk_index": chunk.index,
+                            "chunk_start": chunk.start,
+                            "chunk_end": chunk.end,
+                            "chunk_len": len(chunk.text),
+                            "elapsed_seconds": _elapsed_seconds(chunk_started_at),
+                        },
+                    ),
+                )
+                continue
+
+            raise
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def _proofread_chunk(
+    task: ProofreadTask,
+    chunk: chunking.ProofreadChunk,
+) -> list[Any]:
+    proofread_kwargs = {
+        "session_id": task.request.session_id,
+        "provider_api": task.request.provider_api,
+        "proofread_mode": task.request.proofread_mode,
+    }
+    if task.request.reasoning_enabled:
+        proofread_kwargs["reasoning_enabled"] = True
+
+    return await proofread_text(chunk.text, task.request.book, **proofread_kwargs)
 
 
 def snapshot_task(task: ProofreadTask) -> ChunkedProofreadResult:
@@ -369,12 +494,24 @@ def _touch(task: ProofreadTask) -> None:
     task.updated_at = _now_iso()
 
 
+def _sync_chunk_counts(task: ProofreadTask) -> None:
+    task.completed_chunks = len(task.completed_chunk_indices)
+    task.failed_chunks = len(task.failed_chunk_indices)
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _elapsed_seconds(started_at: float) -> float:
     return round(time.monotonic() - started_at, 1)
+
+
+def _elapsed_seconds_for_task(task: ProofreadTask) -> float:
+    if task.current_chunk_started_at is not None:
+        return _elapsed_seconds(task.current_chunk_started_at)
+
+    return 0.0
 
 
 def _is_terminal(status: ChunkedTaskStatus) -> bool:

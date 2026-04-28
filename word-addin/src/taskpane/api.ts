@@ -115,33 +115,46 @@ export async function requestChunkedProofreadTask(
   onTaskCreated(createdTask.task_id || null);
   onStatus(taskSnapshotToStatus("queued", createdTask, "审校任务已创建。"));
 
-  try {
-    await streamProofreadTaskEvents(createdTask.task_id as string, onStatus, signal);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw error;
-    }
-
-    onStatus({ stage: "polling", message: "任务进度流不可用，正在切换到轮询查询。" });
-    return pollProofreadTask(createdTask.task_id as string, onStatus, signal);
-  }
-
-  const finalTask = await getProofreadTask(createdTask.task_id as string, signal);
-  if (finalTask.status === "failed") {
-    throw new Error(finalTask.error_message || "分块审校任务失败。");
-  }
-
-  if (finalTask.status === "cancelled") {
-    throw createAbortError();
-  }
-
-  return finalTask;
+  return waitForProofreadTask(createdTask.task_id as string, onStatus, signal);
 }
 
 export async function cancelProofreadTask(taskId: string): Promise<void> {
   await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}`, {
     method: "DELETE",
   });
+}
+
+export async function retryCurrentProofreadChunk(
+  taskId: string
+): Promise<ChunkedProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/retry-current`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as ChunkedProofreadResponse;
+}
+
+export async function retryFailedProofreadChunks(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/retry-failed`, {
+    method: "POST",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const task = (await response.json()) as ChunkedProofreadResponse;
+  onStatus(taskSnapshotToStatus("retry_queued", task, "已创建失败分块重试任务。"));
+  return waitForProofreadTask(taskId, onStatus, signal);
 }
 
 export function normalizeChunkedIssuesForScope(issues: ChunkedProofreadIssue[]): ProofreadIssue[] {
@@ -402,15 +415,36 @@ async function streamProofreadTaskEvents(
       const status = taskEventToStatus(event.name, event.data);
       onStatus(status);
 
-      if (event.name === "error") {
-        throw new Error(status.error_message || status.message || "分块审校任务失败。");
-      }
     });
 
     if (done) {
       break;
     }
   }
+}
+
+async function waitForProofreadTask(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<ChunkedProofreadResponse> {
+  try {
+    await streamProofreadTaskEvents(taskId, onStatus, signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    onStatus({ stage: "polling", message: "任务进度流不可用，正在切换到轮询查询。" });
+    return pollProofreadTask(taskId, onStatus, signal);
+  }
+
+  const finalTask = await getProofreadTask(taskId, signal);
+  if (finalTask.status === "cancelled") {
+    throw createAbortError();
+  }
+
+  return finalTask;
 }
 
 async function pollProofreadTask(
@@ -426,11 +460,10 @@ async function pollProofreadTask(
       return task;
     }
 
-    if (task.status === "failed") {
-      throw new Error(task.error_message || "分块审校任务失败。");
-    }
-
-    if (task.status === "cancelled") {
+    if (task.status === "failed" || task.status === "cancelled") {
+      if (task.status === "failed") {
+        return task;
+      }
       throw createAbortError();
     }
 
@@ -438,7 +471,7 @@ async function pollProofreadTask(
   }
 }
 
-async function getProofreadTask(
+export async function getProofreadTask(
   taskId: string,
   signal: AbortSignal
 ): Promise<ChunkedProofreadResponse> {

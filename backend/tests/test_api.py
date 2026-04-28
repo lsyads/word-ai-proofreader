@@ -715,6 +715,125 @@ def test_proofread_task_records_failed_chunk_and_continues(monkeypatch, caplog):
     assert "乙乙乙乙乙" not in caplog.text
 
 
+def test_proofread_task_retries_failed_chunks(monkeypatch):
+    attempts = {"乙": 0}
+
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        if text.startswith("乙"):
+            attempts["乙"] += 1
+            if attempts["乙"] == 1:
+                raise AIClientError("chunk failed once")
+
+        return [
+            ProofreadIssue(
+                id=f"issue-{text[:1]}",
+                category="typo",
+                severity="low",
+                original=text[:1],
+                suggestion="建议",
+                start=0,
+                end=1,
+            )
+        ]
+
+    monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+
+    create_response = client.post(
+        "/api/proofread/tasks",
+        json=proofread_payload(
+            ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
+            scope="document",
+            chunk_size=3000,
+        ),
+    )
+    task_id = create_response.json()["task_id"]
+    assert client.get(f"/api/proofread/tasks/{task_id}").json()["failed_chunks"] == 1
+
+    retry_response = client.post(f"/api/proofread/tasks/{task_id}/retry-failed")
+    assert retry_response.status_code == 200
+
+    events = parse_sse_events(client.get(f"/api/proofread/tasks/{task_id}/events").text)
+    status = client.get(f"/api/proofread/tasks/{task_id}").json()
+
+    assert status["status"] == "succeeded"
+    assert status["completed_chunks"] == 2
+    assert status["failed_chunks"] == 0
+    assert [issue["chunk_index"] for issue in status["issues"]] == [0, 1]
+    assert "retry_queued" in [event["event"] for event in events]
+
+
+def test_proofread_task_retries_current_chunk(monkeypatch):
+    async def run_retry():
+        attempts = 0
+        first_attempt_started = asyncio.Event()
+
+        async def fake_proofread_text(
+            text,
+            book,
+            session_id=None,
+            provider_api=None,
+            proofread_mode="fast",
+        ):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                first_attempt_started.set()
+                await asyncio.sleep(60)
+
+            return [
+                ProofreadIssue(
+                    id="issue-1",
+                    category="typo",
+                    severity="low",
+                    original=text[:1],
+                    suggestion="建议",
+                    start=0,
+                    end=1,
+                )
+            ]
+
+        monkeypatch.setattr(task_service, "proofread_text", fake_proofread_text)
+        request = ChunkedProofreadRequest(
+            text="甲" * 3000,
+            book=BookInfo.model_validate(BOOK),
+            scope="document",
+            chunk_size=3000,
+        )
+        chunks = task_service.chunking.split_text_into_chunks(
+            request.text,
+            request.scope,
+            request.chunk_size,
+        )
+        task = task_service.ProofreadTask(
+            task_id="task-retry-current",
+            request=request,
+            total_chunks=len(chunks),
+        )
+        task_service._tasks[task.task_id] = task
+        runner = asyncio.create_task(task_service._run_task(task, chunks))
+        await first_attempt_started.wait()
+
+        snapshot = task_service.retry_current_chunk(task.task_id)
+        await runner
+
+        return attempts, snapshot, task
+
+    attempts, snapshot, task = asyncio.run(run_retry())
+
+    assert attempts == 2
+    assert snapshot.status == "running"
+    assert task.status == "succeeded"
+    assert task.completed_chunks == 1
+    assert task.failed_chunks == 0
+    assert "chunk_retrying" in [event.event for event in task.events]
+
+
 def test_proofread_task_logs_unhandled_task_crash(monkeypatch, caplog):
     async def fake_proofread_text(
         text,

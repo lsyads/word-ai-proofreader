@@ -182,6 +182,26 @@ async def cancel_proofread_task(task_id: str) -> ChunkedProofreadResult:
         raise HTTPException(status_code=404, detail="Proofread task not found") from exc
 
 
+@app.post("/api/proofread/tasks/{task_id}/retry-current", response_model=ChunkedProofreadResult)
+async def retry_current_proofread_chunk(task_id: str) -> ChunkedProofreadResult:
+    try:
+        return task_service.retry_current_chunk(task_id)
+    except task_service.ProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="Proofread task not found") from exc
+    except task_service.ProofreadTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/proofread/tasks/{task_id}/retry-failed", response_model=ChunkedProofreadResult)
+async def retry_failed_proofread_chunks(task_id: str) -> ChunkedProofreadResult:
+    try:
+        return task_service.retry_failed_chunks(task_id)
+    except task_service.ProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="Proofread task not found") from exc
+    except task_service.ProofreadTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/proofread/tasks/{task_id}/events")
 async def proofread_task_events(task_id: str) -> StreamingResponse:
     try:

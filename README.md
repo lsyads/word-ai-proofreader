@@ -25,6 +25,7 @@
 - 插件调用后端 `POST /api/proofread`。
 - Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
 - 分块审校使用 `POST /api/proofread/tasks` 创建内存异步任务，优先通过 `GET /api/proofread/tasks/{task_id}/events` 获取 SSE 进度；进度流不可用时回退 `GET /api/proofread/tasks/{task_id}` 轮询。
+- 分块审校运行中，当前块超过等待阈值后可手动“重试当前分块”；任务结束后如存在失败块，可手动“重试失败分块”并继续合并结果。
 - AI 原始输出只包含精简 `issues[]`，不返回 `start/end`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置。
 - 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`；插件用全局位置计算重复原文的 occurrence，避免长文或全书中误命中。
 - 审校完成后先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选问题，并可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项。
@@ -63,7 +64,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 
 当前前端 V2 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
 
-V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。前端收到 `chunk_started` 后会本地每秒刷新当前块耗时，后端低频 `heartbeat` 事件用于保活和校准进度；部分 chunk 失败但有结果时，任务状态为 `partial_succeeded`，后端 INFO 级别日志和前端进度区都会显示失败 chunk 的编号、范围、耗时和错误信息。
+V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。前端收到 `chunk_started` 后会本地每秒刷新当前块耗时，后端低频 `heartbeat` 事件用于保活和校准进度；当前块长时间无响应时可调用 `/api/proofread/tasks/{task_id}/retry-current` 重试当前块，任务结束后可调用 `/api/proofread/tasks/{task_id}/retry-failed` 重试失败块。部分 chunk 失败但有结果时，任务状态为 `partial_succeeded`，后端 INFO 级别日志和前端进度区都会显示失败 chunk 的编号、范围、耗时和错误信息。
 
 API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
 
@@ -202,7 +203,8 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 12. 已勾选的未定位问题会先显示在任务窗格；点击“应用 N 条到 Word”后，统一插入一条锚定在审校范围起点第一个非空字符的汇总批注；未勾选问题不写回 Word。
 13. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注或修订。
 14. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
-15. 审校运行中点击“停止审校”，确认提示“当前分块完成后结束”，请求停止、不会插入批注或修订，并在历史记录中保存为已停止。
+15. 审校运行中点击“停止审校”，确认提示“当前分块完成后结束”；分块审校会保留已收到的 issues，可继续查看或应用，并在历史记录中保存为已停止。
+16. 分块审校当前块等待超过阈值后，确认“重试当前分块”按钮可用；部分完成或失败后如存在失败块，确认“重试失败分块”按钮可用并能继续合并结果。
 16. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理；导入旧 schema 历史会提示格式不兼容。
 
 ## 测试与验证

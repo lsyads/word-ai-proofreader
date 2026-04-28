@@ -67,7 +67,7 @@ word-addin/
     1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
     2. 检查 Word 批注 API 能力。
     3. 按审校范围读取当前 Word 选区或正文文本。
-    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度；收到 `chunk_started` 后本地每秒刷新当前块耗时。
+    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度；收到 `chunk_started` 后本地每秒刷新当前块耗时，超时后可手动重试当前分块，任务结束后可重试失败分块。
     5. 审校完成后只在任务窗格展示结果，初始化所有 issue 为已选，并支持按严重程度、类别、定位状态和是否可直接替换筛选。
     6. 用户可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项；“应用到 Word”按钮显示当前已选数量。
     7. 单条“定位”使用 `search(original)` 和 occurrence 计算选中 Word 原文，不插入批注或修订。

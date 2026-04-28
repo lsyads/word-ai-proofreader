@@ -30,7 +30,7 @@ backend/
 - `app/main.py`
   - FastAPI 应用入口。
   - 注册 CORS 中间件。
-  - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread`、`POST /api/proofread/stream`、`POST /api/proofread/chunked` 和分块任务接口。
+  - 提供 `GET /health`、`POST /api/sessions`、`POST /api/proofread`、`POST /api/proofread/stream`、`POST /api/proofread/chunked`、分块任务接口和分块重试接口。
   - 将 AI client 抛出的 `AIClientError` 转换为 HTTP 502。
   - 流式接口仅用于 Responses 模式，使用 SSE 返回阶段进度、最终结果或错误事件；Chat 模式使用普通接口。
 
@@ -66,8 +66,8 @@ backend/
 
 - `app/services/tasks.py`
   - V2 内存异步任务服务。
-  - 使用模块级内存 dict 保存任务状态、进度、聚合结果和 SSE 事件。
-  - 顺序处理 chunk；支持查询、SSE 订阅、heartbeat 和取消。
+  - 使用模块级内存 dict 保存任务状态、进度、失败分块、聚合结果和 SSE 事件。
+  - 顺序处理 chunk；支持查询、SSE 订阅、heartbeat、取消、当前分块重试和失败分块重试。
   - 部分 chunk 失败但至少一个 chunk 成功时，任务状态为 `partial_succeeded`。
   - chunk 失败时会在 INFO 可见的 warning 日志中记录任务 ID、chunk 编号、范围和错误原因，不记录正文全文。
   - 任务仅用于本地运行期，服务重启后不可恢复。
@@ -225,10 +225,12 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 
 - `POST /api/proofread/tasks`：创建内存异步任务，返回 `task_id` 和初始进度。
 - `GET /api/proofread/tasks/{task_id}`：查询任务状态、进度和聚合结果。
-- `GET /api/proofread/tasks/{task_id}/events`：订阅任务 SSE，事件包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。
+- `GET /api/proofread/tasks/{task_id}/events`：订阅任务 SSE，事件包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_retry_requested`、`chunk_retrying`、`chunk_completed`、`chunk_failed`、`retry_queued`、`completed`、`cancelled`、`error`。
 - `DELETE /api/proofread/tasks/{task_id}`：标记取消任务；当前 chunk 完成后停止后续 chunk。
+- `POST /api/proofread/tasks/{task_id}/retry-current`：运行中的当前 chunk 长时间无响应时，请求取消当前 AI 调用并重新审校同一 chunk。
+- `POST /api/proofread/tasks/{task_id}/retry-failed`：任务结束后重试所有失败 chunk；成功后从失败集合移除并合并结果。
 
-任务只保存在后端内存中；服务重启或任务被清理后，查询会返回 404。部分分块失败但仍有可用结果时，最终状态为 `partial_succeeded`，响应会保留已完成 chunk 的问题和失败块数。
+任务只保存在后端内存中；服务重启或任务被清理后，查询和重试会返回 404。部分分块失败但仍有可用结果时，最终状态为 `partial_succeeded`，响应会保留已完成 chunk 的问题和失败块数。
 
 ### `POST /api/sessions`
 

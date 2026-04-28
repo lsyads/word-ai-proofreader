@@ -31,7 +31,7 @@ Word 选区
 - 目录：`word-addin/`
 - 技术栈：Office.js、TypeScript、Webpack。
 - 本地地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：开发环境先请求同源 `/api/sessions` 创建本地 session；短选区 Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；短选区 Chat 模式直接请求 `/api/proofread`。长选区和全书请求 `/api/proofread/tasks`，优先用 `/api/proofread/tasks/{task_id}/events` 获取 SSE 进度，失败时轮询 `/api/proofread/tasks/{task_id}`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
+- 后端地址：开发环境先请求同源 `/api/sessions` 创建本地 session；短选区 Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；短选区 Chat 模式直接请求 `/api/proofread`。长选区和全书请求 `/api/proofread/tasks`，优先用 `/api/proofread/tasks/{task_id}/events` 获取 SSE 进度，失败时轮询 `/api/proofread/tasks/{task_id}`；运行中当前块超时可请求 `/api/proofread/tasks/{task_id}/retry-current`，任务结束后可请求 `/api/proofread/tasks/{task_id}/retry-failed`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
 
 ### 后端
 
@@ -210,6 +210,22 @@ DELETE /api/proofread/tasks/{task_id}
 
 将任务标记为取消。正在运行的 chunk 完成后停止后续 chunk，最终状态为 `cancelled`。
 
+重试当前分块：
+
+```http
+POST /api/proofread/tasks/{task_id}/retry-current
+```
+
+仅用于运行中的分块任务。当前 chunk 长时间无响应时，前端可请求该接口；后端取消当前 AI 调用并重新审校同一 chunk，成功后继续后续 chunk。
+
+重试失败分块：
+
+```http
+POST /api/proofread/tasks/{task_id}/retry-failed
+```
+
+仅用于已有失败 chunk 的终态任务。后端只重试失败 chunk，成功后移出失败集合并合并该 chunk 的结果；仍失败的 chunk 保持失败计数。
+
 任务 SSE：
 
 ```http
@@ -217,7 +233,7 @@ GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_completed`、`chunk_failed`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`；chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`，失败事件包含 `error_message`。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
+事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_retry_requested`、`chunk_retrying`、`chunk_completed`、`chunk_failed`、`retry_queued`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`；chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`，失败事件包含 `error_message`。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
 
 ### `POST /api/sessions`
 
@@ -344,8 +360,9 @@ npm run dev-server
 - 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
 - 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
+- 当前 chunk 审校超过前端阈值后，任务窗格启用“重试当前分块”；任务结束后如存在失败 chunk，启用“重试失败分块”。
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数、失败原因和累计问题数。
-- 点击停止审校会中断当前请求并取消后端异步任务。
+- 点击停止审校会中断当前请求并取消后端异步任务；分块审校会查询当前任务快照，保留已收到的 issues 供查看和应用。
 - `npm run lint` 通过。
 - `npm run build` 通过。
 - Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。

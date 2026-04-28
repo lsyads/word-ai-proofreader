@@ -4,10 +4,13 @@ import {
   cancelProofreadTask,
   createSession,
   formatProgressResult,
+  getProofreadTask,
   isAbortError,
   normalizeChunkedIssuesForScope,
   requestChunkedProofreadTask,
   requestProofread,
+  retryCurrentProofreadChunk,
+  retryFailedProofreadChunks,
 } from "./api";
 import { appendDebugLog, clearDebugLog } from "./debug";
 import {
@@ -70,6 +73,7 @@ const PROOFREAD_SCOPE_STORAGE_KEY = "word-ai-proofreader-scope-v2";
 const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v2";
 const BOOK_INTRODUCTION_STORAGE_KEY = "word-ai-proofreader-book-introduction-v2";
 const CLEAR_HISTORY_CONFIRM_MS = 4000;
+const CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS = 120;
 
 let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
@@ -80,6 +84,8 @@ let clearHistoryConfirmTimer: number | null = null;
 let isClearHistoryArmed = false;
 let taskState: TaskState = "idle";
 let isApplyingToWord = false;
+let isRetryingCurrentChunk = false;
+let isRetryingFailedChunks = false;
 let activeChunkTimer: number | null = null;
 let activeChunkStartedAtMs = 0;
 let activeChunkProgress: ProofreadStatusEvent | null = null;
@@ -88,6 +94,8 @@ Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
     getButton("proofread").onclick = proofreadSelection;
     getButton("apply-to-word").onclick = applyPendingResultToWord;
+    getButton("retry-current-chunk").onclick = retryCurrentChunk;
+    getButton("retry-failed-chunks").onclick = retryFailedChunks;
     getButton("new-conversation").onclick = clearCurrentResult;
     getButton("clear-debug-log").onclick = clearDebugLog;
     getButton("clear-history").onclick = clearHistory;
@@ -261,6 +269,9 @@ export async function proofreadSelection() {
       filter: createDefaultFilterState(),
     };
     renderCurrentPendingResult();
+    if (status === "failed" && issues.length === 0) {
+      renderEmptyResult("分块审校失败，尚未收到可用问题。可重试失败分块。");
+    }
     taskState = status;
     savePendingResultHistory({
       result: pendingResult,
@@ -273,27 +284,45 @@ export async function proofreadSelection() {
     const hasUnlocatedIssues = issues.some(
       (issue) => typeof issue.start !== "number" || typeof issue.end !== "number"
     );
-    showMessage(
-      issues.length > 0
-        ? hasUnlocatedIssues
-          ? "审校完成，请确认结果后点击“应用到 Word”；未定位问题会合并为汇总批注。"
-          : "审校完成，请确认结果后点击“应用到 Word”。"
-        : "审校完成，未发现明显问题。",
-      status === "partial_succeeded" ? "default" : "success"
-    );
+    if (status === "failed") {
+      showMessage("分块审校失败，可点击“重试失败分块”。", "error");
+    } else {
+      showMessage(
+        issues.length > 0
+          ? hasUnlocatedIssues
+            ? "审校完成，请确认结果后点击“应用到 Word”；未定位问题会合并为汇总批注。"
+            : "审校完成，请确认结果后点击“应用到 Word”。"
+          : "审校完成，未发现明显问题。",
+        status === "partial_succeeded" ? "default" : "success"
+      );
+    }
   } catch (error) {
     if (isAbortError(error)) {
       taskState = "cancelled";
       appendProgressStatus({ stage: "cancelled", message: "已停止当前审校。" });
-      renderEmptyResult("已停止审校");
-      saveStoppedOrFailedHistory({
+      const preserved = await preserveCurrentTaskSnapshotAfterStop({
         status: taskState,
         sourceText,
         book,
         controls,
         errorMessage: "用户停止了当前审校。",
       });
-      showMessage("已停止当前审校。", "default");
+      if (!preserved) {
+        renderEmptyResult("已停止审校");
+        saveStoppedOrFailedHistory({
+          status: taskState,
+          sourceText,
+          book,
+          controls,
+          errorMessage: "用户停止了当前审校。",
+        });
+      }
+      showMessage(
+        preserved
+          ? "已停止当前审校，已保留已完成分块的问题。"
+          : "已停止当前审校。",
+        "default"
+      );
       return;
     }
 
@@ -312,6 +341,110 @@ export async function proofreadSelection() {
     stopChunkElapsedTimer();
     currentAbortController = null;
     currentTaskId = null;
+    setBusy(false);
+    refreshHistory();
+    updateActionButtons();
+  }
+}
+
+async function retryCurrentChunk() {
+  if (!currentTaskId || isRetryingCurrentChunk) {
+    return;
+  }
+
+  const activeProgress = getActiveChunkProgress();
+  if (
+    !activeProgress ||
+    typeof activeProgress.elapsed_seconds !== "number" ||
+    activeProgress.elapsed_seconds < CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS
+  ) {
+    showMessage(
+      `当前分块审校超过 ${CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS} 秒后可手动重试。`,
+      "default"
+    );
+    return;
+  }
+
+  isRetryingCurrentChunk = true;
+  updateActionButtons();
+
+  try {
+    await retryCurrentProofreadChunk(currentTaskId);
+    appendProgressStatus({
+      stage: "chunk_retry_requested",
+      message: "已请求重试当前分块。",
+    });
+    showMessage("已请求重试当前分块，任务会继续向后处理。", "default");
+  } catch (error) {
+    showMessage(`重试当前分块失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    isRetryingCurrentChunk = false;
+    updateActionButtons();
+  }
+}
+
+async function retryFailedChunks() {
+  if (!pendingResult?.taskId || pendingResult.failedChunks <= 0 || isRetryingFailedChunks) {
+    return;
+  }
+
+  const abortController = new AbortController();
+  currentAbortController = abortController;
+  currentTaskId = pendingResult.taskId;
+  taskState = "running";
+  isRetryingFailedChunks = true;
+  stopChunkElapsedTimer();
+  setBusy(true);
+  updateActionButtons();
+  showMessage("正在重试失败分块...", "default");
+
+  try {
+    const retryResult = await retryFailedProofreadChunks(
+      pendingResult.taskId,
+      renderChunkedProgress,
+      abortController.signal
+    );
+    const issues = normalizeChunkedIssuesForScope(retryResult.issues);
+    pendingResult = {
+      ...pendingResult,
+      totalChunks: retryResult.total_chunks,
+      completedChunks: retryResult.completed_chunks,
+      failedChunks: retryResult.failed_chunks,
+      issues,
+    };
+    issueReviewState = {
+      selectedIssueIds: issues.map((issue) => issue.id),
+      filter: issueReviewState?.filter || createDefaultFilterState(),
+    };
+    taskState = retryResult.status;
+    renderCurrentPendingResult();
+    savePendingResultHistory({
+      result: pendingResult,
+      applicationMode: getApplicationMode(),
+      status: retryResult.status,
+    });
+    refreshHistory();
+    showMessage(
+      retryResult.failed_chunks > 0
+        ? "失败分块已重试，仍有分块失败，可稍后再次重试。"
+        : "失败分块已重试完成。",
+      retryResult.failed_chunks > 0 ? "default" : "success"
+    );
+  } catch (error) {
+    if (isAbortError(error)) {
+      taskState = "cancelled";
+      appendProgressStatus({ stage: "cancelled", message: "已停止失败分块重试。" });
+      showMessage("已停止失败分块重试。", "default");
+      return;
+    }
+
+    taskState = "failed";
+    showMessage(`重试失败分块失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopChunkElapsedTimer();
+    currentAbortController = null;
+    currentTaskId = null;
+    isRetryingFailedChunks = false;
     setBusy(false);
     refreshHistory();
     updateActionButtons();
@@ -558,6 +691,7 @@ function renderActiveChunkElapsed() {
   const progress = getActiveChunkProgress();
   if (progress) {
     renderEmptyResult(formatProgressResult(progress));
+    updateActionButtons();
   }
 }
 
@@ -619,6 +753,56 @@ function saveStoppedOrFailedHistory(input: {
     skippedIssueCount: 0,
     errorMessage: input.errorMessage,
   });
+}
+
+async function preserveCurrentTaskSnapshotAfterStop(input: {
+  status: TaskState;
+  sourceText: string;
+  book: BookInfo;
+  controls: ControlsState;
+  errorMessage: string;
+}): Promise<boolean> {
+  if (!currentTaskId || !input.sourceText.trim()) {
+    return false;
+  }
+
+  try {
+    const task = await getProofreadTask(currentTaskId, new AbortController().signal);
+    const issues = normalizeChunkedIssuesForScope(task.issues);
+    if (issues.length === 0) {
+      return false;
+    }
+
+    pendingResult = {
+      sessionId: currentSessionId || "",
+      sourceText: input.sourceText,
+      book: input.book,
+      scope: task.scope,
+      taskId: task.task_id || currentTaskId,
+      totalChunks: task.total_chunks,
+      completedChunks: task.completed_chunks,
+      failedChunks: task.failed_chunks,
+      providerApi: input.controls.providerApi,
+      proofreadMode: input.controls.proofreadMode,
+      reasoningEnabled: input.controls.reasoningEnabled,
+      issues,
+    };
+    issueReviewState = {
+      selectedIssueIds: issues.map((issue) => issue.id),
+      filter: createDefaultFilterState(),
+    };
+    renderCurrentPendingResult();
+    savePendingResultHistory({
+      result: pendingResult,
+      applicationMode: input.controls.applicationMode,
+      status: input.status,
+      errorMessage: input.errorMessage,
+    });
+    refreshHistory();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function refreshHistory() {
@@ -846,7 +1030,29 @@ function updateActionButtons() {
   const selectedCount = getSelectedIssues().length;
   const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord);
   const applyButton = getButton("apply-to-word");
+  const retryCurrentButton = getButton("retry-current-chunk");
+  const retryFailedButton = getButton("retry-failed-chunks");
+  const activeProgress = getActiveChunkProgress();
+  const canRetryCurrent = Boolean(
+    currentTaskId &&
+      taskState === "running" &&
+      activeProgress &&
+      typeof activeProgress.elapsed_seconds === "number" &&
+      activeProgress.elapsed_seconds >= CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS &&
+      !isRetryingCurrentChunk &&
+      !isRetryingFailedChunks &&
+      !isApplyingToWord
+  );
+  const canRetryFailed = Boolean(
+    pendingResult?.taskId &&
+      pendingResult.failedChunks > 0 &&
+      taskState !== "running" &&
+      !isRetryingFailedChunks &&
+      !isApplyingToWord
+  );
 
   applyButton.disabled = !canApply || taskState === "running";
   applyButton.querySelector(".ms-Button-label").textContent = formatApplyButtonLabel(selectedCount);
+  retryCurrentButton.disabled = !canRetryCurrent;
+  retryFailedButton.disabled = !canRetryFailed;
 }

@@ -46,24 +46,24 @@ export function renderResult(
     filter: createDefaultFilterState(),
   };
   const selectedIssueIdSet = new Set(reviewState.selectedIssueIds);
-  const sortedIssues = sortIssuesBySeverity(issues);
-  const visibleIssues = sortedIssues.filter((issue) => matchesFilter(issue, reviewState.filter));
-  const selectedIssues = sortedIssues.filter((issue) => selectedIssueIdSet.has(issue.id));
+  const orderedIssues = issues;
+  const visibleIssues = orderedIssues.filter((issue) => matchesFilter(issue, reviewState.filter));
+  const selectedIssues = orderedIssues.filter((issue) => selectedIssueIdSet.has(issue.id));
   const summary = formatSelectionSummary(
-    sortedIssues,
+    orderedIssues,
     selectedIssues,
     options.applicationMode || "comment"
   );
 
   result.className = "result-list";
   result.innerHTML = `
-    ${renderReviewToolbar(sortedIssues, visibleIssues, reviewState, summary, Boolean(options.readonly))}
+    ${renderReviewToolbar(orderedIssues, visibleIssues, reviewState, summary, Boolean(options.readonly))}
     <div class="result-items">
       ${visibleIssues
         .map((issue, index) =>
           renderIssueItem({
             issue,
-            displayIndex: sortedIssues.indexOf(issue) + 1 || index + 1,
+            displayIndex: orderedIssues.indexOf(issue) + 1 || index + 1,
             selected: selectedIssueIdSet.has(issue.id),
             sourceText: options.sourceText,
             readonly: Boolean(options.readonly),
@@ -418,22 +418,6 @@ function bindResultEvents(
       }
     });
   });
-}
-
-function sortIssuesBySeverity(issues: ProofreadIssue[]): ProofreadIssue[] {
-  const severityRank: Record<ProofreadIssue["severity"], number> = {
-    high: 0,
-    medium: 1,
-    low: 2,
-  };
-
-  return issues
-    .map((issue, index) => ({ issue, index }))
-    .sort((left, right) => {
-      const severityDiff = severityRank[left.issue.severity] - severityRank[right.issue.severity];
-      return severityDiff === 0 ? left.index - right.index : severityDiff;
-    })
-    .map((entry) => entry.issue);
 }
 
 function matchesFilter(issue: ProofreadIssue, filter: IssueFilterState): boolean {

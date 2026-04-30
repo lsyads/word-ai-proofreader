@@ -18,7 +18,7 @@
 - Word 任务窗格提供一个正式入口：“AI 审校”。
 - 插件打开时会创建一个本地 session；点击“清空当前结果”会清空任务窗格中的当前审校结果，并创建新的本地 session。后端不使用 session 续接 AI 上下文。
 - 插件可选择审校范围：“当前选区”或“全书正文”。全书正文以 `document.body.text` 为范围，暂不包含页眉页脚、脚注、文本框等非正文内容。
-- 当前选区不超过 5000 字时沿用单段审校；当前选区超过 5000 字或选择全书正文时，会自动按约 3000 字分块审校，并优先在段落或句末边界切分，不硬切自然句。
+- 当前选区不超过 7000 字时沿用单段审校；当前选区超过 7000 字或选择全书正文时，会自动按约 5000 字分块审校，并优先在段落或句末边界切分，不硬切自然句。
 - 插件提供书籍信息输入：书名必填，介绍可选，并保存在本地用于同一本书连续审校；书籍信息会作为 prompt 背景传给后端。
 - 插件可切换“快速审校/深度审校”、`Responses/Chat` API，并可单独开启“深度思考”；深度思考默认关闭，Chat 模式下对应后端 `reasoning.enabled`。
 - 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
@@ -151,7 +151,7 @@ curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread
 ```bash
 TASK_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/proofread/tasks \
   -H 'Content-Type: application/json' \
-  -d "{\"text\":\"$(printf '这是一段需要分块审校的文本。%.0s' {1..400})\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"scope\":\"document\",\"chunk_size\":3000,\"context\":{\"source\":\"manual-curl\"}}" \
+  -d "{\"text\":\"$(printf '这是一段需要分块审校的文本。%.0s' {1..400})\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"scope\":\"document\",\"chunk_size\":5000,\"context\":{\"source\":\"manual-curl\"}}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')"
 curl --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}
 curl --no-buffer --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}/events

@@ -95,7 +95,7 @@ class ChunkedProofreadIssue(ProofreadIssue):
 
 class ChunkedProofreadRequest(ProofreadRequest):
     scope: ProofreadScope = "selection"
-    chunk_size: int = Field(default=3000, ge=500, le=10000)
+    chunk_size: int = Field(default=5000, ge=500, le=10000)
 
 
 class ChunkedProofreadResult(BaseModel):

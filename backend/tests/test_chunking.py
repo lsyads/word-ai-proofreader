@@ -8,29 +8,29 @@ BOOK = BookInfo(title="测试书名", introduction="测试介绍")
 
 
 def test_selection_under_threshold_uses_single_chunk():
-    chunks = chunking.split_text_into_chunks("短文本。" * 10, scope="selection", chunk_size=3000)
+    chunks = chunking.split_text_into_chunks("甲" * 7000, scope="selection")
 
     assert len(chunks) == 1
     assert chunks[0].index == 0
     assert chunks[0].start == 0
-    assert chunks[0].end == len("短文本。" * 10)
+    assert chunks[0].end == 7000
 
 
 def test_long_selection_splits_near_sentence_boundary():
-    text = ("甲" * 2800) + "。" + ("乙" * 2800) + "。"
+    text = ("甲" * 4800) + "。" + ("乙" * 4800) + "。"
 
-    chunks = chunking.split_text_into_chunks(text, scope="selection", chunk_size=3000)
+    chunks = chunking.split_text_into_chunks(text, scope="selection")
 
     assert len(chunks) == 2
-    assert chunks[0].end == 2801
+    assert chunks[0].end == 4801
     assert chunks[0].text.endswith("。")
     assert chunks[1].start == chunks[0].end
 
 
 def test_document_always_uses_chunking_and_prefers_paragraph_boundary():
-    text = ("甲" * 1800) + "\n\n" + ("乙" * 1800)
+    text = ("甲" * 4300) + "\n\n" + ("乙" * 4300)
 
-    chunks = chunking.split_text_into_chunks(text, scope="document", chunk_size=3000)
+    chunks = chunking.split_text_into_chunks(text, scope="document")
 
     assert len(chunks) == 2
     assert chunks[0].text.endswith("\n\n")
@@ -38,20 +38,20 @@ def test_document_always_uses_chunking_and_prefers_paragraph_boundary():
 
 
 def test_chunking_extends_to_next_sentence_boundary_instead_of_hard_cutting():
-    text = ("甲" * 3000) + "。" + ("乙" * 1200) + "。"
+    text = ("甲" * 5000) + "。" + ("乙" * 1200) + "。"
 
-    chunks = chunking.split_text_into_chunks(text, scope="document", chunk_size=3000)
+    chunks = chunking.split_text_into_chunks(text, scope="document")
 
     assert len(chunks) == 2
-    assert chunks[0].end == 3001
+    assert chunks[0].end == 5001
     assert chunks[0].text.endswith("。")
     assert chunks[1].start == chunks[0].end
 
 
 def test_chunking_keeps_remaining_text_when_no_boundary_exists():
-    text = "甲" * 6500
+    text = "甲" * 8500
 
-    chunks = chunking.split_text_into_chunks(text, scope="document", chunk_size=3000)
+    chunks = chunking.split_text_into_chunks(text, scope="document")
 
     assert len(chunks) == 1
     assert chunks[0].start == 0
@@ -95,10 +95,9 @@ def test_proofread_chunked_aggregates_issues():
         ]
 
     request = ChunkedProofreadRequest(
-        text=("甲" * 2999) + "。" + ("乙" * 2999) + "。",
+        text=("甲" * 4999) + "。" + ("乙" * 4999) + "。",
         book=BOOK,
         scope="document",
-        chunk_size=3000,
     )
 
     issues, completed_chunks, failed_chunks = asyncio.run(
@@ -108,4 +107,4 @@ def test_proofread_chunked_aggregates_issues():
     assert completed_chunks == 2
     assert failed_chunks == 0
     assert [issue.chunk_index for issue in issues] == [0, 1]
-    assert [issue.global_start for issue in issues] == [0, 3000]
+    assert [issue.global_start for issue in issues] == [0, 5000]

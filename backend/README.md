@@ -60,7 +60,7 @@ backend/
 
 - `app/services/chunking.py`
   - V2 分块审校服务。
-  - 当前选区超过 5000 字时按约 3000 字分块；全书正文始终按约 3000 字分块。
+  - 当前选区超过 7000 字时按约 5000 字分块；全书正文始终按约 5000 字分块。
   - 优先在段落换行、句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。
   - 每个 chunk 复用 `proofread_text`，并把 chunk 内 `start/end` 转换为全文 `global_start/global_end`。
 
@@ -188,7 +188,7 @@ AI provider 异常时返回 `error` 事件，错误信息沿用非流式接口�
 ```json
 {
   "scope": "document",
-  "chunk_size": 3000
+  "chunk_size": 5000
 }
 ```
 

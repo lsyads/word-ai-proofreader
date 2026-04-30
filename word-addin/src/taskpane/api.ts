@@ -99,7 +99,7 @@ export async function requestChunkedProofreadTask(
     message:
       scope === "document"
         ? "正在创建全书分块审校任务。"
-        : "当前选区超过 5000 字，正在创建分块审校任务。",
+        : "当前选区超过 7000 字，正在创建分块审校任务。",
   });
 
   const createdTask = await createProofreadTask(

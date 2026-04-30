@@ -7,7 +7,7 @@
 ## V2 范围
 
 - 包含：Word 选区读取、本地 session 流程、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、纯空白差异过滤、结果筛选、逐条勾选、单条定位预览、逐条精准批注、修订模式替换、快速/深度审校、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
-- 新增：当前选区超过 5000 字自动分块审校；全书正文按约 3000 字自动分块审校；分块不硬切自然句，会优先在段落或句末边界切分；分块任务使用后端内存异步任务、SSE 进度、heartbeat 和轮询兜底；全书结果支持二次确认后批注或修订。
+- 新增：当前选区超过 7000 字自动分块审校；全书正文按约 5000 字自动分块审校；分块不硬切自然句，会优先在段落或句末边界切分；分块任务使用后端内存异步任务、SSE 进度、heartbeat 和轮询兜底；全书结果支持二次确认后批注或修订。
 - 不包含：登录、云端审校历史、跨服务重启恢复任务、页眉页脚/脚注/文本框扫描、token 级模型文本流、无人工确认地默认改正文。
 - 第一版后端使用 OpenAI 兼容接口；没有 `AI_API_KEY` 时返回 mock 结果，保证本地可联调。
 - 本地真实 AI 联调可使用 oMLX 启动 OpenAI 兼容服务，默认地址为 `http://127.0.0.1:8001/v1`。
@@ -149,11 +149,11 @@ data: {"message":"AI provider returned HTTP 500"}
 ```json
 {
   "scope": "selection",
-  "chunk_size": 3000
+  "chunk_size": 5000
 }
 ```
 
-`scope` 支持 `selection` 和 `document`。`selection` 文本不超过 5000 字时返回单个 chunk；超过 5000 字时按约 3000 字分块。`document` 始终按约 3000 字分块。分块优先在目标长度前的段落换行和句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。极端情况下全文无任何边界时，保留剩余文本为一个 chunk。
+`scope` 支持 `selection` 和 `document`。`selection` 文本不超过 7000 字时返回单个 chunk；超过 7000 字时按约 5000 字分块。`document` 始终按约 5000 字分块。分块优先在目标长度前的段落换行和句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。极端情况下全文无任何边界时，保留剩余文本为一个 chunk。
 
 Response:
 
@@ -357,7 +357,7 @@ npm run dev-server
 - `proofread_mode=fast` 与 `proofread_mode=thinking` 使用不同 prompt 和 token 上限。
 - `reasoning_enabled` 默认关闭；开启时 Chat 请求体包含 `"reasoning": {"enabled": true}`，关闭时包含 `"reasoning": {"enabled": false}`。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
-- 当前选区超过 5000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
+- 当前选区超过 7000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
 - 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
 - 当前 chunk 审校超过前端阈值后，任务窗格启用“重试当前分块”；任务结束后如存在失败 chunk，启用“重试失败分块”。

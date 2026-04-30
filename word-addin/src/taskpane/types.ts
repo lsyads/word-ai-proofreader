@@ -146,5 +146,5 @@ export interface IssueReviewState {
   filter: IssueFilterState;
 }
 
-export const SELECTION_CHUNK_THRESHOLD = 5000;
-export const DEFAULT_CHUNK_SIZE = 3000;
+export const SELECTION_CHUNK_THRESHOLD = 7000;
+export const DEFAULT_CHUNK_SIZE = 5000;

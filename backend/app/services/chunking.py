@@ -15,8 +15,8 @@ from app.schemas import (
 )
 from app.services import proofread as proofread_service
 
-DEFAULT_CHUNK_SIZE = 3000
-SELECTION_CHUNK_THRESHOLD = 5000
+DEFAULT_CHUNK_SIZE = 5000
+SELECTION_CHUNK_THRESHOLD = 7000
 MIN_CHUNK_SIZE = 500
 BOUNDARY_LOOKBACK = 1500
 PARAGRAPH_BOUNDARIES = ("\n\n", "\r\n\r\n", "\n", "\r")

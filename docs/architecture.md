@@ -12,8 +12,8 @@ Word 插件任务窗格
   -> FastAPI 后端
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
-  -> FastAPI 后端按 original 计算 start/end；分块任务额外计算 global_start/global_end
-  -> Word 插件先展示结果，用户确认后按应用方式插入原文片段批注或生成 Word 修订
+  -> FastAPI 后端按 original 计算 start/end 和 locator；分块任务额外计算 global_start/global_end
+  -> Word 插件先展示结果，用户确认后按 locator 分批插入原文片段批注或生成 Word 修订
 ```
 
 当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
@@ -86,7 +86,15 @@ Response:
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
       "start": 0,
-      "end": 4
+      "end": 4,
+      "locator": {
+        "key": "原文片段",
+        "key_start": 0,
+        "key_end": 4,
+        "original_start_in_key": 0,
+        "original_end_in_key": 4,
+        "strategy": "original"
+      }
     }
   ]
 }
@@ -96,7 +104,7 @@ Response:
 
 `book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。`reasoning_enabled` 可选，默认 `false`，用于控制 Chat Completions 请求体中的 `reasoning.enabled`，不改变审校 prompt。
 
-AI 原始输出不包含 `start/end/comment`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end: null`。
+AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end` 和可选 `locator`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end/locator: null`。`locator.key` 是 Word 插件搜索用的低重复片段；长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时为空并在应用时汇总批注。
 
 `replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
@@ -299,7 +307,7 @@ Provider Response:
 }
 ```
 
-AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析时先尝试标准 JSON；如果模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符，后端会抽取并清理 JSON 后再做 schema 校验。整包解析仍失败时，后端会按单条 issue 抢救可校验条目并跳过坏条目。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end`。
+AI JSON 中的 issue 只需要包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。解析时先尝试标准 JSON；如果模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符，后端会抽取并清理 JSON 后再做 schema 校验。整包解析仍失败时，后端会按单条 issue 抢救可校验条目并跳过坏条目。解析成功后，后端先过滤纯空白差异 issue，再按 `original` 定位并填充 `start/end/locator`。
 
 ### 2. Chat Completions 调用
 
@@ -397,16 +405,16 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 插件拿到最终 `issues` 后先渲染结果，不立即写入 Word。任务窗格会默认选中全部问题，并支持按严重程度、类别、定位状态和是否有 `replacement` 筛选；用户可以逐条勾选、批量选择，并点击单条“定位”在 Word 中选中对应原文。用户点击“应用 N 条到 Word”后才按当前应用方式写回已勾选问题：
 
 ```text
-已勾选 + 批注模式 + start/end 可定位 -> 在 original 对应原文片段插入逐条批注
-已勾选 + 修订模式 + start/end 可定位 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
-已勾选 + 修订模式 + start/end 可定位 + 无 replacement -> 在 original 对应原文片段插入逐条批注
-已勾选 + 定位失败 -> 在“应用 N 条到 Word”时合并为一条简短汇总批注
+已勾选 + 批注模式 + locator 可用 -> 按 locator.key 分批搜索，在 original 对应原文片段插入逐条批注
+已勾选 + 修订模式 + locator 可用 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
+已勾选 + 修订模式 + locator 可用 + 无 replacement -> 在 original 对应原文片段插入逐条批注
+已勾选 + 无 locator 或定位失败 -> 在“应用 N 条到 Word”时合并为一条简短汇总批注
 未勾选 -> 不写回 Word
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`。当前选区分块仍在选区范围内搜索；全书分块在 `document.body` 中搜索。插件用全局位置计算重复 `original` 的 occurrence，降低长文中误命中的风险。未定位汇总批注锚定在审校范围起点的第一个非空字符；当前选区使用选区内第一个非空字符，全书使用正文第一个非空字符，找不到非空字符时退回范围起点。
+分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 8 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则退回当前选区或正文起点。
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 

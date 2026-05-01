@@ -414,7 +414,6 @@ async function streamProofreadTaskEvents(
 
       const status = taskEventToStatus(event.name, event.data);
       onStatus(status);
-
     });
 
     if (done) {

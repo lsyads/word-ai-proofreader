@@ -251,6 +251,66 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     assert [(issue["start"], issue["end"]) for issue in response.json()["issues"]] == [(0, 2), (5, 7)]
 
 
+def test_locate_issues_builds_original_locator_for_unique_long_original():
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="唯一较长原文",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues("开头，唯一较长原文，结尾。", [issue])[0]
+
+    assert located.start == 3
+    assert located.end == 9
+    assert located.locator is not None
+    assert located.locator.strategy == "original"
+    assert located.locator.key == "唯一较长原文"
+    assert located.locator.key_start == 3
+    assert located.locator.key_end == 9
+
+
+def test_locate_issues_builds_context_locator_for_short_repeated_original():
+    text = "第一处甲需要看。第二处甲需要改。"
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="甲",
+        suggestion="建议",
+        start=10,
+        end=11,
+    )
+
+    located = proofread_service.locate_issues(text, [issue, issue.model_copy(update={"id": "issue-2"})])[1]
+
+    assert located.start == 11
+    assert located.end == 12
+    assert located.locator is not None
+    assert located.locator.strategy == "context"
+    assert located.locator.key == text
+    assert located.locator.original_start_in_key == 11
+    assert located.locator.original_end_in_key == 12
+
+
+def test_locate_issues_omits_locator_when_context_is_still_repeated():
+    text = "甲" * 80
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="甲",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues(text, [issue])[0]
+
+    assert located.start == 0
+    assert located.end == 1
+    assert located.locator is None
+
+
 def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     async def fake_proofread_with_ai(
         text,
@@ -280,6 +340,7 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     issue = response.json()["issues"][0]
     assert issue["start"] is None
     assert issue["end"] is None
+    assert issue["locator"] is None
 
 
 def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):

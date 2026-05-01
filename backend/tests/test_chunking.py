@@ -1,6 +1,6 @@
 import asyncio
 
-from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
+from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue, ProofreadLocator
 from app.services import chunking
 
 
@@ -69,6 +69,14 @@ def test_globalize_issues_adds_chunk_offsets():
         suggestion="修正错别字。",
         start=3,
         end=5,
+        locator=ProofreadLocator(
+            key="有错字。",
+            key_start=2,
+            key_end=6,
+            original_start_in_key=1,
+            original_end_in_key=3,
+            strategy="context",
+        ),
     )
 
     global_issue = chunking.globalize_issues(chunk, [issue])[0]
@@ -78,6 +86,10 @@ def test_globalize_issues_adds_chunk_offsets():
     assert global_issue.end == 5
     assert global_issue.global_start == 3003
     assert global_issue.global_end == 3005
+    assert global_issue.locator is not None
+    assert global_issue.locator.key_start == 3002
+    assert global_issue.locator.key_end == 3006
+    assert global_issue.locator.original_start_in_key == 1
 
 
 def test_proofread_chunked_aggregates_issues():

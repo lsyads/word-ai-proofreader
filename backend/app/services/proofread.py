@@ -5,13 +5,16 @@ import re
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from app.schemas import BookInfo, ProofreadIssue
+from app.schemas import BookInfo, ProofreadIssue, ProofreadLocator
 from app.services.ai_client import AIClientError, AIStreamEvent, proofread_with_ai, stream_proofread_with_ai
 from app.settings import get_settings
 
 ProviderAPI = Literal["responses", "chat"]
 ProofreadMode = Literal["fast", "thinking"]
 logger = logging.getLogger(__name__)
+MIN_ORIGINAL_LOCATOR_LENGTH = 6
+MAX_LOCATOR_OCCURRENCES = 3
+CONTEXT_LOCATOR_WINDOWS = (16, 32, 64)
 
 
 async def proofread_text(
@@ -154,13 +157,15 @@ def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssu
                 end = found_at + len(original)
                 search_from_by_original[original] = end
 
-        located.append(issue.model_copy(update={"start": start, "end": end}))
+        locator = build_locator(text, original, start, end)
+        located.append(issue.model_copy(update={"start": start, "end": end, "locator": locator}))
         logger.debug(
-            "issue located issue_id=%s original_len=%s start=%s end=%s",
+            "issue located issue_id=%s original_len=%s start=%s end=%s locator_strategy=%s",
             issue.id,
             len(original),
             start,
             end,
+            locator.strategy if locator else None,
         )
 
     logger.info(
@@ -171,6 +176,69 @@ def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssu
         sum(1 for issue in located if issue.start is None or issue.end is None),
     )
     return located
+
+
+def build_locator(
+    text: str,
+    original: str,
+    start: int | None,
+    end: int | None,
+) -> ProofreadLocator | None:
+    if start is None or end is None or not original:
+        return None
+
+    if text[start:end] != original:
+        return None
+
+    if (
+        len(original) >= MIN_ORIGINAL_LOCATOR_LENGTH
+        and _count_occurrences(text, original) <= MAX_LOCATOR_OCCURRENCES
+    ):
+        return ProofreadLocator(
+            key=original,
+            key_start=start,
+            key_end=end,
+            original_start_in_key=0,
+            original_end_in_key=len(original),
+            strategy="original",
+        )
+
+    for window in CONTEXT_LOCATOR_WINDOWS:
+        key_start = max(0, start - window)
+        key_end = min(len(text), end + window)
+        key = text[key_start:key_end]
+
+        if not key or _count_occurrences(text, key) > MAX_LOCATOR_OCCURRENCES:
+            continue
+
+        return ProofreadLocator(
+            key=key,
+            key_start=key_start,
+            key_end=key_end,
+            original_start_in_key=start - key_start,
+            original_end_in_key=end - key_start,
+            strategy="context",
+        )
+
+    return None
+
+
+def _count_occurrences(text: str, needle: str) -> int:
+    if not needle:
+        return 0
+
+    count = 0
+    search_from = 0
+
+    while search_from < len(text):
+        found_at = text.find(needle, search_from)
+        if found_at == -1:
+            break
+
+        count += 1
+        search_from = found_at + 1
+
+    return count
 
 
 def _is_whitespace_only_change(issue: ProofreadIssue) -> bool:

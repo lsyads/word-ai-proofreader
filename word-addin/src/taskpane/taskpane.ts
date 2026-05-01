@@ -318,9 +318,7 @@ export async function proofreadSelection() {
         });
       }
       showMessage(
-        preserved
-          ? "已停止当前审校，已保留已完成分块的问题。"
-          : "已停止当前审校。",
+        preserved ? "已停止当前审校，已保留已完成分块的问题。" : "已停止当前审校。",
         "default"
       );
       return;
@@ -467,7 +465,15 @@ async function applyPendingResultToWord() {
       pendingResult.sourceText,
       selectedIssues,
       pendingResult.scope,
-      getApplicationMode()
+      getApplicationMode(),
+      {
+        onProgress: (progress) => {
+          showMessage(
+            `正在应用到 Word，第 ${progress.completedBatches}/${progress.totalBatches} 批，已处理 ${progress.completedIssues}/${progress.totalIssues} 条。`,
+            "default"
+          );
+        },
+      }
     );
     saveAppliedResultHistory({
       result: pendingResult,
@@ -605,25 +611,46 @@ function getSelectedIssues(): ProofreadIssue[] {
 }
 
 function formatIssueApplicationPreview(issues: ProofreadIssue[]): string {
+  const batchCount = Math.ceil(countPreciselyWritableIssues(issues) / 8);
   const revisionCount =
     getApplicationMode() === "revision"
-      ? issues.filter((issue) => isLocatedIssue(issue) && hasReplacement(issue)).length
+      ? issues.filter((issue) => isPreciselyWritableIssue(issue) && hasReplacement(issue)).length
       : 0;
   const commentCount = issues.filter((issue) => {
-    if (!isLocatedIssue(issue)) {
+    if (!isPreciselyWritableIssue(issue)) {
       return false;
     }
 
     return getApplicationMode() === "comment" || !hasReplacement(issue);
   }).length;
-  const fallbackCount = issues.filter((issue) => !isLocatedIssue(issue)).length;
+  const fallbackCount = issues.filter((issue) => !isPreciselyWritableIssue(issue)).length;
   const skippedCount = pendingResult ? pendingResult.issues.length - issues.length : 0;
+  const batchText = batchCount > 0 ? `，预计分 ${batchCount} 批应用` : "";
 
-  return `预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，未定位汇总 ${fallbackCount} 条，跳过 ${skippedCount} 条`;
+  return `预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，将汇总批注 ${fallbackCount} 条，跳过 ${skippedCount} 条${batchText}`;
 }
 
 function isLocatedIssue(issue: ProofreadIssue): boolean {
   return typeof issue.start === "number" && typeof issue.end === "number";
+}
+
+function isPreciselyWritableIssue(issue: ProofreadIssue): boolean {
+  if (!isLocatedIssue(issue)) {
+    return false;
+  }
+
+  if (issue.locator) {
+    return true;
+  }
+
+  return Boolean(
+    pendingResult &&
+    pendingResult.sourceText.slice(issue.start as number, issue.end as number) === issue.original
+  );
+}
+
+function countPreciselyWritableIssues(issues: ProofreadIssue[]): number {
+  return issues.filter(isPreciselyWritableIssue).length;
 }
 
 function hasReplacement(issue: ProofreadIssue): boolean {
@@ -1035,20 +1062,20 @@ function updateActionButtons() {
   const activeProgress = getActiveChunkProgress();
   const canRetryCurrent = Boolean(
     currentTaskId &&
-      taskState === "running" &&
-      activeProgress &&
-      typeof activeProgress.elapsed_seconds === "number" &&
-      activeProgress.elapsed_seconds >= CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS &&
-      !isRetryingCurrentChunk &&
-      !isRetryingFailedChunks &&
-      !isApplyingToWord
+    taskState === "running" &&
+    activeProgress &&
+    typeof activeProgress.elapsed_seconds === "number" &&
+    activeProgress.elapsed_seconds >= CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS &&
+    !isRetryingCurrentChunk &&
+    !isRetryingFailedChunks &&
+    !isApplyingToWord
   );
   const canRetryFailed = Boolean(
     pendingResult?.taskId &&
-      pendingResult.failedChunks > 0 &&
-      taskState !== "running" &&
-      !isRetryingFailedChunks &&
-      !isApplyingToWord
+    pendingResult.failedChunks > 0 &&
+    taskState !== "running" &&
+    !isRetryingFailedChunks &&
+    !isApplyingToWord
   );
 
   applyButton.disabled = !canApply || taskState === "running";

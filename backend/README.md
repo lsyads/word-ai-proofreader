@@ -1,6 +1,6 @@
 # Backend README
 
-`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区或全书正文文本，返回结构化审校问题，并按 `original` 计算每条问题在单段或分块文本中的位置。分块任务会额外返回 `global_start/global_end`，供 Word 插件在长选区和全书正文中定位批注或修订。issue 中的 `replacement` 表示可直接替换原文的新文本，供 Word 插件修订模式使用。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
+`backend/` 是 Word AI 审校助手的 FastAPI 服务。它接收 Word 插件传来的选区或全书正文文本，返回结构化审校问题，并按 `original` 计算每条问题在单段或分块文本中的位置和低重复 `locator`。分块任务会额外返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标，供 Word 插件在长选区和全书正文中分批定位批注或修订。issue 中的 `replacement` 表示可直接替换原文的新文本，供 Word 插件修订模式使用。未配置真实 AI Key 时，会返回 mock 审校结果，方便本地联调。
 
 ## 目录结构
 
@@ -54,7 +54,7 @@ backend/
   - 审校服务编排层。
   - 未配置 `AI_API_KEY` 时返回 mock issue。
   - 配置 `AI_API_KEY` 时按 `provider_api` 调用 Responses 或 Chat。
-  - 对 mock/AI 返回的 issues 统一按 `original` 搜索并填充 `start/end`。
+  - 对 mock/AI 返回的 issues 统一按 `original` 搜索并填充 `start/end/locator`。
   - 返回给插件前过滤纯空白差异 issue：`original` 与 `replacement` 去掉所有空白后完全一致时不返回。
   - 每次审校都是独立请求，不读取或写入上一轮 provider response ID。
 
@@ -62,7 +62,7 @@ backend/
   - V2 分块审校服务。
   - 当前选区超过 7000 字时按约 5000 字分块；全书正文始终按约 5000 字分块。
   - 优先在段落换行、句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。
-  - 每个 chunk 复用 `proofread_text`，并把 chunk 内 `start/end` 转换为全文 `global_start/global_end`。
+  - 每个 chunk 复用 `proofread_text`，并把 chunk 内 `start/end` 转换为全文 `global_start/global_end`，同时平移 `locator.key_start/key_end`。
 
 - `app/services/tasks.py`
   - V2 内存异步任务服务。
@@ -147,13 +147,21 @@ backend/
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
       "start": 0,
-      "end": 4
+      "end": 4,
+      "locator": {
+        "key": "原文片段",
+        "key_start": 0,
+        "key_end": 4,
+        "original_start_in_key": 0,
+        "original_end_in_key": 4,
+        "strategy": "original"
+      }
     }
   ]
 }
 ```
 
-`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但仍要求 AI 只审校请求里的 Word 选区文本。AI 原始输出不包含 `start/end/comment`；后端在返回给插件前计算 `start/end`。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。`reasoning_enabled` 默认 `false`；Chat 模式下会写入请求体的 `reasoning.enabled`。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但仍要求 AI 只审校请求里的 Word 选区文本。AI 原始输出不包含 `start/end/comment/locator`；后端在返回给插件前计算 `start/end/locator`。`locator` 是 Word 插件精准写回用的低重复定位提示：长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时返回 `null` 并由前端汇总批注。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。`reasoning_enabled` 默认 `false`；Chat 模式下会写入请求体的 `reasoning.enabled`。
 
 ### `POST /api/proofread/stream`
 
@@ -298,7 +306,7 @@ python -m pytest -q
 
 - API 行为稳定。
 - mock fallback 可用。
-- 后端能按 `original` 计算 `start/end`，重复片段按顺序定位，找不到时返回 `null`。
+- 后端能按 `original` 计算 `start/end/locator`，重复片段按顺序定位，找不到时返回 `null`。
 - 后端能保留有效 `replacement`，并将缺失或空字符串 `replacement` 归一为 `null`。
 - 后端能过滤纯空白差异 issue。
 - 真实 AI 分支 Responses API 与 Chat Completions 请求 payload 正确。

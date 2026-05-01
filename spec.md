@@ -22,8 +22,8 @@ Word 选区
   -> 长选区/全书: POST /api/proofread/tasks + SSE/轮询任务进度
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
   -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
-  -> backend 在单段或分块文本中搜索 issue.original 并填充 start/end；分块结果额外填充 global_start/global_end
-  -> word-addin 先展示结果，用户确认后按应用方式插入批注或生成 Word 修订
+  -> backend 在单段或分块文本中搜索 issue.original，填充 start/end 和低重复 locator；分块结果额外填充 global_start/global_end
+  -> word-addin 先展示结果，用户确认后按 locator 分批插入批注或生成 Word 修订
 ```
 
 ### 前端
@@ -87,7 +87,15 @@ Response:
       "replacement": "可直接替换原文的新文本",
       "suggestion": "修改建议说明",
       "start": 0,
-      "end": 4
+      "end": 4,
+      "locator": {
+        "key": "原文片段",
+        "key_start": 0,
+        "key_end": 4,
+        "original_start_in_key": 0,
+        "original_end_in_key": 4,
+        "strategy": "original"
+      }
     }
   ]
 }
@@ -106,6 +114,7 @@ Response:
 - `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
 - 纯空白差异过滤：如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端会过滤该 issue，不返回给 Word 插件。
 - `start`、`end`：后端按 `original` 在请求文本中计算，`start` 为包含式起点，`end` 为不包含式终点，均相对请求文本。重复 `original` 按 issue 顺序匹配下一处；找不到时返回 `null`。
+- `locator`：可选精准写回定位提示。`key` 是 Word 插件优先搜索的低重复片段；`key_start/key_end` 是 `key` 在请求文本中的位置；`original_start_in_key/original_end_in_key` 是 `original` 在 `key` 内的位置；`strategy` 为 `original` 或 `context`。长且低重复的 `original` 直接作为 key；短文本或重复文本会使用上下文 key；仍不可靠时返回 `null`，前端应用时降级为汇总批注。
 - `issues` 为空表示未发现明显问题。
 - `issues` 为空时，Word 插件只在任务窗格显示结果，不插入批注。
 
@@ -260,8 +269,8 @@ Response:
 5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
 6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
 7. 后端返回问题时，插件先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选，支持逐条勾选和批量选择，并可点击单条“定位”选中 Word 原文。
-8. 用户点击“应用 N 条到 Word”后，插件只写回已勾选问题；批注模式按 `start/end` 或 `global_start/global_end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将已勾选、可定位且有 `replacement` 的问题替换为 Word 原生修订。
-9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但定位失败的问题统一合并为一条简短汇总批注，锚定在审校范围起点的第一个非空字符，找不到非空字符时退回范围起点；未勾选问题不写回 Word。
+8. 用户点击“应用 N 条到 Word”后，插件只写回已勾选问题；批注模式按 `locator.key` 去重分批搜索并精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将已勾选、可定位且有 `replacement` 的问题替换为 Word 原生修订。
+9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但无可靠 `locator` 或 Word 搜索失败的问题统一合并为一条简短汇总批注，优先锚定在本次第一个成功定位 range，找不到时退回当前选区或正文起点；未勾选问题不写回 Word。批量应用不限制总条数，但按小批次 `context.sync()` 并在任务窗格显示进度。
 10. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
 11. 插件支持清空当前结果、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入；历史记录保存 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。
 12. 补充后端测试、插件 lint/build 验证和本地联调说明。
@@ -358,7 +367,7 @@ npm run dev-server
 - `reasoning_enabled` 默认关闭；开启时 Chat 请求体包含 `"reasoning": {"enabled": true}`，关闭时包含 `"reasoning": {"enabled": false}`。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区超过 7000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
-- 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
+- 分块任务返回全局位置 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标；前端据此分批定位重复原文 occurrence。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
 - 当前 chunk 审校超过前端阈值后，任务窗格启用“重试当前分块”；任务结束后如存在失败 chunk，启用“重试失败分块”。
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数、失败原因和累计问题数。
@@ -368,9 +377,9 @@ npm run dev-server
 - Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。
 - 后端不可用时显示错误，不插入空批注。
 - 后端返回非空 `issues[]` 时，插件只展示结果；筛选和勾选后点击“应用 N 条到 Word”才对已选的可定位问题逐条插入批注或修订。
-- 单条“定位”可选中 Word 中对应原文；重复 `original` 场景应定位到按 `start/end` 计算出的 occurrence。
+- 单条“定位”可选中 Word 中对应原文；重复 `original` 场景应优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对已选、可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置。
-- 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题合并为一条锚定在审校范围起点第一个非空字符的汇总批注；未选问题不写回。
+- 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题合并为一条锚定在首个成功定位 range 或范围起点的汇总批注；未选问题不写回。
 - 后端返回空 `issues[]` 时，插件显示未发现明显问题，且不插入批注。
 - 审校运行中点击“停止审校”时，插件中断请求、恢复按钮、不插入批注。
 - 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；历史记录包含 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。

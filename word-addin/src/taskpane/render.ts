@@ -47,12 +47,15 @@ export function renderResult(
   };
   const selectedIssueIdSet = new Set(reviewState.selectedIssueIds);
   const orderedIssues = issues;
-  const visibleIssues = orderedIssues.filter((issue) => matchesFilter(issue, reviewState.filter));
+  const visibleIssues = orderedIssues.filter((issue) =>
+    matchesFilter(issue, reviewState.filter, options.sourceText)
+  );
   const selectedIssues = orderedIssues.filter((issue) => selectedIssueIdSet.has(issue.id));
   const summary = formatSelectionSummary(
     orderedIssues,
     selectedIssues,
-    options.applicationMode || "comment"
+    options.applicationMode || "comment",
+    options.sourceText
   );
 
   result.className = "result-list";
@@ -333,9 +336,12 @@ function renderIssueItem(input: {
   const locatable = input.sourceText
     ? isIssueLocatable(input.sourceText, issue)
     : isLocatedIssue(issue);
+  const preciselyWritable = input.sourceText
+    ? isPreciselyWritableIssue(input.sourceText, issue)
+    : Boolean(locatable && issue.locator);
   const canLocate = Boolean(input.sourceText && locatable && !input.readonly);
   const needsReview = !hasReplacement(issue);
-  const statusClass = locatable ? "is-located" : "is-unlocated";
+  const statusClass = preciselyWritable ? "is-located" : "is-unlocated";
   const replacementClass = needsReview ? "needs-review" : "has-replacement";
 
   return `
@@ -347,7 +353,7 @@ function renderIssueItem(input: {
           } ${input.readonly ? "disabled" : ""} />
           <span>${input.displayIndex}. ${escapeHtml(issue.category)} / ${escapeHtml(issue.severity)}</span>
         </label>
-        <span class="location-status">${escapeHtml(formatLocationStatus(issue, locatable))}</span>
+        <span class="location-status">${escapeHtml(formatLocationStatus(issue, preciselyWritable))}</span>
       </div>
       <p><b>原文：</b>${escapeHtml(issue.original || "未提供")}</p>
       <p><b>替换为：</b>${escapeHtml(issue.replacement || "无直接替换文本，需人工核查")}</p>
@@ -420,7 +426,11 @@ function bindResultEvents(
   });
 }
 
-function matchesFilter(issue: ProofreadIssue, filter: IssueFilterState): boolean {
+function matchesFilter(
+  issue: ProofreadIssue,
+  filter: IssueFilterState,
+  sourceText?: string
+): boolean {
   if (filter.severity === "high-medium" && issue.severity === "low") {
     return false;
   }
@@ -437,7 +447,9 @@ function matchesFilter(issue: ProofreadIssue, filter: IssueFilterState): boolean
     return false;
   }
 
-  const located = isLocatedIssue(issue);
+  const located = sourceText
+    ? isPreciselyWritableIssue(sourceText, issue)
+    : isLocatedIssue(issue) && Boolean(issue.locator);
   if (filter.location === "located" && !located) {
     return false;
   }
@@ -475,23 +487,30 @@ function renderContextPreview(sourceText: string | undefined, issue: ProofreadIs
 function formatSelectionSummary(
   allIssues: ProofreadIssue[],
   selectedIssues: ProofreadIssue[],
-  applicationMode: ApplicationMode
+  applicationMode: ApplicationMode,
+  sourceText?: string
 ): string {
   const skippedCount = allIssues.length - selectedIssues.length;
   const revisionCount =
     applicationMode === "revision"
-      ? selectedIssues.filter((issue) => isLocatedIssue(issue) && hasReplacement(issue)).length
+      ? selectedIssues.filter(
+          (issue) => isPreciselyWritableIssue(sourceText || "", issue) && hasReplacement(issue)
+        ).length
       : 0;
   const commentCount = selectedIssues.filter((issue) => {
-    if (!isLocatedIssue(issue)) {
+    if (!isPreciselyWritableIssue(sourceText || "", issue)) {
       return false;
     }
 
     return applicationMode === "comment" || !hasReplacement(issue);
   }).length;
-  const fallbackCount = selectedIssues.filter((issue) => !isLocatedIssue(issue)).length;
+  const fallbackCount = selectedIssues.filter(
+    (issue) => !isPreciselyWritableIssue(sourceText || "", issue)
+  ).length;
+  const batchCount = Math.ceil((commentCount + revisionCount) / 8);
+  const batchText = batchCount > 0 ? `；预计分 ${batchCount} 批应用` : "";
 
-  return `已选 ${selectedIssues.length}/${allIssues.length} 条；预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，未定位汇总 ${fallbackCount} 条，跳过 ${skippedCount} 条。`;
+  return `已选 ${selectedIssues.length}/${allIssues.length} 条；预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，将汇总批注 ${fallbackCount} 条，跳过 ${skippedCount} 条${batchText}。`;
 }
 
 function isLocatedIssue(issue: ProofreadIssue): boolean {
@@ -504,6 +523,58 @@ function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
   }
 
   return sourceText.slice(issue.start as number, issue.end as number) === issue.original;
+}
+
+function isPreciselyWritableIssue(sourceText: string, issue: ProofreadIssue): boolean {
+  if (!sourceText || !isIssueLocatable(sourceText, issue)) {
+    return false;
+  }
+
+  if (issue.locator) {
+    return true;
+  }
+
+  return canBuildClientLocator(sourceText, issue);
+}
+
+function canBuildClientLocator(sourceText: string, issue: ProofreadIssue): boolean {
+  if (issue.original.length >= 6 && getOccurrenceCount(sourceText, issue.original) <= 3) {
+    return true;
+  }
+
+  for (const windowSize of [16, 32, 64]) {
+    const keyStart = Math.max(0, (issue.start as number) - windowSize);
+    const keyEnd = Math.min(sourceText.length, (issue.end as number) + windowSize);
+    const key = sourceText.slice(keyStart, keyEnd);
+
+    if (key && getOccurrenceCount(sourceText, key) <= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getOccurrenceCount(text: string, target: string): number {
+  if (!target) {
+    return 0;
+  }
+
+  let count = 0;
+  let searchFrom = 0;
+
+  while (searchFrom < text.length) {
+    const foundAt = text.indexOf(target, searchFrom);
+
+    if (foundAt === -1) {
+      break;
+    }
+
+    count += 1;
+    searchFrom = foundAt + 1;
+  }
+
+  return count;
 }
 
 function hasReplacement(issue: ProofreadIssue): boolean {
@@ -538,12 +609,12 @@ function formatStage(stage: string): string {
   return `[${stageLabels[stage] || stage}]`;
 }
 
-function formatLocationStatus(issue: ProofreadIssue, locatable: boolean): string {
-  if (locatable && typeof issue.start === "number" && typeof issue.end === "number") {
-    return `已定位 ${issue.start}-${issue.end}`;
+function formatLocationStatus(issue: ProofreadIssue, preciselyWritable: boolean): string {
+  if (preciselyWritable && typeof issue.start === "number" && typeof issue.end === "number") {
+    return `可精准写回 ${issue.start}-${issue.end}`;
   }
 
-  return "未定位，将不会精准写回";
+  return "将汇总批注";
 }
 
 function formatHistoryMeta(entry: ProofreadHistoryEntry): string {

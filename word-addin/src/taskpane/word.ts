@@ -1,18 +1,60 @@
 /* global Office, Word */
 
 import { appendDebugLog } from "./debug";
-import { ApplicationMode, IssueApplicationSummary, ProofreadIssue, ProofreadScope } from "./types";
+import {
+  ApplicationMode,
+  IssueApplicationProgress,
+  IssueApplicationSummary,
+  ProofreadIssue,
+  ProofreadLocator,
+  ProofreadScope,
+} from "./types";
 
 type SearchRoot = Word.Body | Word.Range;
+
 interface SearchContext {
   root: SearchRoot;
   rootKind: "body" | "selection";
   occurrenceText: string;
-  sourceStart: number;
-  resolvedBy: "body-source-text" | "document-body" | "current-selection";
+  canSearch: boolean;
+}
+
+interface ApplyIssuesOptions {
+  onProgress?: (progress: IssueApplicationProgress) => void;
+}
+
+interface PreparedIssue {
+  issue: ProofreadIssue;
+  locator: ProofreadLocator;
+}
+
+interface SearchGroup {
+  locator: ProofreadLocator;
+  occurrenceIndex: number;
+  issues: PreparedIssue[];
+}
+
+interface PendingOriginalSearch {
+  prepared: PreparedIssue;
+  searchResults: Word.RangeCollection;
+}
+
+interface ResolvedIssueTarget {
+  issue: ProofreadIssue;
+  targetRange: Word.Range;
+}
+
+interface ResolvedIssueTargets {
+  targets: ResolvedIssueTarget[];
+  summaryIssues: ProofreadIssue[];
+  fallbackAnchorRange: Word.Range;
 }
 
 const FALLBACK_COMMENT_PREVIEW_LIMIT = 10;
+const SEARCH_BATCH_SIZE = 8;
+const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
+const MAX_LOCATOR_OCCURRENCES = 3;
+const CONTEXT_LOCATOR_WINDOWS = [16, 32, 64];
 
 export async function getSelectedText(): Promise<string> {
   return Word.run(async (context) => {
@@ -52,13 +94,14 @@ export async function applyIssuesToScope(
   sourceText: string,
   issues: ProofreadIssue[],
   scope: ProofreadScope,
-  applicationMode: ApplicationMode
+  applicationMode: ApplicationMode,
+  options: ApplyIssuesOptions = {}
 ): Promise<IssueApplicationSummary> {
   if (scope === "document") {
-    return applyIssuesToDocument(sourceText, issues, applicationMode);
+    return applyIssuesToDocument(sourceText, issues, applicationMode, options);
   }
 
-  return applyIssuesToSelection(sourceText, issues, applicationMode);
+  return applyIssuesToSelection(sourceText, issues, applicationMode, options);
 }
 
 export async function selectIssueInScope(
@@ -74,58 +117,25 @@ export async function selectIssueInScope(
       end: issue.end,
       original: issue.original,
       sourceTextLength: sourceText.length,
+      locatorStrategy: issue.locator?.strategy,
     });
-
-    if (!isIssueLocatable(sourceText, issue)) {
-      appendDebugLog("warn", "定位前校验失败：sourceText 对应片段与 original 不一致", {
-        issueId: issue.id,
-        expected: issue.original,
-        actual:
-          typeof issue.start === "number" && typeof issue.end === "number"
-            ? sourceText.slice(issue.start, issue.end)
-            : null,
-      });
-      throw new Error("该问题未能定位到 Word 原文。");
-    }
 
     const searchContext = await createSearchContext(context, scope, sourceText);
-    const targetStart = searchContext.sourceStart + (issue.start as number);
-    const occurrenceIndex = getOccurrenceIndexBeforeOffset(
-      searchContext.occurrenceText,
-      issue.original,
-      targetStart
-    );
-    const searchResults = searchContext.root.search(issue.original, {
-      matchCase: true,
-      matchWholeWord: false,
-    });
-    searchResults.load("items");
-    await context.sync();
+    const resolved = await resolveIssueTargets(context, searchContext, sourceText, [issue]);
+    const target = resolved.targets[0];
 
-    appendDebugLog("info", "Word search 完成", {
-      issueId: issue.id,
-      occurrenceIndex,
-      searchResultCount: searchResults.items.length,
-      resolvedBy: searchContext.resolvedBy,
-      sourceStart: searchContext.sourceStart,
-      targetStart,
-    });
-
-    const targetRange = searchResults.items[occurrenceIndex];
-    if (!targetRange) {
-      appendDebugLog("warn", "Word search 找不到目标 occurrence", {
+    if (!target) {
+      appendDebugLog("warn", "定位失败：未能解析 Word range", {
         issueId: issue.id,
-        occurrenceIndex,
-        searchResultCount: searchResults.items.length,
+        summaryCount: resolved.summaryIssues.length,
       });
       throw new Error("未能在当前 Word 范围中找到对应原文。");
     }
 
-    targetRange.select();
+    target.targetRange.select();
     await context.sync();
     appendDebugLog("info", "Word range 已 select", {
       issueId: issue.id,
-      occurrenceIndex,
     });
   });
 }
@@ -133,167 +143,82 @@ export async function selectIssueInScope(
 function applyIssuesToSelection(
   selectedText: string,
   issues: ProofreadIssue[],
-  applicationMode: ApplicationMode
+  applicationMode: ApplicationMode,
+  options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
   if (applicationMode === "revision") {
-    return applyRevisionsForIssues(selectedText, issues, "selection");
+    return applyRevisionsForIssues(selectedText, issues, "selection", options);
   }
 
-  return insertCommentsForIssues(selectedText, issues, "selection");
+  return insertCommentsForIssues(selectedText, issues, "selection", options);
 }
 
 function applyIssuesToDocument(
   documentText: string,
   issues: ProofreadIssue[],
-  applicationMode: ApplicationMode
+  applicationMode: ApplicationMode,
+  options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
   if (applicationMode === "revision") {
-    return applyRevisionsForIssues(documentText, issues, "document");
+    return applyRevisionsForIssues(documentText, issues, "document", options);
   }
 
-  return insertCommentsForIssues(documentText, issues, "document");
+  return insertCommentsForIssues(documentText, issues, "document", options);
 }
 
 function insertCommentsForIssues(
   sourceText: string,
   issues: ProofreadIssue[],
-  scope: ProofreadScope
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
     const searchContext = await createSearchContext(context, scope, sourceText);
-    const pendingSearches: Array<{
-      issue: ProofreadIssue;
-      occurrenceIndex: number;
-      searchResults: Word.RangeCollection;
-    }> = [];
-    const summaryIssues: ProofreadIssue[] = [];
-    const fallbackAnchorSearch = createFallbackAnchorSearch(searchContext, sourceText);
+    const resolved = await resolveIssueTargets(context, searchContext, sourceText, issues, options);
     let commentCount = 0;
 
-    for (const issue of issues) {
-      if (!isIssueLocatable(sourceText, issue)) {
-        summaryIssues.push(issue);
-        continue;
-      }
-
-      const occurrenceIndex = getOccurrenceIndexBeforeOffset(
-        searchContext.occurrenceText,
-        issue.original,
-        searchContext.sourceStart + (issue.start as number)
-      );
-      const searchResults = searchContext.root.search(issue.original, {
-        matchCase: true,
-        matchWholeWord: false,
-      });
-      searchResults.load("items");
-      pendingSearches.push({ issue, occurrenceIndex, searchResults });
-    }
-
-    await context.sync();
-
-    pendingSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
-      const targetRange = searchResults.items[occurrenceIndex];
-
-      if (!targetRange) {
-        summaryIssues.push(issue);
-        return;
-      }
-
+    resolved.targets.forEach(({ issue, targetRange }) => {
       targetRange.insertComment(formatIssueComment(issue));
       commentCount += 1;
     });
 
-    if (summaryIssues.length > 0) {
-      getFallbackAnchorRange(searchContext, fallbackAnchorSearch).insertComment(
-        formatFallbackComment(summaryIssues)
-      );
+    if (resolved.summaryIssues.length > 0) {
+      resolved.fallbackAnchorRange.insertComment(formatFallbackComment(resolved.summaryIssues));
     }
 
     await context.sync();
-    return { commentCount, revisionCount: 0, fallbackCount: summaryIssues.length };
+    return { commentCount, revisionCount: 0, fallbackCount: resolved.summaryIssues.length };
   });
 }
 
 function applyRevisionsForIssues(
   sourceText: string,
   issues: ProofreadIssue[],
-  scope: ProofreadScope
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
   return Word.run(async (context) => {
     const document = context.document;
+    document.load("changeTrackingMode");
+
     const searchContext = await createSearchContext(context, scope, sourceText);
-    const pendingRevisionSearches: Array<{
-      issue: ProofreadIssue;
-      occurrenceIndex: number;
-      searchResults: Word.RangeCollection;
-    }> = [];
-    const pendingCommentSearches: Array<{
-      issue: ProofreadIssue;
-      occurrenceIndex: number;
-      searchResults: Word.RangeCollection;
-    }> = [];
-    const summaryIssues: ProofreadIssue[] = [];
-    const fallbackAnchorSearch = createFallbackAnchorSearch(searchContext, sourceText);
+    const resolved = await resolveIssueTargets(context, searchContext, sourceText, issues, options);
+    const revisionApplications: ResolvedIssueTarget[] = [];
     let revisionCount = 0;
     let commentCount = 0;
 
-    document.load("changeTrackingMode");
-
-    for (const issue of issues) {
-      if (!isIssueLocatable(sourceText, issue)) {
-        summaryIssues.push(issue);
-        continue;
-      }
-
-      const occurrenceIndex = getOccurrenceIndexBeforeOffset(
-        searchContext.occurrenceText,
-        issue.original,
-        searchContext.sourceStart + (issue.start as number)
-      );
-      const searchResults = searchContext.root.search(issue.original, {
-        matchCase: true,
-        matchWholeWord: false,
-      });
-      searchResults.load("items");
-
-      if (hasReplacement(issue)) {
-        pendingRevisionSearches.push({ issue, occurrenceIndex, searchResults });
-      } else {
-        pendingCommentSearches.push({ issue, occurrenceIndex, searchResults });
-      }
-    }
-
-    await context.sync();
-
-    const revisionApplications: Array<{ issue: ProofreadIssue; targetRange: Word.Range }> = [];
-
-    pendingRevisionSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
-      const targetRange = searchResults.items[occurrenceIndex];
-
-      if (!targetRange) {
-        summaryIssues.push(issue);
+    resolved.targets.forEach((target) => {
+      if (hasReplacement(target.issue)) {
+        revisionApplications.push(target);
         return;
       }
 
-      revisionApplications.push({ issue, targetRange });
-    });
-
-    pendingCommentSearches.forEach(({ issue, occurrenceIndex, searchResults }) => {
-      const targetRange = searchResults.items[occurrenceIndex];
-
-      if (!targetRange) {
-        summaryIssues.push(issue);
-        return;
-      }
-
-      targetRange.insertComment(formatIssueComment(issue));
+      target.targetRange.insertComment(formatIssueComment(target.issue));
       commentCount += 1;
     });
 
-    if (summaryIssues.length > 0) {
-      getFallbackAnchorRange(searchContext, fallbackAnchorSearch).insertComment(
-        formatFallbackComment(summaryIssues)
-      );
+    if (resolved.summaryIssues.length > 0) {
+      resolved.fallbackAnchorRange.insertComment(formatFallbackComment(resolved.summaryIssues));
     }
 
     await context.sync();
@@ -318,7 +243,7 @@ function applyRevisionsForIssues(
       await context.sync();
     }
 
-    return { commentCount, revisionCount, fallbackCount: summaryIssues.length };
+    return { commentCount, revisionCount, fallbackCount: resolved.summaryIssues.length };
   });
 }
 
@@ -327,105 +252,289 @@ async function createSearchContext(
   scope: ProofreadScope,
   sourceText: string
 ): Promise<SearchContext> {
-  const body = context.document.body;
-  body.load("text");
-  await context.sync();
-
-  const bodyText = body.text || "";
-  const sourceStart = bodyText.indexOf(sourceText);
-
-  if (sourceStart !== -1) {
-    appendDebugLog("info", "已在正文中找回审校 sourceText，后续搜索将使用正文范围", {
-      scope,
-      sourceStart,
+  if (scope === "document") {
+    appendDebugLog("info", "使用正文范围定位，不在应用阶段读取全文", {
       sourceTextLength: sourceText.length,
-      bodyTextLength: bodyText.length,
     });
     return {
-      root: body,
-      rootKind: "body",
-      occurrenceText: bodyText,
-      sourceStart,
-      resolvedBy: scope === "document" ? "document-body" : "body-source-text",
-    };
-  }
-
-  if (scope === "document") {
-    appendDebugLog(
-      "warn",
-      "未能在正文中精确找回 sourceText，文档范围将退回原 sourceText 计算 occurrence",
-      {
-        sourceTextLength: sourceText.length,
-        bodyTextLength: bodyText.length,
-      }
-    );
-    return {
-      root: body,
+      root: context.document.body,
       rootKind: "body",
       occurrenceText: sourceText,
-      sourceStart: 0,
-      resolvedBy: "document-body",
+      canSearch: true,
     };
   }
 
-  appendDebugLog("warn", "未能在正文中精确找回选区 sourceText，选区范围将退回当前 Word selection", {
+  const selection = context.document.getSelection();
+  selection.load("text");
+  await context.sync();
+
+  const selectionText = (selection.text || "").trim();
+  const canSearch = selectionText === sourceText;
+
+  appendDebugLog(canSearch ? "info" : "warn", "使用当前选区范围定位", {
     sourceTextLength: sourceText.length,
-    bodyTextLength: bodyText.length,
+    selectionTextLength: selectionText.length,
+    canSearch,
   });
+
   return {
-    root: context.document.getSelection(),
+    root: selection,
     rootKind: "selection",
     occurrenceText: sourceText,
-    sourceStart: 0,
-    resolvedBy: "current-selection",
+    canSearch,
   };
 }
 
-function createFallbackAnchorSearch(
+async function resolveIssueTargets(
+  context: Word.RequestContext,
   searchContext: SearchContext,
-  sourceText: string
-): { occurrenceIndex: number; searchResults: Word.RangeCollection | null } {
-  const firstVisibleOffset = findFirstNonWhitespaceOffset(sourceText);
+  sourceText: string,
+  issues: ProofreadIssue[],
+  options: ApplyIssuesOptions = {}
+): Promise<ResolvedIssueTargets> {
+  const summaryIssues: ProofreadIssue[] = [];
+  const targets: ResolvedIssueTarget[] = [];
+  let firstTargetRange: Word.Range | null = null;
 
-  if (firstVisibleOffset === -1) {
-    return { occurrenceIndex: 0, searchResults: null };
+  if (!searchContext.canSearch) {
+    appendDebugLog("warn", "当前 Word 范围与审校文本不一致，全部降级汇总", {
+      issueCount: issues.length,
+      rootKind: searchContext.rootKind,
+    });
+    return {
+      targets,
+      summaryIssues: issues,
+      fallbackAnchorRange: getRootRange(searchContext),
+    };
   }
 
-  const anchorText = sourceText[firstVisibleOffset];
-  const searchResults = searchContext.root.search(anchorText, {
-    matchCase: true,
-    matchWholeWord: false,
-  });
-  searchResults.load("items");
+  const groups = buildSearchGroups(sourceText, issues, summaryIssues);
+  const totalBatches = Math.ceil(groups.length / SEARCH_BATCH_SIZE);
+  let completedIssues = summaryIssues.length;
+
+  for (let batchStart = 0; batchStart < groups.length; batchStart += SEARCH_BATCH_SIZE) {
+    const batch = groups.slice(batchStart, batchStart + SEARCH_BATCH_SIZE);
+    const pendingKeySearches = batch.map((group) => {
+      const searchResults = searchContext.root.search(group.locator.key, {
+        matchCase: true,
+        matchWholeWord: false,
+      });
+      searchResults.load("items");
+      return { group, searchResults };
+    });
+
+    // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional batch boundary to keep Word responsive.
+    await context.sync();
+
+    const pendingOriginalSearches: PendingOriginalSearch[] = [];
+
+    pendingKeySearches.forEach(({ group, searchResults }) => {
+      const keyRange = searchResults.items[group.occurrenceIndex];
+
+      if (!keyRange) {
+        appendDebugLog("warn", "Word search 找不到 locator key", {
+          keyStart: group.locator.key_start,
+          keyLength: group.locator.key.length,
+          occurrenceIndex: group.occurrenceIndex,
+          searchResultCount: searchResults.items.length,
+          issueIds: group.issues.map(({ issue }) => issue.id),
+        });
+        summaryIssues.push(...group.issues.map(({ issue }) => issue));
+        return;
+      }
+
+      group.issues.forEach((prepared) => {
+        if (prepared.locator.strategy === "original") {
+          targets.push({ issue: prepared.issue, targetRange: keyRange });
+          firstTargetRange = firstTargetRange || keyRange;
+          return;
+        }
+
+        const searchResultsInKey = keyRange.search(prepared.issue.original, {
+          matchCase: true,
+          matchWholeWord: false,
+        });
+        searchResultsInKey.load("items");
+        pendingOriginalSearches.push({ prepared, searchResults: searchResultsInKey });
+      });
+    });
+
+    if (pendingOriginalSearches.length > 0) {
+      // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional nested batch boundary for context locators.
+      await context.sync();
+    }
+
+    pendingOriginalSearches.forEach(({ prepared, searchResults }) => {
+      const occurrenceIndex = getOccurrenceIndexBeforeOffset(
+        prepared.locator.key,
+        prepared.issue.original,
+        prepared.locator.original_start_in_key
+      );
+      const targetRange = searchResults.items[occurrenceIndex];
+
+      if (!targetRange) {
+        appendDebugLog("warn", "locator key 内找不到 original", {
+          issueId: prepared.issue.id,
+          occurrenceIndex,
+          searchResultCount: searchResults.items.length,
+        });
+        summaryIssues.push(prepared.issue);
+        return;
+      }
+
+      targets.push({ issue: prepared.issue, targetRange });
+      firstTargetRange = firstTargetRange || targetRange;
+    });
+
+    completedIssues += batch.reduce((total, group) => total + group.issues.length, 0);
+    options.onProgress?.({
+      completedBatches: Math.min(Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1, totalBatches),
+      totalBatches,
+      completedIssues: Math.min(completedIssues, issues.length),
+      totalIssues: issues.length,
+    });
+  }
 
   return {
-    occurrenceIndex: getOccurrenceIndexBeforeOffset(
-      searchContext.occurrenceText,
-      anchorText,
-      searchContext.sourceStart + firstVisibleOffset
-    ),
-    searchResults,
+    targets,
+    summaryIssues,
+    fallbackAnchorRange: firstTargetRange || getRootRange(searchContext),
   };
 }
 
-function getFallbackAnchorRange(
-  searchContext: SearchContext,
-  anchorSearch: { occurrenceIndex: number; searchResults: Word.RangeCollection | null }
-): Word.Range {
-  const anchorRange = anchorSearch.searchResults?.items[anchorSearch.occurrenceIndex];
+function buildSearchGroups(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  summaryIssues: ProofreadIssue[]
+): SearchGroup[] {
+  const groupsById = new Map<string, SearchGroup>();
 
-  if (anchorRange) {
-    return anchorRange;
+  issues.forEach((issue) => {
+    const locator = getUsableLocator(sourceText, issue);
+
+    if (!locator) {
+      summaryIssues.push(issue);
+      return;
+    }
+
+    const groupId = `${locator.key_start}:${locator.key_end}:${locator.key}`;
+    const existing = groupsById.get(groupId);
+    const prepared = { issue, locator };
+
+    if (existing) {
+      existing.issues.push(prepared);
+      return;
+    }
+
+    groupsById.set(groupId, {
+      locator,
+      occurrenceIndex: getOccurrenceIndexBeforeOffset(sourceText, locator.key, locator.key_start),
+      issues: [prepared],
+    });
+  });
+
+  return Array.from(groupsById.values());
+}
+
+function getUsableLocator(sourceText: string, issue: ProofreadIssue): ProofreadLocator | null {
+  if (!isIssueLocatable(sourceText, issue)) {
+    return null;
   }
 
+  if (isValidLocator(sourceText, issue, issue.locator || null)) {
+    return issue.locator as ProofreadLocator;
+  }
+
+  return buildClientLocator(sourceText, issue);
+}
+
+function isValidLocator(
+  sourceText: string,
+  issue: ProofreadIssue,
+  locator: ProofreadLocator | null
+): boolean {
+  if (
+    !locator ||
+    !locator.key ||
+    typeof locator.key_start !== "number" ||
+    typeof locator.key_end !== "number" ||
+    typeof locator.original_start_in_key !== "number" ||
+    typeof locator.original_end_in_key !== "number"
+  ) {
+    return false;
+  }
+
+  if (
+    locator.key_start < 0 ||
+    locator.key_end < locator.key_start ||
+    locator.key_end > sourceText.length ||
+    locator.original_start_in_key < 0 ||
+    locator.original_end_in_key < locator.original_start_in_key ||
+    locator.original_end_in_key > locator.key.length
+  ) {
+    return false;
+  }
+
+  const key = sourceText.slice(locator.key_start, locator.key_end);
+  const originalInKey = locator.key.slice(
+    locator.original_start_in_key,
+    locator.original_end_in_key
+  );
+
+  return (
+    key === locator.key &&
+    originalInKey === issue.original &&
+    locator.key_start + locator.original_start_in_key === issue.start &&
+    locator.key_start + locator.original_end_in_key === issue.end
+  );
+}
+
+function buildClientLocator(sourceText: string, issue: ProofreadIssue): ProofreadLocator | null {
+  if (!hasUsableLocation(issue)) {
+    return null;
+  }
+
+  const start = issue.start as number;
+  const end = issue.end as number;
+
+  if (
+    issue.original.length >= MIN_ORIGINAL_LOCATOR_LENGTH &&
+    getOccurrenceCount(sourceText, issue.original) <= MAX_LOCATOR_OCCURRENCES
+  ) {
+    return {
+      key: issue.original,
+      key_start: start,
+      key_end: end,
+      original_start_in_key: 0,
+      original_end_in_key: issue.original.length,
+      strategy: "original",
+    };
+  }
+
+  for (const windowSize of CONTEXT_LOCATOR_WINDOWS) {
+    const keyStart = Math.max(0, start - windowSize);
+    const keyEnd = Math.min(sourceText.length, end + windowSize);
+    const key = sourceText.slice(keyStart, keyEnd);
+
+    if (key && getOccurrenceCount(sourceText, key) <= MAX_LOCATOR_OCCURRENCES) {
+      return {
+        key,
+        key_start: keyStart,
+        key_end: keyEnd,
+        original_start_in_key: start - keyStart,
+        original_end_in_key: end - keyStart,
+        strategy: "context",
+      };
+    }
+  }
+
+  return null;
+}
+
+function getRootRange(searchContext: SearchContext): Word.Range {
   return searchContext.rootKind === "body"
     ? (searchContext.root as Word.Body).getRange()
     : (searchContext.root as Word.Range);
-}
-
-function findFirstNonWhitespaceOffset(text: string): number {
-  const match = /\S/.exec(text);
-  return match ? match.index : -1;
 }
 
 function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
@@ -448,23 +557,41 @@ function hasReplacement(issue: ProofreadIssue): boolean {
   return typeof issue.replacement === "string" && issue.replacement.trim().length > 0;
 }
 
-function getOccurrenceIndexBeforeOffset(
-  text: string,
-  original: string,
-  targetStart: number
-): number {
+function getOccurrenceIndexBeforeOffset(text: string, target: string, targetStart: number): number {
   let count = 0;
   let searchFrom = 0;
 
   while (searchFrom < targetStart) {
-    const foundAt = text.indexOf(original, searchFrom);
+    const foundAt = text.indexOf(target, searchFrom);
 
     if (foundAt === -1 || foundAt >= targetStart) {
       break;
     }
 
     count += 1;
-    searchFrom = foundAt + original.length;
+    searchFrom = foundAt + 1;
+  }
+
+  return count;
+}
+
+function getOccurrenceCount(text: string, target: string): number {
+  if (!target) {
+    return 0;
+  }
+
+  let count = 0;
+  let searchFrom = 0;
+
+  while (searchFrom < text.length) {
+    const foundAt = text.indexOf(target, searchFrom);
+
+    if (foundAt === -1) {
+      break;
+    }
+
+    count += 1;
+    searchFrom = foundAt + target.length;
   }
 
   return count;
@@ -488,7 +615,7 @@ function formatFallbackComment(issues: ProofreadIssue[]): string {
       ? `\n\n另有 ${remainingCount} 条未定位建议，请在任务窗格中查看完整结果。`
       : "";
 
-  return `AI 审校：以下 ${issues.length} 条建议未能定位到具体原文片段，已汇总为单条批注。\n\n${formatComment(visibleIssues)}${remainingMessage}`;
+  return `AI 审校：以下 ${issues.length} 条建议未能精准写回，已汇总为单条批注。\n\n${formatComment(visibleIssues)}${remainingMessage}`;
 }
 
 function formatComment(issues: ProofreadIssue[]): string {

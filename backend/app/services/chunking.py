@@ -143,15 +143,26 @@ async def proofread_chunks(
 
 
 def globalize_issues(chunk: ProofreadChunk, issues: list[ProofreadIssue]) -> list[ChunkedProofreadIssue]:
-    return [
-        ChunkedProofreadIssue(
-            **issue.model_dump(),
-            chunk_index=chunk.index,
-            global_start=chunk.start + issue.start if issue.start is not None else None,
-            global_end=chunk.start + issue.end if issue.end is not None else None,
+    global_issues: list[ChunkedProofreadIssue] = []
+
+    for issue in issues:
+        payload = issue.model_dump()
+        locator = payload.get("locator")
+
+        if locator is not None:
+            locator["key_start"] += chunk.start
+            locator["key_end"] += chunk.start
+
+        global_issues.append(
+            ChunkedProofreadIssue(
+                **payload,
+                chunk_index=chunk.index,
+                global_start=chunk.start + issue.start if issue.start is not None else None,
+                global_end=chunk.start + issue.end if issue.end is not None else None,
+            )
         )
-        for issue in issues
-    ]
+
+    return global_issues
 
 
 def _find_chunk_boundary(text: str, start: int, target_end: int) -> int:

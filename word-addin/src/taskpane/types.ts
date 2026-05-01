@@ -1,3 +1,12 @@
+export interface ProofreadLocator {
+  key: string;
+  key_start: number;
+  key_end: number;
+  original_start_in_key: number;
+  original_end_in_key: number;
+  strategy: "original" | "context";
+}
+
 export interface ProofreadIssue {
   id: string;
   category: string;
@@ -7,6 +16,7 @@ export interface ProofreadIssue {
   suggestion: string;
   start?: number | null;
   end?: number | null;
+  locator?: ProofreadLocator | null;
 }
 
 export interface ProofreadResponse {
@@ -105,6 +115,13 @@ export interface IssueApplicationSummary {
   commentCount: number;
   revisionCount: number;
   fallbackCount: number;
+}
+
+export interface IssueApplicationProgress {
+  completedBatches: number;
+  totalBatches: number;
+  completedIssues: number;
+  totalIssues: number;
 }
 
 export interface PendingProofreadResult {

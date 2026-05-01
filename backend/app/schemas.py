@@ -45,6 +45,15 @@ class ProofreadRequest(BaseModel):
         return normalized
 
 
+class ProofreadLocator(BaseModel):
+    key: str = Field(..., min_length=1)
+    key_start: int = Field(..., ge=0)
+    key_end: int = Field(..., ge=0)
+    original_start_in_key: int = Field(..., ge=0)
+    original_end_in_key: int = Field(..., ge=0)
+    strategy: Literal["original", "context"]
+
+
 class ProofreadIssue(BaseModel):
     id: str
     category: str
@@ -54,6 +63,7 @@ class ProofreadIssue(BaseModel):
     suggestion: str
     start: int | None = Field(default=None, ge=0)
     end: int | None = Field(default=None, ge=0)
+    locator: ProofreadLocator | None = None
 
     @field_validator("replacement")
     @classmethod

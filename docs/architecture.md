@@ -259,7 +259,7 @@ Content-Type: application/json
   "model": "Qwen3.6-35B-A3B-4.4bit-msq",
   "input": "系统审校要求...\n\n书籍背景信息...\n\n<text>\n需要审校的 Word 选区文本\n</text>",
   "temperature": 0.2,
-  "max_output_tokens": 16384,
+  "max_output_tokens": 8192,
   "text": {
     "format": {
       "type": "json_object"
@@ -319,7 +319,7 @@ Content-Type: application/json
     {"role": "user", "content": "书籍背景信息...\n\n<text>\n需要审校的 Word 选区文本\n</text>"}
   ],
   "temperature": 0.2,
-  "max_tokens": 16384,
+  "max_tokens": 8192,
   "reasoning": {"enabled": false}
 }
 ```
@@ -328,7 +328,7 @@ Chat 模式使用标准 Chat Completions request/response：后端请求 `/v1/ch
 
 ### 3. 快速/深度审校
 
-`proofread_mode=fast` 使用更短 prompt 和16K 输出上限，只抓明显问题，默认 `AI_FAST_MAX_TOKENS=16384`。`proofread_mode=thinking` 使用更细审要求和32K 输出上限，默认 `AI_THINKING_MAX_TOKENS=32768`。两种模式都要求 AI 不返回 `start/end`。
+`proofread_mode=fast` 使用更短 prompt 和8K 输出上限，只抓明显问题，默认 `AI_FAST_MAX_TOKENS=8192`。`proofread_mode=thinking` 使用更细审要求和16K 输出上限，默认 `AI_THINKING_MAX_TOKENS=16384`。两种模式都要求 AI 不返回 `start/end`。
 
 ### 4. 流式 Responses 调用
 

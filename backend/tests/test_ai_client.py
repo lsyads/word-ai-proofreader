@@ -157,7 +157,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert call["timeout"] == 12
     assert call["json"]["model"] == "test-model"
     assert call["json"]["temperature"] == 0.2
-    assert call["json"]["max_output_tokens"] == 16384
+    assert call["json"]["max_output_tokens"] == 8192
     assert call["json"]["text"] == {"format": {"type": "json_object"}}
     assert "previous_response_id" not in call["json"]
     assert "这是一段文本。" in call["json"]["input"]
@@ -176,7 +176,7 @@ def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
     result = asyncio.run(proofread_with_ai("文本", book(), settings=settings(), proofread_mode="thinking"))
 
     assert result.response_id == "resp-1"
-    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 32768
+    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 16384
     assert "深度审校" in FakeAsyncClient.calls[0]["json"]["input"]
 
 
@@ -202,7 +202,7 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.test/v1/chat/completions"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
-    assert call["json"]["max_tokens"] == 16384
+    assert call["json"]["max_tokens"] == 8192
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]

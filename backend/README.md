@@ -154,14 +154,15 @@ backend/
         "key_end": 4,
         "original_start_in_key": 0,
         "original_end_in_key": 4,
-        "strategy": "original"
+        "strategy": "original",
+        "key_occurrence_index": 0
       }
     }
   ]
 }
 ```
 
-`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但仍要求 AI 只审校请求里的 Word 选区文本。AI 原始输出不包含 `start/end/comment/locator`；后端在返回给插件前计算 `start/end/locator`。`locator` 是 Word 插件精准写回用的低重复定位提示：长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时返回 `null` 并由前端汇总批注。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。`reasoning_enabled` 默认 `false`；Chat 模式下会写入请求体的 `reasoning.enabled`。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但仍要求 AI 只审校请求里的 Word 选区文本。AI 原始输出不包含 `start/end/comment/locator`；后端在返回给插件前计算 `start/end/locator`。`locator` 是 Word 插件精准写回用的低重复定位提示：长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，`key_occurrence_index` 记录 key 在审校文本中的第几次出现以支持历史回写，仍不可靠时返回 `null` 并由前端汇总批注。AI 原始输出可以包含 `replacement`，空字符串会归一为 `null`。如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明只是加/删/改空白，后端会过滤该 issue，不返回给 Word 插件。`provider_api` 支持 `responses`、`chat`，`proofread_mode` 支持 `fast`、`thinking`。`reasoning_enabled` 默认 `false`；Chat 模式下会写入请求体的 `reasoning.enabled`。
 
 ### `POST /api/proofread/stream`
 

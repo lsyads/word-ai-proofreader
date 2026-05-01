@@ -639,6 +639,10 @@ function isPreciselyWritableIssue(issue: ProofreadIssue): boolean {
     return false;
   }
 
+  if (pendingResult?.sourceTextAvailable === false) {
+    return hasReplayableLocator(issue);
+  }
+
   if (issue.locator) {
     return true;
   }
@@ -837,13 +841,55 @@ function refreshHistory() {
 }
 
 function openHistoryEntry(entry: ProofreadHistoryEntry) {
-  pendingResult = null;
   issueReviewState = {
     selectedIssueIds: entry.selectedIssueIds,
     filter: createDefaultFilterState(),
   };
-  renderHistoryEntry(entry);
+
+  if (isReplayableHistoryEntry(entry)) {
+    pendingResult = {
+      sessionId: entry.sessionId,
+      sourceText: "",
+      sourceTextAvailable: false,
+      historyTextPreview: entry.textPreview,
+      book: {
+        title: entry.bookTitle || "历史记录",
+        introduction: entry.bookIntroductionPreview || null,
+      },
+      scope: entry.scope,
+      taskId: entry.taskId || null,
+      totalChunks: entry.totalChunks,
+      completedChunks: entry.completedChunks,
+      failedChunks: entry.failedChunks,
+      providerApi: entry.providerApi,
+      proofreadMode: entry.proofreadMode,
+      reasoningEnabled: entry.reasoningEnabled,
+      issues: entry.issues,
+    };
+    taskState = entry.status;
+    getSelect("application-mode").value = entry.applicationMode;
+    renderCurrentPendingResult();
+    showMessage("已从历史恢复，可再次应用到当前 Word 文档。", "default");
+  } else {
+    pendingResult = null;
+    renderHistoryEntry(entry);
+    showMessage("该历史记录缺少可回写定位包，已按只读方式打开。", "default");
+  }
+
   updateActionButtons();
+}
+
+function isReplayableHistoryEntry(entry: ProofreadHistoryEntry): boolean {
+  return entry.replayable === true && entry.issues.some(hasReplayableLocator);
+}
+
+function hasReplayableLocator(issue: ProofreadIssue): boolean {
+  return (
+    Boolean(issue.locator?.key) &&
+    typeof issue.locator?.key_occurrence_index === "number" &&
+    typeof issue.locator.original_start_in_key === "number" &&
+    typeof issue.locator.original_end_in_key === "number"
+  );
 }
 
 function initializeControls() {

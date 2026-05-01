@@ -201,6 +201,7 @@ def build_locator(
             original_start_in_key=0,
             original_end_in_key=len(original),
             strategy="original",
+            key_occurrence_index=_count_occurrences_before_offset(text, original, start),
         )
 
     for window in CONTEXT_LOCATOR_WINDOWS:
@@ -218,6 +219,7 @@ def build_locator(
             original_start_in_key=start - key_start,
             original_end_in_key=end - key_start,
             strategy="context",
+            key_occurrence_index=_count_occurrences_before_offset(text, key, key_start),
         )
 
     return None
@@ -233,6 +235,24 @@ def _count_occurrences(text: str, needle: str) -> int:
     while search_from < len(text):
         found_at = text.find(needle, search_from)
         if found_at == -1:
+            break
+
+        count += 1
+        search_from = found_at + 1
+
+    return count
+
+
+def _count_occurrences_before_offset(text: str, needle: str, target_start: int) -> int:
+    if not needle:
+        return 0
+
+    count = 0
+    search_from = 0
+
+    while search_from < target_start:
+        found_at = text.find(needle, search_from)
+        if found_at == -1 or found_at >= target_start:
             break
 
         count += 1

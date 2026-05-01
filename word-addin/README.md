@@ -75,7 +75,7 @@ word-addin/
     9. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，只对已选、可精准写回且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。
     10. 修订模式中已选、可精准写回但无 `replacement` 的 issue 回退为原位批注；未选 issue 不写回 Word。
     11. “应用到 Word”不限制总条数，但会按 8 个 locator key 一批执行 Word search，并在任务窗格显示应用进度。
-    11. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；历史记录会显示审校时的书名、已选问题 ID 和跳过数量，开发阶段不兼容旧历史数据。
+    12. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；新历史保存 locator 定位包和 `key_occurrence_index`，不保存完整审校正文。可回写历史打开后恢复为当前结果，可筛选、勾选、定位并再次应用；旧历史缺少定位包时只读。
 
 - `assets/`
   - 插件图标和 logo。

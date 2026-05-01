@@ -252,6 +252,19 @@ async function createSearchContext(
   scope: ProofreadScope,
   sourceText: string
 ): Promise<SearchContext> {
+  if (sourceText.length === 0) {
+    appendDebugLog("info", "使用历史 locator 定位，将在正文范围内搜索", {
+      scope,
+      locatorOnly: true,
+    });
+    return {
+      root: context.document.body,
+      rootKind: "body",
+      occurrenceText: "",
+      canSearch: true,
+    };
+  }
+
   if (scope === "document") {
     appendDebugLog("info", "使用正文范围定位，不在应用阶段读取全文", {
       sourceTextLength: sourceText.length,
@@ -269,12 +282,13 @@ async function createSearchContext(
   await context.sync();
 
   const selectionText = (selection.text || "").trim();
-  const canSearch = selectionText === sourceText;
+  const canSearch = sourceText.length === 0 || selectionText === sourceText;
 
   appendDebugLog(canSearch ? "info" : "warn", "使用当前选区范围定位", {
     sourceTextLength: sourceText.length,
     selectionTextLength: selectionText.length,
     canSearch,
+    locatorOnly: sourceText.length === 0,
   });
 
   return {
@@ -428,7 +442,10 @@ function buildSearchGroups(
 
     groupsById.set(groupId, {
       locator,
-      occurrenceIndex: getOccurrenceIndexBeforeOffset(sourceText, locator.key, locator.key_start),
+      occurrenceIndex:
+        sourceText.length > 0
+          ? getOccurrenceIndexBeforeOffset(sourceText, locator.key, locator.key_start)
+          : (locator.key_occurrence_index as number),
       issues: [prepared],
     });
   });
@@ -437,6 +454,10 @@ function buildSearchGroups(
 }
 
 function getUsableLocator(sourceText: string, issue: ProofreadIssue): ProofreadLocator | null {
+  if (sourceText.length === 0) {
+    return isReplayableLocator(issue.locator || null) ? (issue.locator as ProofreadLocator) : null;
+  }
+
   if (!isIssueLocatable(sourceText, issue)) {
     return null;
   }
@@ -446,6 +467,16 @@ function getUsableLocator(sourceText: string, issue: ProofreadIssue): ProofreadL
   }
 
   return buildClientLocator(sourceText, issue);
+}
+
+function isReplayableLocator(locator: ProofreadLocator | null): boolean {
+  return (
+    Boolean(locator?.key) &&
+    typeof locator?.key_occurrence_index === "number" &&
+    typeof locator.original_start_in_key === "number" &&
+    typeof locator.original_end_in_key === "number" &&
+    locator.original_end_in_key <= locator.key.length
+  );
 }
 
 function isValidLocator(
@@ -508,6 +539,7 @@ function buildClientLocator(sourceText: string, issue: ProofreadIssue): Proofrea
       original_start_in_key: 0,
       original_end_in_key: issue.original.length,
       strategy: "original",
+      key_occurrence_index: getOccurrenceIndexBeforeOffset(sourceText, issue.original, start),
     };
   }
 
@@ -524,6 +556,7 @@ function buildClientLocator(sourceText: string, issue: ProofreadIssue): Proofrea
         original_start_in_key: start - keyStart,
         original_end_in_key: end - keyStart,
         strategy: "context",
+        key_occurrence_index: getOccurrenceIndexBeforeOffset(sourceText, key, keyStart),
       };
     }
   }

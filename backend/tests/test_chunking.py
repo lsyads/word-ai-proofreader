@@ -76,6 +76,7 @@ def test_globalize_issues_adds_chunk_offsets():
             original_start_in_key=1,
             original_end_in_key=3,
             strategy="context",
+            key_occurrence_index=0,
         ),
     )
 
@@ -90,6 +91,7 @@ def test_globalize_issues_adds_chunk_offsets():
     assert global_issue.locator.key_start == 3002
     assert global_issue.locator.key_end == 3006
     assert global_issue.locator.original_start_in_key == 1
+    assert global_issue.locator.key_occurrence_index == 0
 
 
 def test_proofread_chunked_aggregates_issues():

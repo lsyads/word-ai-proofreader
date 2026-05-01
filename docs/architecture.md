@@ -93,7 +93,8 @@ Response:
         "key_end": 4,
         "original_start_in_key": 0,
         "original_end_in_key": 4,
-        "strategy": "original"
+        "strategy": "original",
+        "key_occurrence_index": 0
       }
     }
   ]
@@ -104,7 +105,7 @@ Response:
 
 `book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。`reasoning_enabled` 可选，默认 `false`，用于控制 Chat Completions 请求体中的 `reasoning.enabled`，不改变审校 prompt。
 
-AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end` 和可选 `locator`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end/locator: null`。`locator.key` 是 Word 插件搜索用的低重复片段；长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时为空并在应用时汇总批注。
+AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end` 和可选 `locator`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end/locator: null`。`locator.key` 是 Word 插件搜索用的低重复片段；`key_occurrence_index` 固化 key 在审校文本中的 occurrence，用于历史记录不保存完整正文时再次回写；长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时为空并在应用时汇总批注。
 
 `replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
@@ -414,7 +415,7 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 8 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则退回当前选区或正文起点。
+分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 8 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则退回当前选区或正文起点。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
@@ -424,7 +425,7 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 插件运行审校时，主按钮会从“AI 审校”切换为“停止审校”。点击停止后，前端显示“正在停止审校，当前分块完成后结束”，使用 `AbortController` 中断当前请求；如果当前是分块任务，还会调用 `DELETE /api/proofread/tasks/{task_id}` 标记后端任务取消，并查询任务快照保留已完成分块返回的 issues。当前 chunk 超过等待阈值后，“重试当前分块”按钮可用；任务结束后仍有失败 chunk 时，“重试失败分块”按钮可用。
 
-插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数、已选问题 ID、跳过数量和应用统计；导入时只接受当前开发版 schema。历史记录不承担 AI 上下文续接，后端每次审校都发起独立 AI 请求。
+插件会在本地 `localStorage` 保存最近 20 条审校历史，用于任务窗格回看，并支持清空、另存为 JSON、导入 JSON。历史记录会显示审校时的书名、范围、分块进度、问题数、已选问题 ID、跳过数量和应用统计；新历史保存 locator 定位包但不保存完整审校正文。可回写历史打开后恢复为当前结果，可筛选、勾选、定位和再次应用到当前 Word 文档；旧历史缺少 `key_occurrence_index` 时按只读方式打开。历史记录不承担 AI 上下文续接，后端每次审校都发起独立 AI 请求。
 
 ## 调试日志
 

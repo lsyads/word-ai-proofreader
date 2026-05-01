@@ -269,6 +269,7 @@ def test_locate_issues_builds_original_locator_for_unique_long_original():
     assert located.locator.key == "唯一较长原文"
     assert located.locator.key_start == 3
     assert located.locator.key_end == 9
+    assert located.locator.key_occurrence_index == 0
 
 
 def test_locate_issues_builds_context_locator_for_short_repeated_original():
@@ -292,6 +293,28 @@ def test_locate_issues_builds_context_locator_for_short_repeated_original():
     assert located.locator.key == text
     assert located.locator.original_start_in_key == 11
     assert located.locator.original_end_in_key == 12
+    assert located.locator.key_occurrence_index == 0
+
+
+def test_locate_issues_records_repeated_original_locator_occurrence_index():
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="重复较长原文",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues(
+        "重复较长原文。重复较长原文。重复较长原文。",
+        [
+            issue,
+            issue.model_copy(update={"id": "issue-2"}),
+            issue.model_copy(update={"id": "issue-3"}),
+        ],
+    )
+
+    assert [issue.locator.key_occurrence_index for issue in located if issue.locator] == [0, 1, 2]
 
 
 def test_locate_issues_omits_locator_when_context_is_still_repeated():

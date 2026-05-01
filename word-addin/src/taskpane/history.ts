@@ -7,6 +7,7 @@ import {
   PendingProofreadResult,
   ProofreadHistoryEntry,
   ProofreadIssue,
+  ProofreadLocator,
   ProofreadMode,
   ProofreadScope,
   ProviderAPI,
@@ -14,7 +15,11 @@ import {
 } from "./types";
 
 const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v2";
+const HISTORY_SCHEMA_VERSION = 3;
 const MAX_HISTORY_ENTRIES = 20;
+const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
+const MAX_LOCATOR_OCCURRENCES = 3;
+const CONTEXT_LOCATOR_WINDOWS = [16, 32, 64];
 
 export function saveHistoryEntry(input: {
   status: TaskState;
@@ -45,15 +50,17 @@ export function saveHistoryEntry(input: {
   }
 
   const entries = getHistoryEntries();
+  const issues = normalizeIssuesForHistory(input.text, input.issues);
   const entry: ProofreadHistoryEntry = {
     id: createLocalId(),
+    historySchemaVersion: HISTORY_SCHEMA_VERSION,
     sessionId: input.sessionId,
     createdAt: new Date().toISOString(),
     textPreview: input.text.trim().slice(0, 40),
     bookTitle: input.book.title,
     bookIntroductionPreview: (input.book.introduction || "").trim().slice(0, 40),
     status: input.status,
-    issueCount: input.issues.length,
+    issueCount: issues.length,
     locatedIssueCount: input.locatedIssueCount,
     revisionCount: input.revisionCount,
     fallbackCount: input.fallbackCount,
@@ -66,14 +73,15 @@ export function saveHistoryEntry(input: {
     totalChunks: input.totalChunks,
     completedChunks: input.completedChunks,
     failedChunks: input.failedChunks,
-    globalLocatedIssueCount: input.issues.filter(
+    globalLocatedIssueCount: issues.filter(
       (issue) => typeof issue.start === "number" && typeof issue.end === "number"
     ).length,
-    issues: input.issues,
+    issues,
     selectedIssueIds: input.selectedIssueIds,
     skippedIssueCount: input.skippedIssueCount,
     insertedComment: input.insertedComment,
     appliedToWord: input.appliedToWord,
+    replayable: issues.some(hasReplayableLocator),
     errorMessage: input.errorMessage,
   };
 
@@ -93,7 +101,7 @@ export function savePendingResultHistory(input: {
 
   saveHistoryEntry({
     status: input.status,
-    text: input.result.sourceText,
+    text: getHistoryText(input.result),
     book: input.result.book,
     issues: input.result.issues,
     insertedComment: false,
@@ -133,7 +141,7 @@ export function saveAppliedResultHistory(input: {
 
   saveHistoryEntry({
     status: "succeeded",
-    text: input.result.sourceText,
+    text: getHistoryText(input.result),
     book: input.result.book,
     issues: input.result.issues,
     insertedComment: input.summary.commentCount > 0 || input.summary.fallbackCount > 0,
@@ -204,6 +212,160 @@ function createLocalId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getHistoryText(result: PendingProofreadResult): string {
+  return result.sourceText || result.historyTextPreview || result.book.title;
+}
+
+function normalizeIssuesForHistory(text: string, issues: ProofreadIssue[]): ProofreadIssue[] {
+  return issues.map((issue) => {
+    if (!issue.locator) {
+      const locator = buildHistoryLocator(text, issue);
+      return locator ? { ...issue, locator } : issue;
+    }
+
+    const locator = normalizeLocatorForHistory(text, issue, issue.locator);
+    return locator === issue.locator ? issue : { ...issue, locator };
+  });
+}
+
+function buildHistoryLocator(text: string, issue: ProofreadIssue): ProofreadLocator | null {
+  if (
+    !text ||
+    typeof issue.start !== "number" ||
+    typeof issue.end !== "number" ||
+    issue.end > text.length ||
+    text.slice(issue.start, issue.end) !== issue.original
+  ) {
+    return null;
+  }
+
+  if (
+    issue.original.length >= MIN_ORIGINAL_LOCATOR_LENGTH &&
+    getOccurrenceCount(text, issue.original) <= MAX_LOCATOR_OCCURRENCES
+  ) {
+    return {
+      key: issue.original,
+      key_start: issue.start,
+      key_end: issue.end,
+      original_start_in_key: 0,
+      original_end_in_key: issue.original.length,
+      strategy: "original",
+      key_occurrence_index: getOccurrenceIndexBeforeOffset(text, issue.original, issue.start),
+    };
+  }
+
+  for (const windowSize of CONTEXT_LOCATOR_WINDOWS) {
+    const keyStart = Math.max(0, issue.start - windowSize);
+    const keyEnd = Math.min(text.length, issue.end + windowSize);
+    const key = text.slice(keyStart, keyEnd);
+
+    if (key && getOccurrenceCount(text, key) <= MAX_LOCATOR_OCCURRENCES) {
+      return {
+        key,
+        key_start: keyStart,
+        key_end: keyEnd,
+        original_start_in_key: issue.start - keyStart,
+        original_end_in_key: issue.end - keyStart,
+        strategy: "context",
+        key_occurrence_index: getOccurrenceIndexBeforeOffset(text, key, keyStart),
+      };
+    }
+  }
+
+  return null;
+}
+
+function normalizeLocatorForHistory(
+  text: string,
+  issue: ProofreadIssue,
+  locator: ProofreadLocator
+): ProofreadLocator {
+  if (typeof locator.key_occurrence_index === "number") {
+    return locator;
+  }
+
+  if (!canUseTextToNormalizeLocator(text, issue, locator)) {
+    return locator;
+  }
+
+  return {
+    ...locator,
+    key_occurrence_index: getOccurrenceIndexBeforeOffset(text, locator.key, locator.key_start),
+  };
+}
+
+function canUseTextToNormalizeLocator(
+  text: string,
+  issue: ProofreadIssue,
+  locator: ProofreadLocator
+): boolean {
+  return (
+    text.length > 0 &&
+    typeof issue.start === "number" &&
+    typeof issue.end === "number" &&
+    issue.end <= text.length &&
+    locator.key_end <= text.length &&
+    text.slice(issue.start, issue.end) === issue.original &&
+    text.slice(locator.key_start, locator.key_end) === locator.key
+  );
+}
+
+function getOccurrenceIndexBeforeOffset(text: string, target: string, targetStart: number): number {
+  let count = 0;
+  let searchFrom = 0;
+
+  while (searchFrom < targetStart) {
+    const foundAt = text.indexOf(target, searchFrom);
+
+    if (foundAt === -1 || foundAt >= targetStart) {
+      break;
+    }
+
+    count += 1;
+    searchFrom = foundAt + 1;
+  }
+
+  return count;
+}
+
+function getOccurrenceCount(text: string, target: string): number {
+  if (!target) {
+    return 0;
+  }
+
+  let count = 0;
+  let searchFrom = 0;
+
+  while (searchFrom < text.length) {
+    const foundAt = text.indexOf(target, searchFrom);
+
+    if (foundAt === -1) {
+      break;
+    }
+
+    count += 1;
+    searchFrom = foundAt + 1;
+  }
+
+  return count;
+}
+
+function hasReplayableLocator(issue: ProofreadIssue): boolean {
+  return isReplayableLocator(issue.locator || null);
+}
+
+function isReplayableLocator(locator: ProofreadLocator | null): boolean {
+  return (
+    Boolean(locator?.key) &&
+    typeof locator?.key_occurrence_index === "number" &&
+    typeof locator.key_start === "number" &&
+    typeof locator.key_end === "number" &&
+    typeof locator.original_start_in_key === "number" &&
+    typeof locator.original_end_in_key === "number" &&
+    (locator.strategy === "original" || locator.strategy === "context")
+  );
+}
+
 function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
   if (!isRecord(value)) {
     return false;
@@ -211,6 +373,8 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
 
   return (
     typeof value.id === "string" &&
+    (typeof value.historySchemaVersion === "undefined" ||
+      typeof value.historySchemaVersion === "number") &&
     typeof value.sessionId === "string" &&
     typeof value.createdAt === "string" &&
     typeof value.textPreview === "string" &&
@@ -237,6 +401,7 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     typeof value.skippedIssueCount === "number" &&
     typeof value.insertedComment === "boolean" &&
     typeof value.appliedToWord === "boolean" &&
+    (typeof value.replayable === "undefined" || typeof value.replayable === "boolean") &&
     (typeof value.errorMessage === "undefined" || typeof value.errorMessage === "string")
   );
 }
@@ -258,7 +423,28 @@ function isProofreadIssue(value: unknown): value is ProofreadIssue {
     (typeof value.start === "undefined" ||
       value.start === null ||
       typeof value.start === "number") &&
-    (typeof value.end === "undefined" || value.end === null || typeof value.end === "number")
+    (typeof value.end === "undefined" || value.end === null || typeof value.end === "number") &&
+    (typeof value.locator === "undefined" ||
+      value.locator === null ||
+      isProofreadLocator(value.locator))
+  );
+}
+
+function isProofreadLocator(value: unknown): value is ProofreadLocator {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.key === "string" &&
+    typeof value.key_start === "number" &&
+    typeof value.key_end === "number" &&
+    typeof value.original_start_in_key === "number" &&
+    typeof value.original_end_in_key === "number" &&
+    (value.strategy === "original" || value.strategy === "context") &&
+    (typeof value.key_occurrence_index === "undefined" ||
+      value.key_occurrence_index === null ||
+      typeof value.key_occurrence_index === "number")
   );
 }
 

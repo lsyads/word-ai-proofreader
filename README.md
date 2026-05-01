@@ -26,12 +26,12 @@
 - Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
 - 分块审校使用 `POST /api/proofread/tasks` 创建内存异步任务，优先通过 `GET /api/proofread/tasks/{task_id}/events` 获取 SSE 进度；进度流不可用时回退 `GET /api/proofread/tasks/{task_id}` 轮询。
 - 分块审校运行中，当前块超过等待阈值后可手动“重试当前分块”；任务结束后如存在失败块，可手动“重试失败分块”并继续合并结果。
-- AI 原始输出只包含精简 `issues[]`，不返回 `start/end/locator`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置和低重复 `locator`。
-- 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`，并平移 `locator.key_start/key_end`；插件用 `locator.key` 分批定位，避免长文或全书中反复全文搜索。
+- AI 原始输出只包含精简 `issues[]`，不返回 `start/end/locator`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置和带 `key_occurrence_index` 的低重复 `locator`。
+- 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`，并平移 `locator.key_start/key_end`；插件用 `locator.key` 分批定位，避免长文或全书中反复全文搜索。历史记录不保存完整审校正文，但新历史可用 locator 定位包恢复后再次回写。
 - 审校完成后先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选问题，并可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项。
 - 可定位问题支持在应用前点击“定位”选中 Word 原文；点击“应用到 Word”时，插件只把已勾选的问题按当前“批注模式/修订模式”插入批注或生成修订。
 - 可定位问题会逐条写回对应原文片段；修订模式下可定位且有 `replacement` 的问题生成 Word 修订，可定位但无 `replacement` 的问题回退为原位批注；已勾选但未定位的问题会在“应用到 Word”时合并为一条范围起点汇总批注，未勾选问题不会写回 Word。
-- 插件支持停止当前审校，并在本地保存最近 20 条新 schema 审校历史用于回看、清空、另存为 JSON 和导入 JSON；历史记录保存已选问题 ID 和跳过数量，开发阶段不兼容旧历史数据。
+- 插件支持停止当前审校，并在本地保存最近 20 条新 schema 审校历史用于回看、清空、另存为 JSON 和导入 JSON；历史记录保存已选问题 ID、跳过数量和 locator 定位包，不保存完整正文；新历史打开后可像当前结果一样筛选、勾选、定位和回写，旧历史缺少定位包时只读。
 - 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
 
 完整通讯链路和数据格式见 [docs/architecture.md](docs/architecture.md)。
@@ -205,7 +205,7 @@ curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
 14. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
 15. 审校运行中点击“停止审校”，确认提示“当前分块完成后结束”；分块审校会保留已收到的 issues，可继续查看或应用，并在历史记录中保存为已停止。
 16. 分块审校当前块等待超过阈值后，确认“重试当前分块”按钮可用；部分完成或失败后如存在失败块，确认“重试失败分块”按钮可用并能继续合并结果。
-16. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理；导入旧 schema 历史会提示格式不兼容。
+17. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理；打开新历史后可再次筛选、勾选、定位并应用到当前 Word 文档，旧历史缺少定位包时只读。
 
 ## 测试与验证
 

@@ -52,6 +52,7 @@ class ProofreadLocator(BaseModel):
     original_start_in_key: int = Field(..., ge=0)
     original_end_in_key: int = Field(..., ge=0)
     strategy: Literal["original", "context"]
+    key_occurrence_index: int | None = Field(default=None, ge=0)
 
 
 class ProofreadIssue(BaseModel):

@@ -5,6 +5,7 @@ export interface ProofreadLocator {
   original_start_in_key: number;
   original_end_in_key: number;
   strategy: "original" | "context";
+  key_occurrence_index?: number | null;
 }
 
 export interface ProofreadIssue {
@@ -83,6 +84,7 @@ export type ProofreadScope = "selection" | "document";
 
 export interface ProofreadHistoryEntry {
   id: string;
+  historySchemaVersion?: number;
   sessionId: string;
   createdAt: string;
   textPreview: string;
@@ -108,6 +110,7 @@ export interface ProofreadHistoryEntry {
   skippedIssueCount: number;
   insertedComment: boolean;
   appliedToWord: boolean;
+  replayable?: boolean;
   errorMessage?: string;
 }
 
@@ -127,6 +130,8 @@ export interface IssueApplicationProgress {
 export interface PendingProofreadResult {
   sessionId: string;
   sourceText: string;
+  sourceTextAvailable?: boolean;
+  historyTextPreview?: string;
   book: BookInfo;
   scope: ProofreadScope;
   taskId: string | null;

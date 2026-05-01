@@ -94,7 +94,8 @@ Response:
         "key_end": 4,
         "original_start_in_key": 0,
         "original_end_in_key": 4,
-        "strategy": "original"
+        "strategy": "original",
+        "key_occurrence_index": 0
       }
     }
   ]
@@ -114,7 +115,7 @@ Response:
 - `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
 - 纯空白差异过滤：如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端会过滤该 issue，不返回给 Word 插件。
 - `start`、`end`：后端按 `original` 在请求文本中计算，`start` 为包含式起点，`end` 为不包含式终点，均相对请求文本。重复 `original` 按 issue 顺序匹配下一处；找不到时返回 `null`。
-- `locator`：可选精准写回定位提示。`key` 是 Word 插件优先搜索的低重复片段；`key_start/key_end` 是 `key` 在请求文本中的位置；`original_start_in_key/original_end_in_key` 是 `original` 在 `key` 内的位置；`strategy` 为 `original` 或 `context`。长且低重复的 `original` 直接作为 key；短文本或重复文本会使用上下文 key；仍不可靠时返回 `null`，前端应用时降级为汇总批注。
+- `locator`：可选精准写回定位提示。`key` 是 Word 插件优先搜索的低重复片段；`key_start/key_end` 是 `key` 在请求文本中的位置；`original_start_in_key/original_end_in_key` 是 `original` 在 `key` 内的位置；`strategy` 为 `original` 或 `context`；`key_occurrence_index` 是 `key` 在请求文本中的第几次出现，用于历史记录不保存完整正文时再次回写。长且低重复的 `original` 直接作为 key；短文本或重复文本会使用上下文 key；仍不可靠时返回 `null`，前端应用时降级为汇总批注。
 - `issues` 为空表示未发现明显问题。
 - `issues` 为空时，Word 插件只在任务窗格显示结果，不插入批注。
 
@@ -272,7 +273,7 @@ Response:
 8. 用户点击“应用 N 条到 Word”后，插件只写回已勾选问题；批注模式按 `locator.key` 去重分批搜索并精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将已勾选、可定位且有 `replacement` 的问题替换为 Word 原生修订。
 9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但无可靠 `locator` 或 Word 搜索失败的问题统一合并为一条简短汇总批注，优先锚定在本次第一个成功定位 range，找不到时退回当前选区或正文起点；未勾选问题不写回 Word。批量应用不限制总条数，但按小批次 `context.sync()` 并在任务窗格显示进度。
 10. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
-11. 插件支持清空当前结果、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入；历史记录保存 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。
+11. 插件支持清空当前结果、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入；新历史记录保存 `selectedIssueIds`、`skippedIssueCount` 和 locator 定位包，不保存完整审校正文。可回写历史打开后恢复为当前结果，可筛选、勾选、定位并再次应用；旧历史缺少定位包时只读。
 12. 补充后端测试、插件 lint/build 验证和本地联调说明。
 
 ## 本地运行
@@ -342,12 +343,12 @@ npm run dev-server
 6. 如果存在审校问题，确认审校完成后只在任务窗格展示结果，不立即写入 Word。
 7. 使用筛选器、复选框和批量选择按钮调整待应用问题；点击单条“定位”，确认 Word 选中对应原文。
 8. 点击“应用 N 条到 Word”后，确认只有已勾选的可定位问题批注在对应原文片段上；修订模式下确认已勾选、可定位且有 `replacement` 的问题生成 Word 修订。
-9. 确认已勾选、可定位但无 `replacement` 的问题回退为原位批注，已勾选但未定位问题合并为一条范围起点汇总批注，未勾选问题不写回。
+9. 确认已勾选、可定位但无 `replacement` 的问题回退为原位批注，已勾选但未定位问题合并为一条优先锚定在首个成功定位 range 的汇总批注，未勾选问题不写回。
 10. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
 11. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
 12. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
 13. 切换“批注模式/修订模式”，确认批注模式不改正文，修订模式生成可接受/拒绝的 Word 修订。
-14. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理，旧 schema 历史导入失败并显示格式不兼容。
+14. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理；打开新历史后可再次筛选、勾选、定位并应用到当前 Word 文档，旧历史缺少定位包时只读。
 
 ## 验收标准
 
@@ -367,7 +368,7 @@ npm run dev-server
 - `reasoning_enabled` 默认关闭；开启时 Chat 请求体包含 `"reasoning": {"enabled": true}`，关闭时包含 `"reasoning": {"enabled": false}`。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区超过 7000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
-- 分块任务返回全局位置 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标；前端据此分批定位重复原文 occurrence。
+- 分块任务返回全局位置 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标；`locator.key_occurrence_index` 保持不变；前端据此分批定位重复原文 occurrence。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
 - 当前 chunk 审校超过前端阈值后，任务窗格启用“重试当前分块”；任务结束后如存在失败 chunk，启用“重试失败分块”。
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数、失败原因和累计问题数。
@@ -382,4 +383,4 @@ npm run dev-server
 - 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题合并为一条锚定在首个成功定位 range 或范围起点的汇总批注；未选问题不写回。
 - 后端返回空 `issues[]` 时，插件显示未发现明显问题，且不插入批注。
 - 审校运行中点击“停止审校”时，插件中断请求、恢复按钮、不插入批注。
-- 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；历史记录包含 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。
+- 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；历史记录包含 `selectedIssueIds`、`skippedIssueCount` 和不含完整正文的 locator 定位包。可回写历史打开后功能与当前审校结果一致；旧历史缺少 locator occurrence 时只读。

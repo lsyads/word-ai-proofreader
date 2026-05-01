@@ -335,10 +335,10 @@ function renderIssueItem(input: {
   const issue = input.issue;
   const locatable = input.sourceText
     ? isIssueLocatable(input.sourceText, issue)
-    : isLocatedIssue(issue);
+    : hasReplayableLocator(issue);
   const preciselyWritable = input.sourceText
     ? isPreciselyWritableIssue(input.sourceText, issue)
-    : Boolean(locatable && issue.locator);
+    : hasReplayableLocator(issue);
   const canLocate = Boolean(input.sourceText && locatable && !input.readonly);
   const needsReview = !hasReplacement(issue);
   const statusClass = preciselyWritable ? "is-located" : "is-unlocated";
@@ -473,13 +473,22 @@ function renderFilterOption(value: string, label: string, selectedValue: string)
 }
 
 function renderContextPreview(sourceText: string | undefined, issue: ProofreadIssue): string {
-  if (!sourceText || typeof issue.start !== "number" || typeof issue.end !== "number") {
+  if (sourceText && typeof issue.start === "number" && typeof issue.end === "number") {
+    const before = sourceText.slice(Math.max(0, issue.start - 24), issue.start);
+    const original = sourceText.slice(issue.start, issue.end);
+    const after = sourceText.slice(issue.end, Math.min(sourceText.length, issue.end + 24));
+
+    return `<p class="context-preview"><b>上下文：</b>${escapeHtml(before)}<mark>${escapeHtml(original)}</mark>${escapeHtml(after)}</p>`;
+  }
+
+  if (!hasReplayableLocator(issue)) {
     return "";
   }
 
-  const before = sourceText.slice(Math.max(0, issue.start - 24), issue.start);
-  const original = sourceText.slice(issue.start, issue.end);
-  const after = sourceText.slice(issue.end, Math.min(sourceText.length, issue.end + 24));
+  const locator = issue.locator;
+  const before = locator.key.slice(0, locator.original_start_in_key);
+  const original = locator.key.slice(locator.original_start_in_key, locator.original_end_in_key);
+  const after = locator.key.slice(locator.original_end_in_key);
 
   return `<p class="context-preview"><b>上下文：</b>${escapeHtml(before)}<mark>${escapeHtml(original)}</mark>${escapeHtml(after)}</p>`;
 }
@@ -526,7 +535,11 @@ function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
 }
 
 function isPreciselyWritableIssue(sourceText: string, issue: ProofreadIssue): boolean {
-  if (!sourceText || !isIssueLocatable(sourceText, issue)) {
+  if (!sourceText) {
+    return hasReplayableLocator(issue);
+  }
+
+  if (!isIssueLocatable(sourceText, issue)) {
     return false;
   }
 
@@ -535,6 +548,17 @@ function isPreciselyWritableIssue(sourceText: string, issue: ProofreadIssue): bo
   }
 
   return canBuildClientLocator(sourceText, issue);
+}
+
+function hasReplayableLocator(issue: ProofreadIssue): issue is ProofreadIssue & {
+  locator: NonNullable<ProofreadIssue["locator"]>;
+} {
+  return (
+    Boolean(issue.locator?.key) &&
+    typeof issue.locator?.key_occurrence_index === "number" &&
+    typeof issue.locator.original_start_in_key === "number" &&
+    typeof issue.locator.original_end_in_key === "number"
+  );
 }
 
 function canBuildClientLocator(sourceText: string, issue: ProofreadIssue): boolean {

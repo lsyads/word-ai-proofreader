@@ -31,6 +31,7 @@ export function saveHistoryEntry(input: {
   locatedIssueCount: number;
   revisionCount: number;
   fallbackCount: number;
+  failedCount?: number;
   scope: ProofreadScope;
   taskId?: string | null;
   totalChunks: number;
@@ -64,6 +65,7 @@ export function saveHistoryEntry(input: {
     locatedIssueCount: input.locatedIssueCount,
     revisionCount: input.revisionCount,
     fallbackCount: input.fallbackCount,
+    failedCount: input.failedCount || 0,
     providerApi: input.providerApi,
     proofreadMode: input.proofreadMode,
     reasoningEnabled: input.reasoningEnabled,
@@ -113,6 +115,7 @@ export function savePendingResultHistory(input: {
     fallbackCount: input.result.issues.filter(
       (issue) => typeof issue.start !== "number" || typeof issue.end !== "number"
     ).length,
+    failedCount: 0,
     scope: input.result.scope,
     taskId: input.result.taskId,
     totalChunks: input.result.totalChunks,
@@ -149,6 +152,7 @@ export function saveAppliedResultHistory(input: {
     locatedIssueCount: input.summary.commentCount + input.summary.revisionCount,
     revisionCount: input.summary.revisionCount,
     fallbackCount: input.summary.fallbackCount,
+    failedCount: input.summary.failedCount,
     scope: input.result.scope,
     taskId: input.result.taskId,
     totalChunks: input.result.totalChunks,
@@ -385,6 +389,7 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     typeof value.locatedIssueCount === "number" &&
     typeof value.revisionCount === "number" &&
     typeof value.fallbackCount === "number" &&
+    (typeof value.failedCount === "undefined" || typeof value.failedCount === "number") &&
     isProviderApi(value.providerApi) &&
     isProofreadMode(value.proofreadMode) &&
     typeof value.reasoningEnabled === "boolean" &&

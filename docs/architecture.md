@@ -13,7 +13,7 @@ Word 插件任务窗格
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
   -> FastAPI 后端按 original 计算 start/end 和 locator；分块任务额外计算 global_start/global_end
-  -> Word 插件先展示结果，用户确认后按 locator 分批插入原文片段批注或生成 Word 修订
+  -> Word 插件先展示结果，用户确认后按 locator 分批定位，并分批提交原文片段批注或 Word 修订
 ```
 
 当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
@@ -110,6 +110,16 @@ AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后
 `replacement` 是可直接替换 `original` 的正文文本。不能直接替换的问题，例如事实待核、需人工判断、体例疑问，返回 `replacement: null`；空字符串会被后端归一为 `null`。
 
 如果 `original` 与 `replacement` 去掉所有空白后完全一致，说明该 issue 只是加/删/改空白，后端会在返回给 Word 插件前过滤掉。
+
+### Word 写回阶段
+
+插件应用结果时分为定位、写入批注、写入修订和汇总批注几个阶段，任务窗格会显示当前阶段和批次进度。
+
+- 定位阶段按 `locator.key` 分批搜索，优先精准写回；无可靠 locator、搜索失败或某个 Word search 批次触发 `GeneralException` 时，当前批及后续条目降级为汇总批注，不让定位异常穿透成整次应用失败。
+- 批注模式下，可精准定位的问题按 16 条一批插入批注并立即 `context.sync()`。正常情况下每 64 条复用同一个 `Word.run`；某批触发 `GeneralException` 时，失败批次会换新上下文拆成单条重试，单条仍失败的问题进入汇总批注候选。
+- 修订模式下，有 `replacement` 的问题在 `TrackAll` 下按全文位置倒序、16 条一批替换；正常情况下每 64 条复用同一个 `Word.run`，批失败后切换 fresh `Word.run` 重试，不复用可能已污染的请求上下文。
+- 批注正文写入前会移除不可见控制字符，单条精准批注超过 1500 字会截断并提示到任务窗格查看完整建议；汇总批注按 1200 字预算拆成多条短批注，默认最多写入 10 条，单个 issue 过长时只截断该条汇总文本。
+- 汇总批注只通过 fresh `Word.run` 单独提交，一次获取锚点后逐条提交可见汇总 chunk；锚点优先使用本批第一个成功定位 range，没有成功定位时固定到当前应用范围首字符附近，避免给整篇正文或整段大选区插入批注。超出默认上限的 issue 计入截断提示，前面已经成功提交的批注或修订不会回滚。
 
 ### 3. 流式审校接口
 
@@ -409,13 +419,13 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 已勾选 + 批注模式 + locator 可用 -> 按 locator.key 分批搜索，在 original 对应原文片段插入逐条批注
 已勾选 + 修订模式 + locator 可用 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
 已勾选 + 修订模式 + locator 可用 + 无 replacement -> 在 original 对应原文片段插入逐条批注
-已勾选 + 无 locator 或定位失败 -> 在“应用 N 条到 Word”时合并为一条简短汇总批注
+已勾选 + 无 locator 或定位失败 -> 在“应用 N 条到 Word”时拆成多条短汇总批注
 未勾选 -> 不写回 Word
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 8 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则退回当前选区或正文起点。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
+分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 16 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则固定到当前应用范围首字符附近，并默认最多写入 10 条。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
 
 修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
@@ -429,4 +439,4 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 ## 调试日志
 
-后端 `BACKEND_LOG_LEVEL=INFO` 时记录请求入口、provider、模式、文本长度、HTTP 状态、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因，不记录完整请求正文。AI 返回报文可能包含 `original` 原文摘录，用于联调定位。临时设为 `DEBUG` 时，会额外记录后端请求体和 AI provider 请求 payload；这些内容可能包含完整选区文本、书名、介绍和 AI 输出。日志 helper 不记录 API Key、`Authorization` 或 Bearer token。DEBUG 仅用于本地调试，不建议生产开启。
+后端 `BACKEND_LOG_LEVEL=INFO` 时记录请求入口、provider、模式、文本长度、HTTP 状态、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因，不记录完整请求正文。前端调试日志记录 Word 操作失败阶段、issueId、batch/chunk、locator/comment/replacement 长度和 Office 错误 `name/code/message/debugInfo`，不记录正文全文。临时设为 `DEBUG` 时，后端会额外记录请求体和 AI provider 请求 payload；这些内容可能包含完整选区文本、书名、介绍和 AI 输出。日志 helper 不记录 API Key、`Authorization` 或 Bearer token。DEBUG 仅用于本地调试，不建议生产开启。

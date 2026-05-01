@@ -23,7 +23,7 @@ Word 选区
   -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
   -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
   -> backend 在单段或分块文本中搜索 issue.original，填充 start/end 和低重复 locator；分块结果额外填充 global_start/global_end
-  -> word-addin 先展示结果，用户确认后按 locator 分批插入批注或生成 Word 修订
+  -> word-addin 先展示结果，用户确认后按 locator 分批定位，并分批提交批注或 Word 修订
 ```
 
 ### 前端
@@ -118,6 +118,16 @@ Response:
 - `locator`：可选精准写回定位提示。`key` 是 Word 插件优先搜索的低重复片段；`key_start/key_end` 是 `key` 在请求文本中的位置；`original_start_in_key/original_end_in_key` 是 `original` 在 `key` 内的位置；`strategy` 为 `original` 或 `context`；`key_occurrence_index` 是 `key` 在请求文本中的第几次出现，用于历史记录不保存完整正文时再次回写。长且低重复的 `original` 直接作为 key；短文本或重复文本会使用上下文 key；仍不可靠时返回 `null`，前端应用时降级为汇总批注。
 - `issues` 为空表示未发现明显问题。
 - `issues` 为空时，Word 插件只在任务窗格显示结果，不插入批注。
+
+### Word 写回容错
+
+- 插件不限制用户一次应用的 issue 总数，但会把 Word 操作拆成小批次执行。
+- 定位阶段按 `locator.key` 分批搜索；某个 Word search 批次触发 `GeneralException` 时，当前批及后续条目降级汇总，不让定位异常穿透成整次应用失败。写入阶段也分批 `context.sync()` 提交，默认每批 16 条批注或 16 条修订，避免大文档中最后一次提交失败导致前面已写入内容全部回滚。
+- 批注正文写入前会移除不可见控制字符；单条精准批注正文超过 1500 字会截断，并提示用户到任务窗格查看完整建议。汇总批注按 1200 字预算拆成多条短批注，默认最多写入 10 条，单个 issue 过长时只截断该条汇总文本。
+- 批注模式下，正常情况下每 64 条复用同一个 Word 请求上下文；某批批注写入失败时，插件会换新的请求上下文拆成单条重试，避免 `GeneralException` 污染后续批次。单条仍被 Word 拒绝时，不中断后续条目，最后尝试把失败条目并入汇总批注。
+- 修订模式下，修订写入也按 16 条小批提交，正常情况下每 64 条复用同一个 `Word.run`；失败批次不复用当前请求上下文单条重试，而是切换 fresh `Word.run` 重试，失败项进入汇总批注或失败计数。
+- 汇总批注只通过 fresh `Word.run` 写入，不和定位或精准写回共用请求上下文；一次获取锚点后逐条提交可见汇总 chunk；锚点优先使用本批第一个成功定位 range，没有成功定位时固定到当前应用范围首字符附近。超出默认 10 条上限的 issue 不继续写入 Word，任务窗格提示截断数量。
+- 前端调试日志会记录 Word 操作失败阶段、issueId、batch/chunk、locator/comment/replacement 长度和 Office 错误 `name/code/message/debugInfo`，不记录正文全文。
 
 ### `POST /api/proofread/stream`
 
@@ -271,7 +281,7 @@ Response:
 6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
 7. 后端返回问题时，插件先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选，支持逐条勾选和批量选择，并可点击单条“定位”选中 Word 原文。
 8. 用户点击“应用 N 条到 Word”后，插件只写回已勾选问题；批注模式按 `locator.key` 去重分批搜索并精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将已勾选、可定位且有 `replacement` 的问题替换为 Word 原生修订。
-9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但无可靠 `locator` 或 Word 搜索失败的问题统一合并为一条简短汇总批注，优先锚定在本次第一个成功定位 range，找不到时退回当前选区或正文起点；未勾选问题不写回 Word。批量应用不限制总条数，但按小批次 `context.sync()` 并在任务窗格显示进度。
+9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但无可靠 `locator` 或 Word 搜索失败的问题按字符预算拆成多条短汇总批注，默认最多写入 10 条，优先锚定在本次第一个成功定位 range，找不到时固定到当前应用范围首字符附近；未勾选问题不写回 Word。批量应用不限制总条数，但按小批次 `context.sync()` 并在任务窗格显示进度。
 10. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
 11. 插件支持清空当前结果、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入；新历史记录保存 `selectedIssueIds`、`skippedIssueCount` 和 locator 定位包，不保存完整审校正文。可回写历史打开后恢复为当前结果，可筛选、勾选、定位并再次应用；旧历史缺少定位包时只读。
 12. 补充后端测试、插件 lint/build 验证和本地联调说明。
@@ -343,7 +353,7 @@ npm run dev-server
 6. 如果存在审校问题，确认审校完成后只在任务窗格展示结果，不立即写入 Word。
 7. 使用筛选器、复选框和批量选择按钮调整待应用问题；点击单条“定位”，确认 Word 选中对应原文。
 8. 点击“应用 N 条到 Word”后，确认只有已勾选的可定位问题批注在对应原文片段上；修订模式下确认已勾选、可定位且有 `replacement` 的问题生成 Word 修订。
-9. 确认已勾选、可定位但无 `replacement` 的问题回退为原位批注，已勾选但未定位问题合并为一条优先锚定在首个成功定位 range 的汇总批注，未勾选问题不写回。
+9. 确认已勾选、可定位但无 `replacement` 的问题回退为原位批注，已勾选但未定位问题默认最多写入 10 条、每条 1200 字以内的短汇总批注；有成功定位 range 时优先贴近该 range，没有成功定位时固定到当前应用范围首字符附近；未勾选问题不写回。
 10. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
 11. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
 12. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
@@ -380,7 +390,7 @@ npm run dev-server
 - 后端返回非空 `issues[]` 时，插件只展示结果；筛选和勾选后点击“应用 N 条到 Word”才对已选的可定位问题逐条插入批注或修订。
 - 单条“定位”可选中 Word 中对应原文；重复 `original` 场景应优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对已选、可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置。
-- 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题合并为一条锚定在首个成功定位 range 或范围起点的汇总批注；未选问题不写回。
+- 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题拆成多条锚定在首个成功定位 range 或当前应用范围首字符附近的汇总批注；未选问题不写回。
 - 后端返回空 `issues[]` 时，插件显示未发现明显问题，且不插入批注。
 - 审校运行中点击“停止审校”时，插件中断请求、恢复按钮、不插入批注。
 - 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；历史记录包含 `selectedIssueIds`、`skippedIssueCount` 和不含完整正文的 locator 定位包。可回写历史打开后功能与当前审校结果一致；旧历史缺少 locator occurrence 时只读。

@@ -210,7 +210,23 @@ export function renderHistoryEntry(entry: ProofreadHistoryEntry) {
 }
 
 export function formatCompletionMessage(summary: IssueApplicationSummary): string {
-  return `应用完成，已精准批注 ${summary.commentCount} 条，已生成修订 ${summary.revisionCount} 条，未定位汇总 ${summary.fallbackCount} 条。`;
+  const successCount = summary.commentCount + summary.revisionCount + summary.fallbackCount;
+  const failedText =
+    summary.failedCount > 0 ? `，${summary.failedCount} 条因 Word 写入失败未应用` : "";
+  const truncatedText =
+    summary.truncatedFallbackCount > 0
+      ? `，${summary.truncatedFallbackCount} 条因汇总批注截断未写入 Word`
+      : "";
+  const fallbackCommentText =
+    summary.fallbackCommentCount > 1
+      ? `，汇总批注已拆分为 ${summary.fallbackCommentCount} 条短批注`
+      : "";
+
+  if (successCount === 0 && summary.failedCount > 0 && summary.truncatedFallbackCount === 0) {
+    return `应用失败，${summary.failedCount} 条均被 Word 拒绝写入。`;
+  }
+
+  return `应用完成，已精准批注 ${summary.commentCount} 条，已生成修订 ${summary.revisionCount} 条，未定位汇总 ${summary.fallbackCount} 条${fallbackCommentText}${truncatedText}${failedText}。`;
 }
 
 export function showMessage(message: string, type: "default" | "error" | "success" = "default") {
@@ -516,7 +532,7 @@ function formatSelectionSummary(
   const fallbackCount = selectedIssues.filter(
     (issue) => !isPreciselyWritableIssue(sourceText || "", issue)
   ).length;
-  const batchCount = Math.ceil((commentCount + revisionCount) / 8);
+  const batchCount = Math.ceil((commentCount + revisionCount) / 16);
   const batchText = batchCount > 0 ? `；预计分 ${batchCount} 批应用` : "";
 
   return `已选 ${selectedIssues.length}/${allIssues.length} 条；预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，将汇总批注 ${fallbackCount} 条，跳过 ${skippedCount} 条${batchText}。`;
@@ -656,11 +672,13 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
   const locatedText =
     entry.issueCount > 0 ? `定位 ${entry.locatedIssueCount}/${entry.issueCount}` : "无需定位";
   const skippedText = entry.skippedIssueCount > 0 ? ` / 跳过 ${entry.skippedIssueCount}` : "";
+  const failedText =
+    entry.failedCount && entry.failedCount > 0 ? ` / 写入失败 ${entry.failedCount}` : "";
   const actionText = entry.appliedToWord
     ? entry.applicationMode === "revision"
-      ? `已应用修订 ${entry.revisionCount} / 未定位 ${entry.fallbackCount}${skippedText}`
-      : `已应用批注 ${entry.locatedIssueCount} / 未定位 ${entry.fallbackCount}${skippedText}`
-    : `未应用 / 未定位 ${entry.fallbackCount}${skippedText}`;
+      ? `已应用修订 ${entry.revisionCount} / 未定位 ${entry.fallbackCount}${failedText}${skippedText}`
+      : `已应用批注 ${entry.locatedIssueCount} / 未定位 ${entry.fallbackCount}${failedText}${skippedText}`
+    : `未应用 / 未定位 ${entry.fallbackCount}${failedText}${skippedText}`;
   const reasoningText = entry.reasoningEnabled ? "深度思考开" : "深度思考关";
   const modeText = `${formatProofreadScope(entry.scope)} / ${formatProofreadMode(entry.proofreadMode)} / ${reasoningText} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
   const chunkText =

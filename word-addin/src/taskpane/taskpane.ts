@@ -45,7 +45,9 @@ import {
   ApplicationMode,
   BookInfo,
   ControlsState,
+  IssueApplicationSummary,
   IssueFilterState,
+  IssueApplicationProgress,
   IssueReviewState,
   PendingProofreadResult,
   ProofreadHistoryEntry,
@@ -69,9 +71,12 @@ const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v2";
 const REASONING_ENABLED_STORAGE_KEY = "word-ai-proofreader-reasoning-enabled-v2";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v2";
+const FALLBACK_SUMMARY_TRUNCATE_STORAGE_KEY =
+  "word-ai-proofreader-fallback-summary-truncate-enabled-v2";
 const PROOFREAD_SCOPE_STORAGE_KEY = "word-ai-proofreader-scope-v2";
 const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v2";
 const BOOK_INTRODUCTION_STORAGE_KEY = "word-ai-proofreader-book-introduction-v2";
+const APPLICATION_PREVIEW_BATCH_SIZE = 16;
 const CLEAR_HISTORY_CONFIRM_MS = 4000;
 const CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS = 120;
 
@@ -108,6 +113,7 @@ Office.onReady((info) => {
     getSelect("proofread-mode").onchange = persistControls;
     getInput("reasoning-enabled").onchange = persistControls;
     getSelect("application-mode").onchange = persistControls;
+    getInput("fallback-summary-truncate-enabled").onchange = persistControls;
     getSelect("proofread-scope").onchange = persistControls;
     initializeControls();
     refreshHistory();
@@ -467,11 +473,9 @@ async function applyPendingResultToWord() {
       pendingResult.scope,
       getApplicationMode(),
       {
+        fallbackSummaryTruncateEnabled: getFallbackSummaryTruncateEnabled(),
         onProgress: (progress) => {
-          showMessage(
-            `正在应用到 Word，第 ${progress.completedBatches}/${progress.totalBatches} 批，已处理 ${progress.completedIssues}/${progress.totalIssues} 条。`,
-            "default"
-          );
+          showMessage(formatApplicationProgress(progress), "default");
         },
       }
     );
@@ -482,7 +486,7 @@ async function applyPendingResultToWord() {
       selectedIssueIds: selectedIssues.map((issue) => issue.id),
     });
     refreshHistory();
-    showMessage(formatCompletionMessage(summary), "success");
+    showMessage(formatCompletionMessage(summary), getApplicationMessageType(summary));
   } catch (error) {
     showMessage(`应用失败：${getErrorMessage(error)}`, "error");
   } finally {
@@ -490,6 +494,34 @@ async function applyPendingResultToWord() {
     setBusy(false);
     updateActionButtons();
   }
+}
+
+function formatApplicationProgress(progress: IssueApplicationProgress): string {
+  const stageLabels = {
+    commenting: "正在写入批注",
+    fallback: "正在写入汇总批注",
+    locating: "正在定位",
+    revising: "正在写入修订",
+  };
+  const stage = progress.stage ? stageLabels[progress.stage] : "正在应用到 Word";
+
+  return `${stage}，第 ${progress.completedBatches}/${progress.totalBatches} 批，已处理 ${progress.completedIssues}/${progress.totalIssues} 条。`;
+}
+
+function getApplicationMessageType(
+  summary: IssueApplicationSummary
+): "default" | "error" | "success" {
+  const successCount = summary.commentCount + summary.revisionCount + summary.fallbackCount;
+
+  if (summary.failedCount > 0 && successCount === 0 && summary.truncatedFallbackCount === 0) {
+    return "error";
+  }
+
+  if (summary.failedCount > 0 || summary.truncatedFallbackCount > 0) {
+    return "default";
+  }
+
+  return "success";
 }
 
 function renderCurrentPendingResult() {
@@ -611,7 +643,9 @@ function getSelectedIssues(): ProofreadIssue[] {
 }
 
 function formatIssueApplicationPreview(issues: ProofreadIssue[]): string {
-  const batchCount = Math.ceil(countPreciselyWritableIssues(issues) / 8);
+  const batchCount = Math.ceil(
+    countPreciselyWritableIssues(issues) / APPLICATION_PREVIEW_BATCH_SIZE
+  );
   const revisionCount =
     getApplicationMode() === "revision"
       ? issues.filter((issue) => isPreciselyWritableIssue(issue) && hasReplacement(issue)).length
@@ -900,6 +934,8 @@ function initializeControls() {
   getSelect("proofread-mode").value = readStoredProofreadMode();
   getInput("reasoning-enabled").checked = readStoredReasoningEnabled();
   getSelect("application-mode").value = readStoredApplicationMode();
+  getInput("fallback-summary-truncate-enabled").checked =
+    readStoredFallbackSummaryTruncateEnabled();
   getSelect("proofread-scope").value = readStoredProofreadScope();
 }
 
@@ -908,6 +944,10 @@ function persistControls() {
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
   localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
+  localStorage.setItem(
+    FALLBACK_SUMMARY_TRUNCATE_STORAGE_KEY,
+    String(getFallbackSummaryTruncateEnabled())
+  );
   localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
 
   if (pendingResult && issueReviewState) {
@@ -946,6 +986,7 @@ function getControlsState(): ControlsState {
     proofreadMode: getProofreadMode(),
     reasoningEnabled: getReasoningEnabled(),
     applicationMode: getApplicationMode(),
+    fallbackSummaryTruncateEnabled: getFallbackSummaryTruncateEnabled(),
     scope: getProofreadScope(),
   };
 }
@@ -967,6 +1008,10 @@ function getReasoningEnabled(): boolean {
 function getApplicationMode(): ApplicationMode {
   const value = getSelect("application-mode").value;
   return isApplicationMode(value) ? value : "comment";
+}
+
+function getFallbackSummaryTruncateEnabled(): boolean {
+  return getInput("fallback-summary-truncate-enabled").checked;
 }
 
 function getProofreadScope(): ProofreadScope {
@@ -991,6 +1036,11 @@ function readStoredReasoningEnabled(): boolean {
 function readStoredApplicationMode(): ApplicationMode {
   const value = localStorage.getItem(APPLICATION_MODE_STORAGE_KEY);
   return isApplicationMode(value) ? value : "comment";
+}
+
+function readStoredFallbackSummaryTruncateEnabled(): boolean {
+  const value = localStorage.getItem(FALLBACK_SUMMARY_TRUNCATE_STORAGE_KEY);
+  return value === null ? true : value === "true";
 }
 
 function readStoredProofreadScope(): ProofreadScope {

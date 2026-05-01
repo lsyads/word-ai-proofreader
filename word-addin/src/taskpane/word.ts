@@ -20,6 +20,7 @@ interface SearchContext {
 }
 
 interface ApplyIssuesOptions {
+  fallbackSummaryTruncateEnabled?: boolean;
   onProgress?: (progress: IssueApplicationProgress) => void;
 }
 
@@ -48,10 +49,75 @@ interface ResolvedIssueTargets {
   targets: ResolvedIssueTarget[];
   summaryIssues: ProofreadIssue[];
   fallbackAnchorRange: Word.Range;
+  contextFailed?: boolean;
 }
 
-const FALLBACK_COMMENT_PREVIEW_LIMIT = 10;
-const SEARCH_BATCH_SIZE = 8;
+interface WriteBatchResult {
+  successCount: number;
+  failedIssues: ProofreadIssue[];
+  contextFailed?: boolean;
+}
+
+interface CommentBatchResult {
+  commentCount: number;
+  fallbackCount: number;
+  fallbackCommentCount: number;
+  failedCount: number;
+  truncatedFallbackCount: number;
+  retryIssues: ProofreadIssue[];
+  fallbackIssues: ProofreadIssue[];
+}
+
+interface FallbackWriteResult {
+  fallbackCount: number;
+  fallbackCommentCount: number;
+  failedCount: number;
+  truncatedFallbackCount: number;
+}
+
+interface FallbackCommentChunk {
+  issues: ProofreadIssue[];
+  comment: string;
+}
+
+interface RevisionBatchResult {
+  commentCount: number;
+  revisionCount: number;
+  retryIssues: ProofreadIssue[];
+  fallbackIssues: ProofreadIssue[];
+}
+
+type WordOperationStage =
+  | "anchor"
+  | "comment"
+  | "fallback"
+  | "locate"
+  | "revision"
+  | "search"
+  | "select";
+
+interface WordErrorLogDetails {
+  batchIndex?: number;
+  category?: string;
+  commentLength?: number;
+  issueCount?: number;
+  issueId?: string;
+  keyLength?: number;
+  replacementLength?: number;
+  severity?: string;
+  totalBatches?: number;
+}
+
+const SEARCH_BATCH_SIZE = 16;
+const COMMENT_RUN_BATCH_SIZE = 64;
+const COMMENT_INSERT_BATCH_SIZE = 16;
+const REVISION_RUN_BATCH_SIZE = 64;
+const REVISION_INSERT_BATCH_SIZE = 16;
+const MAX_COMMENT_LENGTH = 1500;
+const FALLBACK_COMMENT_MAX_LENGTH = 1200;
+const FALLBACK_COMMENT_MAX_CHUNKS = 10;
+const FALLBACK_COMMENT_HEADER_RESERVE = 120;
+const FALLBACK_ISSUE_MAX_LENGTH = 900;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
 const CONTEXT_LOCATOR_WINDOWS = [16, 32, 64];
@@ -132,11 +198,20 @@ export async function selectIssueInScope(
       throw new Error("未能在当前 Word 范围中找到对应原文。");
     }
 
-    target.targetRange.select();
-    await context.sync();
-    appendDebugLog("info", "Word range 已 select", {
-      issueId: issue.id,
-    });
+    try {
+      target.targetRange.select();
+      await context.sync();
+      appendDebugLog("info", "Word range 已 select", {
+        issueId: issue.id,
+      });
+    } catch (error) {
+      logWordOperationFailure("select", error, {
+        category: issue.category,
+        issueId: issue.id,
+        severity: issue.severity,
+      });
+      throw new Error("未能在当前 Word 范围中定位该问题。");
+    }
   });
 }
 
@@ -166,46 +241,422 @@ function applyIssuesToDocument(
   return insertCommentsForIssues(documentText, issues, "document", options);
 }
 
-function insertCommentsForIssues(
+async function insertCommentsForIssues(
   sourceText: string,
   issues: ProofreadIssue[],
   scope: ProofreadScope,
   options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
+  const summary = createEmptyApplicationSummary();
+  const totalBatches = Math.ceil(issues.length / COMMENT_RUN_BATCH_SIZE);
+  const deferredFallbackIssues: ProofreadIssue[] = [];
+  let completedIssues = 0;
+
+  for (let batchStart = 0; batchStart < issues.length; batchStart += COMMENT_RUN_BATCH_SIZE) {
+    const batch = issues.slice(batchStart, batchStart + COMMENT_RUN_BATCH_SIZE);
+    const batchIndex = Math.floor(batchStart / COMMENT_RUN_BATCH_SIZE) + 1;
+    let batchResult: CommentBatchResult;
+
+    try {
+      batchResult = await insertCommentIssueBatch(sourceText, batch, scope, options);
+    } catch (error) {
+      logWordOperationFailure("comment", error, {
+        batchIndex,
+        issueCount: batch.length,
+      });
+      appendDebugLog("error", "批注应用批次上下文失败，改用单条重试", {
+        batchIndex,
+        batchSize: batch.length,
+        error: getWordErrorDetails(error),
+      });
+      batchResult = {
+        commentCount: 0,
+        fallbackCount: 0,
+        fallbackCommentCount: 0,
+        failedCount: 0,
+        truncatedFallbackCount: 0,
+        retryIssues: batch,
+        fallbackIssues: [],
+      };
+    }
+
+    addCommentBatchResult(summary, batchResult);
+
+    if (batchResult.retryIssues.length > 0) {
+      const retryResult = await retryCommentIssuesInFreshContexts(
+        sourceText,
+        batchResult.retryIssues,
+        scope,
+        options
+      );
+      addCommentBatchResult(summary, retryResult);
+      batchResult.fallbackIssues.push(...retryResult.fallbackIssues);
+    }
+
+    if (batchResult.fallbackIssues.length > 0) {
+      deferredFallbackIssues.push(...batchResult.fallbackIssues);
+    }
+
+    completedIssues += batch.length;
+    options.onProgress?.({
+      stage: "commenting",
+      completedBatches: Math.min(batchIndex, totalBatches),
+      totalBatches,
+      completedIssues: Math.min(completedIssues, issues.length),
+      totalIssues: issues.length,
+    });
+  }
+
+  if (deferredFallbackIssues.length > 0) {
+    const fallbackResult = await insertFallbackCommentInFreshContext(
+      sourceText,
+      scope,
+      deferredFallbackIssues,
+      options
+    );
+    summary.fallbackCount += fallbackResult.fallbackCount;
+    summary.fallbackCommentCount += fallbackResult.fallbackCommentCount;
+    summary.failedCount += fallbackResult.failedCount;
+    summary.truncatedFallbackCount += fallbackResult.truncatedFallbackCount;
+  }
+
+  return summary;
+}
+
+async function insertCommentIssueBatch(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
+): Promise<CommentBatchResult> {
   return Word.run(async (context) => {
     const searchContext = await createSearchContext(context, scope, sourceText);
     const resolved = await resolveIssueTargets(context, searchContext, sourceText, issues, options);
-    let commentCount = 0;
 
-    resolved.targets.forEach(({ issue, targetRange }) => {
-      targetRange.insertComment(formatIssueComment(issue));
-      commentCount += 1;
-    });
-
-    if (resolved.summaryIssues.length > 0) {
-      resolved.fallbackAnchorRange.insertComment(formatFallbackComment(resolved.summaryIssues));
+    if (resolved.contextFailed) {
+      return {
+        commentCount: 0,
+        fallbackCount: 0,
+        fallbackCommentCount: 0,
+        failedCount: 0,
+        truncatedFallbackCount: 0,
+        retryIssues: issues,
+        fallbackIssues: [],
+      };
     }
 
-    await context.sync();
-    return { commentCount, revisionCount: 0, fallbackCount: resolved.summaryIssues.length };
+    const commentResult = await insertCommentsInBatches(context, resolved.targets, options);
+
+    if (commentResult.contextFailed) {
+      return {
+        commentCount: commentResult.successCount,
+        fallbackCount: 0,
+        fallbackCommentCount: 0,
+        failedCount: 0,
+        truncatedFallbackCount: 0,
+        retryIssues: commentResult.failedIssues,
+        fallbackIssues: resolved.summaryIssues,
+      };
+    }
+
+    return {
+      commentCount: commentResult.successCount,
+      fallbackCount: 0,
+      fallbackCommentCount: 0,
+      failedCount: 0,
+      truncatedFallbackCount: 0,
+      retryIssues: [],
+      fallbackIssues: resolved.summaryIssues,
+    };
   });
 }
 
-function applyRevisionsForIssues(
+async function retryCommentIssuesInFreshContexts(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
+): Promise<CommentBatchResult> {
+  const result: CommentBatchResult = {
+    commentCount: 0,
+    fallbackCount: 0,
+    fallbackCommentCount: 0,
+    failedCount: 0,
+    truncatedFallbackCount: 0,
+    retryIssues: [],
+    fallbackIssues: [],
+  };
+
+  for (const issue of issues) {
+    try {
+      const retryResult = await insertCommentIssueBatch(sourceText, [issue], scope, options);
+      result.commentCount += retryResult.commentCount;
+      result.fallbackCount += retryResult.fallbackCount;
+      result.fallbackCommentCount += retryResult.fallbackCommentCount;
+      result.failedCount += retryResult.failedCount;
+      result.truncatedFallbackCount += retryResult.truncatedFallbackCount;
+      result.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
+    } catch (error) {
+      logWordOperationFailure("comment", error, {
+        category: issue.category,
+        commentLength: formatIssueComment(issue).length,
+        issueId: issue.id,
+        severity: issue.severity,
+      });
+      appendDebugLog("error", "批注单条新上下文重试失败", {
+        issueId: issue.id,
+        category: issue.category,
+        severity: issue.severity,
+        originalLength: issue.original.length,
+        commentLength: formatIssueComment(issue).length,
+        error: getWordErrorDetails(error),
+      });
+      result.fallbackIssues.push(issue);
+    }
+  }
+
+  return result;
+}
+
+async function insertFallbackCommentInFreshContext(
+  sourceText: string,
+  scope: ProofreadScope,
+  issues: ProofreadIssue[],
+  options: ApplyIssuesOptions
+): Promise<FallbackWriteResult> {
+  if (issues.length === 0) {
+    return {
+      fallbackCount: 0,
+      fallbackCommentCount: 0,
+      failedCount: 0,
+      truncatedFallbackCount: 0,
+    };
+  }
+
+  try {
+    return await insertFallbackCommentChunksInFreshContexts(sourceText, scope, issues, options);
+  } catch (error) {
+    logWordOperationFailure("fallback", error, {
+      issueCount: issues.length,
+    });
+    appendDebugLog("error", "新上下文汇总批注写入失败", {
+      issueCount: issues.length,
+      error: getWordErrorDetails(error),
+    });
+    return {
+      fallbackCount: 0,
+      fallbackCommentCount: 0,
+      failedCount: issues.length,
+      truncatedFallbackCount: 0,
+    };
+  }
+}
+
+async function insertFallbackCommentChunksInFreshContexts(
+  sourceText: string,
+  scope: ProofreadScope,
+  issues: ProofreadIssue[],
+  options: ApplyIssuesOptions
+): Promise<FallbackWriteResult> {
+  const { chunks, truncatedFallbackCount } = buildFallbackCommentChunks(issues, options);
+  let fallbackCount = 0;
+  let fallbackCommentCount = 0;
+  let failedCount = 0;
+  let completedIssues = 0;
+
+  if (chunks.length === 0) {
+    return {
+      fallbackCount: 0,
+      fallbackCommentCount: 0,
+      failedCount: 0,
+      truncatedFallbackCount,
+    };
+  }
+
+  try {
+    await Word.run(async (context) => {
+      const searchContext = await createSearchContext(context, scope, sourceText);
+      const anchorRange = await getFallbackAnchorRange(context, searchContext);
+
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const chunk = chunks[chunkIndex];
+        try {
+          anchorRange.insertComment(chunk.comment);
+        } catch (error) {
+          logWordOperationFailure("fallback", error, {
+            batchIndex: chunkIndex + 1,
+            commentLength: chunk.comment.length,
+            issueCount: chunk.issues.length,
+            totalBatches: chunks.length,
+          });
+          throw error;
+        }
+
+        // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional per-chunk commit so long summaries cannot roll back prior chunks.
+        await context.sync();
+
+        fallbackCount += chunk.issues.length;
+        fallbackCommentCount += 1;
+        completedIssues += chunk.issues.length;
+        appendDebugLog("info", "汇总批注分片写入成功", {
+          chunkIndex: chunkIndex + 1,
+          totalChunks: chunks.length,
+          issueCount: chunk.issues.length,
+          commentLength: chunk.comment.length,
+          fallbackCount,
+          failedCount,
+          truncatedFallbackCount,
+        });
+        options.onProgress?.({
+          stage: "fallback",
+          completedBatches: chunkIndex + 1,
+          totalBatches: chunks.length,
+          completedIssues: Math.min(completedIssues, issues.length),
+          totalIssues: issues.length,
+        });
+      }
+    });
+  } catch (error) {
+    const remainingIssueCount = Math.max(issues.length - truncatedFallbackCount - fallbackCount, 0);
+    failedCount += remainingIssueCount;
+    logWordOperationFailure("fallback", error, {
+      issueCount: remainingIssueCount,
+      totalBatches: chunks.length,
+    });
+    appendDebugLog("error", "汇总批注写入上下文失败", {
+      fallbackCount,
+      failedCount,
+      truncatedFallbackCount,
+      totalChunks: chunks.length,
+      error: getWordErrorDetails(error),
+    });
+  }
+
+  return { fallbackCount, fallbackCommentCount, failedCount, truncatedFallbackCount };
+}
+
+function addCommentBatchResult(summary: IssueApplicationSummary, result: CommentBatchResult) {
+  summary.commentCount += result.commentCount;
+  summary.fallbackCount += result.fallbackCount;
+  summary.fallbackCommentCount += result.fallbackCommentCount;
+  summary.failedCount += result.failedCount;
+  summary.truncatedFallbackCount += result.truncatedFallbackCount;
+}
+
+function createEmptyApplicationSummary(): IssueApplicationSummary {
+  return {
+    commentCount: 0,
+    revisionCount: 0,
+    fallbackCount: 0,
+    fallbackCommentCount: 0,
+    failedCount: 0,
+    truncatedFallbackCount: 0,
+  };
+}
+
+async function applyRevisionsForIssues(
   sourceText: string,
   issues: ProofreadIssue[],
   scope: ProofreadScope,
   options: ApplyIssuesOptions
 ): Promise<IssueApplicationSummary> {
+  const summary = createEmptyApplicationSummary();
+  const totalBatches = Math.ceil(issues.length / REVISION_RUN_BATCH_SIZE);
+  const deferredFallbackIssues: ProofreadIssue[] = [];
+  let completedIssues = 0;
+
+  for (let batchStart = 0; batchStart < issues.length; batchStart += REVISION_RUN_BATCH_SIZE) {
+    const batch = issues.slice(batchStart, batchStart + REVISION_RUN_BATCH_SIZE);
+    const batchIndex = Math.floor(batchStart / REVISION_RUN_BATCH_SIZE) + 1;
+    let batchResult: RevisionBatchResult;
+
+    try {
+      batchResult = await applyRevisionIssueBatch(sourceText, batch, scope, options);
+    } catch (error) {
+      logWordOperationFailure("revision", error, {
+        batchIndex,
+        issueCount: batch.length,
+      });
+      appendDebugLog("error", "修订应用批次上下文失败，整批改为汇总批注", {
+        batchIndex,
+        batchSize: batch.length,
+        error: getWordErrorDetails(error),
+      });
+      batchResult = {
+        commentCount: 0,
+        revisionCount: 0,
+        retryIssues: [],
+        fallbackIssues: batch,
+      };
+    }
+
+    summary.commentCount += batchResult.commentCount;
+    summary.revisionCount += batchResult.revisionCount;
+
+    if (batchResult.retryIssues.length > 0) {
+      const retryResult = await retryRevisionIssuesInFreshContexts(
+        sourceText,
+        batchResult.retryIssues,
+        scope,
+        options
+      );
+      summary.revisionCount += retryResult.revisionCount;
+      batchResult.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
+    }
+
+    if (batchResult.fallbackIssues.length > 0) {
+      deferredFallbackIssues.push(...batchResult.fallbackIssues);
+    }
+
+    completedIssues += batch.length;
+    options.onProgress?.({
+      stage: "revising",
+      completedBatches: Math.min(batchIndex, totalBatches),
+      totalBatches,
+      completedIssues: Math.min(completedIssues, issues.length),
+      totalIssues: issues.length,
+    });
+  }
+
+  if (deferredFallbackIssues.length > 0) {
+    const fallbackResult = await insertFallbackCommentInFreshContext(
+      sourceText,
+      scope,
+      deferredFallbackIssues,
+      options
+    );
+    summary.fallbackCount += fallbackResult.fallbackCount;
+    summary.fallbackCommentCount += fallbackResult.fallbackCommentCount;
+    summary.failedCount += fallbackResult.failedCount;
+    summary.truncatedFallbackCount += fallbackResult.truncatedFallbackCount;
+  }
+
+  return summary;
+}
+
+function applyRevisionIssueBatch(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
+): Promise<RevisionBatchResult> {
   return Word.run(async (context) => {
     const document = context.document;
-    document.load("changeTrackingMode");
 
     const searchContext = await createSearchContext(context, scope, sourceText);
     const resolved = await resolveIssueTargets(context, searchContext, sourceText, issues, options);
+
+    if (resolved.contextFailed) {
+      return {
+        commentCount: 0,
+        revisionCount: 0,
+        retryIssues: [],
+        fallbackIssues: issues,
+      };
+    }
+
     const revisionApplications: ResolvedIssueTarget[] = [];
-    let revisionCount = 0;
-    let commentCount = 0;
+    const commentApplications: ResolvedIssueTarget[] = [];
 
     resolved.targets.forEach((target) => {
       if (hasReplacement(target.issue)) {
@@ -213,37 +664,268 @@ function applyRevisionsForIssues(
         return;
       }
 
-      target.targetRange.insertComment(formatIssueComment(target.issue));
-      commentCount += 1;
+      commentApplications.push(target);
     });
 
-    if (resolved.summaryIssues.length > 0) {
-      resolved.fallbackAnchorRange.insertComment(formatFallbackComment(resolved.summaryIssues));
+    const commentResult = await insertCommentsInBatches(context, commentApplications, options);
+
+    let revisionResult: WriteBatchResult = { successCount: 0, failedIssues: [] };
+    let originalTrackingMode:
+      | Word.ChangeTrackingMode
+      | "Off"
+      | "TrackAll"
+      | "TrackMineOnly"
+      | null = null;
+
+    if (revisionApplications.length > 0) {
+      try {
+        document.load("changeTrackingMode");
+        await context.sync();
+        originalTrackingMode = document.changeTrackingMode;
+        document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+        await context.sync();
+        revisionResult = await insertRevisionsInBatches(context, revisionApplications, options);
+      } catch (error) {
+        logWordOperationFailure("revision", error, {
+          issueCount: revisionApplications.length,
+        });
+        appendDebugLog("error", "启用或写入 Word 修订失败，改为汇总批注", {
+          revisionCount: revisionApplications.length,
+          error: getWordErrorDetails(error),
+        });
+        revisionResult = {
+          successCount: 0,
+          failedIssues: revisionApplications.map(({ issue }) => issue),
+          contextFailed: true,
+        };
+      } finally {
+        if (originalTrackingMode !== null) {
+          document.changeTrackingMode = originalTrackingMode;
+          try {
+            await context.sync();
+          } catch (error) {
+            logWordOperationFailure("revision", error);
+            appendDebugLog("error", "恢复 Word 修订模式失败", {
+              error: getWordErrorDetails(error),
+            });
+          }
+        }
+      }
     }
 
-    await context.sync();
+    const fallbackIssues = [
+      ...resolved.summaryIssues,
+      ...commentResult.failedIssues,
+      ...(revisionResult.contextFailed ? [] : revisionResult.failedIssues),
+    ];
 
-    const originalTrackingMode = document.changeTrackingMode;
+    return {
+      commentCount: commentResult.successCount,
+      revisionCount: revisionResult.successCount,
+      retryIssues: revisionResult.contextFailed ? revisionResult.failedIssues : [],
+      fallbackIssues,
+    };
+  });
+}
+
+async function retryRevisionIssuesInFreshContexts(
+  sourceText: string,
+  issues: ProofreadIssue[],
+  scope: ProofreadScope,
+  options: ApplyIssuesOptions
+): Promise<RevisionBatchResult> {
+  const result: RevisionBatchResult = {
+    commentCount: 0,
+    revisionCount: 0,
+    retryIssues: [],
+    fallbackIssues: [],
+  };
+
+  for (const issue of issues) {
+    try {
+      const retryResult = await applyRevisionIssueBatch(sourceText, [issue], scope, options);
+      result.commentCount += retryResult.commentCount;
+      result.revisionCount += retryResult.revisionCount;
+      result.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
+    } catch (error) {
+      logWordOperationFailure("revision", error, {
+        category: issue.category,
+        issueId: issue.id,
+        replacementLength: issue.replacement?.length || 0,
+        severity: issue.severity,
+      });
+      result.fallbackIssues.push(issue);
+    }
+  }
+
+  return result;
+}
+
+async function insertCommentsInBatches(
+  context: Word.RequestContext,
+  targets: ResolvedIssueTarget[],
+  options: ApplyIssuesOptions
+): Promise<WriteBatchResult> {
+  const failedIssues: ProofreadIssue[] = [];
+  let successCount = 0;
+  const totalBatches = Math.ceil(targets.length / COMMENT_INSERT_BATCH_SIZE);
+
+  for (let batchStart = 0; batchStart < targets.length; batchStart += COMMENT_INSERT_BATCH_SIZE) {
+    const batch = targets.slice(batchStart, batchStart + COMMENT_INSERT_BATCH_SIZE);
+    const batchIndex = Math.floor(batchStart / COMMENT_INSERT_BATCH_SIZE) + 1;
 
     try {
-      if (revisionApplications.length > 0) {
-        document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
-
-        revisionApplications
-          .sort((left, right) => (right.issue.start || 0) - (left.issue.start || 0))
-          .forEach(({ issue, targetRange }) => {
-            targetRange.insertText(issue.replacement as string, Word.InsertLocation.replace);
-            revisionCount += 1;
+      batch.forEach(({ issue, targetRange }) => {
+        try {
+          targetRange.insertComment(formatIssueComment(issue));
+        } catch (error) {
+          logWordOperationFailure("comment", error, {
+            batchIndex,
+            category: issue.category,
+            commentLength: formatIssueComment(issue).length,
+            issueId: issue.id,
+            severity: issue.severity,
           });
-
-        await context.sync();
-      }
-    } finally {
-      document.changeTrackingMode = originalTrackingMode;
+          throw error;
+        }
+      });
+      // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional write batch boundary so earlier comments stay committed.
       await context.sync();
+      successCount += batch.length;
+      appendDebugLog("info", "批量批注写入成功", {
+        batchIndex,
+        batchSize: batch.length,
+        successCount,
+        failedCount: failedIssues.length,
+      });
+    } catch (error) {
+      logWordOperationFailure("comment", error, {
+        batchIndex,
+        issueCount: batch.length,
+      });
+      appendDebugLog("warn", "批量批注写入失败，将切换新上下文单条重试", {
+        batchIndex,
+        batchSize: batch.length,
+        error: getWordErrorDetails(error),
+      });
+      failedIssues.push(...batch.map(({ issue }) => issue));
+      return { successCount, failedIssues, contextFailed: true };
     }
 
-    return { commentCount, revisionCount, fallbackCount: resolved.summaryIssues.length };
+    options.onProgress?.({
+      stage: "commenting",
+      completedBatches: Math.min(batchIndex, totalBatches),
+      totalBatches,
+      completedIssues: Math.min(successCount + failedIssues.length, targets.length),
+      totalIssues: targets.length,
+    });
+  }
+
+  return { successCount, failedIssues };
+}
+
+async function insertRevisionsInBatches(
+  context: Word.RequestContext,
+  targets: ResolvedIssueTarget[],
+  options: ApplyIssuesOptions
+): Promise<WriteBatchResult> {
+  const orderedTargets = [...targets].sort((left, right) => {
+    const rightStart = typeof right.issue.start === "number" ? right.issue.start : 0;
+    const leftStart = typeof left.issue.start === "number" ? left.issue.start : 0;
+    return rightStart - leftStart;
+  });
+  const failedIssues: ProofreadIssue[] = [];
+  let successCount = 0;
+  const totalBatches = Math.ceil(orderedTargets.length / REVISION_INSERT_BATCH_SIZE);
+
+  for (
+    let batchStart = 0;
+    batchStart < orderedTargets.length;
+    batchStart += REVISION_INSERT_BATCH_SIZE
+  ) {
+    const batch = orderedTargets.slice(batchStart, batchStart + REVISION_INSERT_BATCH_SIZE);
+    const batchIndex = Math.floor(batchStart / REVISION_INSERT_BATCH_SIZE) + 1;
+
+    try {
+      batch.forEach(({ issue, targetRange }) => {
+        try {
+          targetRange.insertText(issue.replacement as string, Word.InsertLocation.replace);
+        } catch (error) {
+          logWordOperationFailure("revision", error, {
+            batchIndex,
+            category: issue.category,
+            issueId: issue.id,
+            replacementLength: issue.replacement?.length || 0,
+            severity: issue.severity,
+          });
+          throw error;
+        }
+      });
+      // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional write batch boundary so earlier revisions stay committed.
+      await context.sync();
+      successCount += batch.length;
+      appendDebugLog("info", "批量修订写入成功", {
+        batchIndex,
+        batchSize: batch.length,
+        successCount,
+        failedCount: failedIssues.length,
+      });
+    } catch (error) {
+      logWordOperationFailure("revision", error, {
+        batchIndex,
+        issueCount: batch.length,
+      });
+      appendDebugLog("warn", "批量修订写入失败，将切换新上下文单条重试", {
+        batchIndex,
+        batchSize: batch.length,
+        error: getWordErrorDetails(error),
+      });
+      failedIssues.push(...batch.map(({ issue }) => issue));
+      return { successCount, failedIssues, contextFailed: true };
+    }
+
+    options.onProgress?.({
+      stage: "revising",
+      completedBatches: Math.min(batchIndex, totalBatches),
+      totalBatches,
+      completedIssues: Math.min(successCount + failedIssues.length, orderedTargets.length),
+      totalIssues: orderedTargets.length,
+    });
+  }
+
+  return { successCount, failedIssues };
+}
+
+function getWordErrorDetails(error: unknown): object {
+  if (error && typeof error === "object") {
+    const candidate = error as {
+      code?: unknown;
+      debugInfo?: unknown;
+      message?: unknown;
+      name?: unknown;
+      stack?: unknown;
+    };
+
+    return {
+      name: candidate.name,
+      code: candidate.code,
+      message: candidate.message,
+      debugInfo: candidate.debugInfo,
+    };
+  }
+
+  return { message: String(error) };
+}
+
+function logWordOperationFailure(
+  stage: WordOperationStage,
+  error: unknown,
+  details: WordErrorLogDetails = {}
+) {
+  appendDebugLog("error", "Word 操作失败", {
+    stage,
+    ...details,
+    error: getWordErrorDetails(error),
   });
 }
 
@@ -277,9 +959,27 @@ async function createSearchContext(
     };
   }
 
-  const selection = context.document.getSelection();
-  selection.load("text");
-  await context.sync();
+  let selection: Word.Range;
+
+  try {
+    selection = context.document.getSelection();
+    selection.load("text");
+    await context.sync();
+  } catch (error) {
+    logWordOperationFailure("locate", error, {
+      issueCount: sourceText.length,
+    });
+    appendDebugLog("warn", "读取当前选区失败，将整批降级汇总", {
+      sourceTextLength: sourceText.length,
+      error: getWordErrorDetails(error),
+    });
+    return {
+      root: context.document.body,
+      rootKind: "body",
+      occurrenceText: sourceText,
+      canSearch: false,
+    };
+  }
 
   const selectionText = (selection.text || "").trim();
   const canSearch = sourceText.length === 0 || selectionText === sourceText;
@@ -309,6 +1009,7 @@ async function resolveIssueTargets(
   const summaryIssues: ProofreadIssue[] = [];
   const targets: ResolvedIssueTarget[] = [];
   let firstTargetRange: Word.Range | null = null;
+  const fallbackAnchorRange = await getFallbackAnchorRange(context, searchContext);
 
   if (!searchContext.canSearch) {
     appendDebugLog("warn", "当前 Word 范围与审校文本不一致，全部降级汇总", {
@@ -318,7 +1019,7 @@ async function resolveIssueTargets(
     return {
       targets,
       summaryIssues: issues,
-      fallbackAnchorRange: getRootRange(searchContext),
+      fallbackAnchorRange,
     };
   }
 
@@ -328,17 +1029,55 @@ async function resolveIssueTargets(
 
   for (let batchStart = 0; batchStart < groups.length; batchStart += SEARCH_BATCH_SIZE) {
     const batch = groups.slice(batchStart, batchStart + SEARCH_BATCH_SIZE);
-    const pendingKeySearches = batch.map((group) => {
-      const searchResults = searchContext.root.search(group.locator.key, {
-        matchCase: true,
-        matchWholeWord: false,
-      });
-      searchResults.load("items");
-      return { group, searchResults };
-    });
+    let pendingKeySearches: Array<{ group: SearchGroup; searchResults: Word.RangeCollection }> = [];
 
-    // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional batch boundary to keep Word responsive.
-    await context.sync();
+    try {
+      pendingKeySearches = batch.map((group) => {
+        const searchResults = searchContext.root.search(group.locator.key, {
+          matchCase: true,
+          matchWholeWord: false,
+        });
+        searchResults.load("items");
+        return { group, searchResults };
+      });
+    } catch (error) {
+      logWordOperationFailure("search", error, {
+        batchIndex: Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1,
+        issueCount: batch.reduce((total, group) => total + group.issues.length, 0),
+        keyLength: Math.max(...batch.map((group) => group.locator.key.length)),
+      });
+      return {
+        targets: [],
+        summaryIssues: issues,
+        fallbackAnchorRange,
+        contextFailed: true,
+      };
+    }
+
+    try {
+      // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional batch boundary to keep Word responsive.
+      await context.sync();
+    } catch (error) {
+      const unresolvedIssues = groups
+        .slice(batchStart)
+        .flatMap((group) => group.issues.map(({ issue }) => issue));
+      logWordOperationFailure("search", error, {
+        batchIndex: Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1,
+        issueCount: unresolvedIssues.length,
+      });
+      appendDebugLog("error", "Word locator key 搜索批次失败，剩余条目降级汇总", {
+        batchIndex: Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1,
+        batchSize: batch.length,
+        unresolvedIssueCount: unresolvedIssues.length,
+        error: getWordErrorDetails(error),
+      });
+      return {
+        targets: [],
+        summaryIssues: issues,
+        fallbackAnchorRange,
+        contextFailed: true,
+      };
+    }
 
     const pendingOriginalSearches: PendingOriginalSearch[] = [];
 
@@ -364,18 +1103,46 @@ async function resolveIssueTargets(
           return;
         }
 
-        const searchResultsInKey = keyRange.search(prepared.issue.original, {
-          matchCase: true,
-          matchWholeWord: false,
-        });
-        searchResultsInKey.load("items");
-        pendingOriginalSearches.push({ prepared, searchResults: searchResultsInKey });
+        try {
+          const searchResultsInKey = keyRange.search(prepared.issue.original, {
+            matchCase: true,
+            matchWholeWord: false,
+          });
+          searchResultsInKey.load("items");
+          pendingOriginalSearches.push({ prepared, searchResults: searchResultsInKey });
+        } catch (error) {
+          logWordOperationFailure("search", error, {
+            category: prepared.issue.category,
+            issueId: prepared.issue.id,
+            keyLength: prepared.locator.key.length,
+            severity: prepared.issue.severity,
+          });
+          summaryIssues.push(prepared.issue);
+        }
       });
     });
 
     if (pendingOriginalSearches.length > 0) {
-      // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional nested batch boundary for context locators.
-      await context.sync();
+      try {
+        // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional nested batch boundary for context locators.
+        await context.sync();
+      } catch (error) {
+        logWordOperationFailure("search", error, {
+          batchIndex: Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1,
+          issueCount: pendingOriginalSearches.length,
+        });
+        appendDebugLog("error", "Word locator key 内 original 搜索失败，当前批次降级汇总", {
+          batchIndex: Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1,
+          pendingOriginalSearchCount: pendingOriginalSearches.length,
+          error: getWordErrorDetails(error),
+        });
+        return {
+          targets: [],
+          summaryIssues: issues,
+          fallbackAnchorRange,
+          contextFailed: true,
+        };
+      }
     }
 
     pendingOriginalSearches.forEach(({ prepared, searchResults }) => {
@@ -402,6 +1169,7 @@ async function resolveIssueTargets(
 
     completedIssues += batch.reduce((total, group) => total + group.issues.length, 0);
     options.onProgress?.({
+      stage: "locating",
       completedBatches: Math.min(Math.floor(batchStart / SEARCH_BATCH_SIZE) + 1, totalBatches),
       totalBatches,
       completedIssues: Math.min(completedIssues, issues.length),
@@ -412,7 +1180,7 @@ async function resolveIssueTargets(
   return {
     targets,
     summaryIssues,
-    fallbackAnchorRange: firstTargetRange || getRootRange(searchContext),
+    fallbackAnchorRange: firstTargetRange || fallbackAnchorRange,
   };
 }
 
@@ -564,10 +1332,33 @@ function buildClientLocator(sourceText: string, issue: ProofreadIssue): Proofrea
   return null;
 }
 
-function getRootRange(searchContext: SearchContext): Word.Range {
+async function getFallbackAnchorRange(
+  context: Word.RequestContext,
+  searchContext: SearchContext
+): Promise<Word.Range> {
+  try {
+    const paragraphs =
+      searchContext.rootKind === "body"
+        ? (searchContext.root as Word.Body).paragraphs
+        : (searchContext.root as Word.Range).paragraphs;
+    const firstParagraph = paragraphs.getFirstOrNullObject();
+    // eslint-disable-next-line office-addins/no-navigational-load -- Required to inspect OrNullObject before selecting a small fallback anchor.
+    firstParagraph.load("isNullObject");
+    await context.sync();
+
+    if (!firstParagraph.isNullObject) {
+      return firstParagraph.getRange(Word.RangeLocation.start);
+    }
+  } catch (error) {
+    logWordOperationFailure("anchor", error);
+    appendDebugLog("warn", "获取汇总批注段落锚点失败，退回范围起点", {
+      error: getWordErrorDetails(error),
+    });
+  }
+
   return searchContext.rootKind === "body"
-    ? (searchContext.root as Word.Body).getRange()
-    : (searchContext.root as Word.Range);
+    ? (searchContext.root as Word.Body).getRange(Word.RangeLocation.start)
+    : (searchContext.root as Word.Range).getRange(Word.RangeLocation.start);
 }
 
 function isIssueLocatable(sourceText: string, issue: ProofreadIssue): boolean {
@@ -631,42 +1422,116 @@ function getOccurrenceCount(text: string, target: string): number {
 }
 
 function formatIssueComment(issue: ProofreadIssue): string {
-  return [
-    issue.replacement ? `替换为：${issue.replacement}` : "",
-    `建议：${issue.suggestion || "未提供"}`,
-    `类别：${issue.category} / ${issue.severity}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  return limitCommentText(
+    sanitizeCommentText(
+      [
+        issue.replacement ? `替换为：${issue.replacement}` : "",
+        `建议：${issue.suggestion || "未提供"}`,
+        `类别：${issue.category} / ${issue.severity}`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+  );
 }
 
-function formatFallbackComment(issues: ProofreadIssue[]): string {
-  const visibleIssues = issues.slice(0, FALLBACK_COMMENT_PREVIEW_LIMIT);
-  const remainingCount = issues.length - visibleIssues.length;
-  const remainingMessage =
-    remainingCount > 0
-      ? `\n\n另有 ${remainingCount} 条未定位建议，请在任务窗格中查看完整结果。`
-      : "";
+function buildFallbackCommentChunks(
+  issues: ProofreadIssue[],
+  options: ApplyIssuesOptions
+): { chunks: FallbackCommentChunk[]; truncatedFallbackCount: number } {
+  const entries = issues.map((issue, index) => ({
+    issue,
+    entry: formatFallbackIssueEntry(issue, index + 1),
+  }));
+  const budget = FALLBACK_COMMENT_MAX_LENGTH - FALLBACK_COMMENT_HEADER_RESERVE;
+  const groups: Array<Array<{ issue: ProofreadIssue; entry: string }>> = [];
+  let currentGroup: Array<{ issue: ProofreadIssue; entry: string }> = [];
+  let currentLength = 0;
 
-  return `AI 审校：以下 ${issues.length} 条建议未能精准写回，已汇总为单条批注。\n\n${formatComment(visibleIssues)}${remainingMessage}`;
-}
+  entries.forEach((entry) => {
+    const separatorLength = currentGroup.length > 0 ? 2 : 0;
+    const nextLength = currentLength + separatorLength + entry.entry.length;
 
-function formatComment(issues: ProofreadIssue[]): string {
-  if (issues.length === 0) {
-    return "AI 审校：未发现明显问题。";
-  }
-
-  const lines = ["AI 审校建议："];
-
-  issues.forEach((issue, index) => {
-    lines.push("");
-    lines.push(`${index + 1}. [${issue.severity}] ${issue.category}`);
-    lines.push(`原文：${issue.original || "未提供"}`);
-    if (issue.replacement) {
-      lines.push(`替换为：${issue.replacement}`);
+    if (currentGroup.length > 0 && nextLength > budget) {
+      groups.push(currentGroup);
+      currentGroup = [];
+      currentLength = 0;
     }
-    lines.push(`建议：${issue.suggestion || "未提供"}`);
+
+    currentGroup.push(entry);
+    currentLength += (currentGroup.length > 1 ? 2 : 0) + entry.entry.length;
   });
 
-  return lines.join("\n");
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  const truncateEnabled = options.fallbackSummaryTruncateEnabled !== false;
+  const visibleGroups = truncateEnabled ? groups.slice(0, FALLBACK_COMMENT_MAX_CHUNKS) : groups;
+  const truncatedFallbackCount = truncateEnabled
+    ? groups.slice(FALLBACK_COMMENT_MAX_CHUNKS).reduce((count, group) => count + group.length, 0)
+    : 0;
+
+  const chunks = visibleGroups.map((group, index) => {
+    const title = `AI 审校汇总批注 ${index + 1}/${visibleGroups.length}`;
+    const issueText = group.map(({ entry }) => entry).join("\n\n");
+    const truncationNotice =
+      truncatedFallbackCount > 0 && index === visibleGroups.length - 1
+        ? `\n\n另有 ${truncatedFallbackCount} 条未写入汇总批注，请在任务窗格中查看。`
+        : "";
+    const comment = limitText(
+      sanitizeCommentText(
+        `${title}\n以下 ${group.length} 条建议未能精准写回：\n\n${issueText}${truncationNotice}`
+      ),
+      FALLBACK_COMMENT_MAX_LENGTH,
+      "\n\n（本条汇总批注过长，已截断；完整建议请在任务窗格中查看。）"
+    );
+
+    return {
+      issues: group.map(({ issue }) => issue),
+      comment,
+    };
+  });
+
+  return { chunks, truncatedFallbackCount };
+}
+
+function formatFallbackIssueEntry(issue: ProofreadIssue, displayIndex: number): string {
+  const lines = [
+    `${displayIndex}. [${issue.severity}] ${issue.category}`,
+    `原文：${issue.original || "未提供"}`,
+    issue.replacement ? `替换为：${issue.replacement}` : "",
+    `建议：${issue.suggestion || "未提供"}`,
+  ];
+
+  return limitText(
+    sanitizeCommentText(lines.filter(Boolean).join("\n")),
+    FALLBACK_ISSUE_MAX_LENGTH,
+    "\n（单条建议过长，已截断；完整建议请在任务窗格中查看。）"
+  );
+}
+
+function sanitizeCommentText(text: string): string {
+  return Array.from(text)
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) || 0;
+      return codePoint === 9 || codePoint === 10 || (codePoint > 31 && codePoint !== 127);
+    })
+    .join("");
+}
+
+function limitCommentText(text: string): string {
+  return limitText(
+    text,
+    MAX_COMMENT_LENGTH,
+    "\n\n（批注内容过长，已截断；完整建议请在任务窗格中查看。）"
+  );
+}
+
+function limitText(text: string, maxLength: number, suffix: string): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, Math.max(0, maxLength - suffix.length))}${suffix}`;
 }

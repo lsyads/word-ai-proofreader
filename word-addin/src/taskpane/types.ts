@@ -95,6 +95,7 @@ export interface ProofreadHistoryEntry {
   locatedIssueCount: number;
   revisionCount: number;
   fallbackCount: number;
+  failedCount?: number;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
@@ -118,9 +119,13 @@ export interface IssueApplicationSummary {
   commentCount: number;
   revisionCount: number;
   fallbackCount: number;
+  fallbackCommentCount: number;
+  failedCount: number;
+  truncatedFallbackCount: number;
 }
 
 export interface IssueApplicationProgress {
+  stage?: "locating" | "commenting" | "revising" | "fallback";
   completedBatches: number;
   totalBatches: number;
   completedIssues: number;
@@ -149,6 +154,7 @@ export interface ControlsState {
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
   applicationMode: ApplicationMode;
+  fallbackSummaryTruncateEnabled: boolean;
   scope: ProofreadScope;
 }
 

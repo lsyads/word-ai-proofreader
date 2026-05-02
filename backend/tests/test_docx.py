@@ -2,6 +2,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from typing import TypeAlias
 
 from fastapi.testclient import TestClient
 from app.main import app
@@ -12,18 +13,27 @@ from app.services import docx_tasks as docx_task_service
 
 client = TestClient(app)
 BOOK = {"title": "测试书名", "introduction": "这是一部测试图书。"}
+ParagraphSpec: TypeAlias = str | tuple[str, str]
 
 
 def setup_function():
     docx_task_service.clear_tasks_for_tests()
 
 
-def make_docx(paragraphs: list[str], table_text: str = "", textbox_text: str = "") -> bytes:
+def make_docx(paragraphs: list[ParagraphSpec], table_text: str = "", textbox_text: str = "") -> bytes:
     body_parts = []
-    for text in paragraphs:
+    for paragraph in paragraphs:
+        if isinstance(paragraph, tuple):
+            text, style = paragraph
+            style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>'
+        else:
+            text = paragraph
+            style_xml = ""
+
         body_parts.append(
             f"""
             <w:p>
+              {style_xml}
               <w:r><w:t>{text}</w:t></w:r>
             </w:p>
             """
@@ -111,6 +121,51 @@ def test_split_docx_prefers_chapter_then_section_boundaries():
     assert chunks[0].text.startswith("第一章")
     assert any(chunk.text.startswith("第二章") for chunk in chunks)
     assert all(len(chunk.text) <= 7600 for chunk in chunks)
+
+
+def test_split_docx_uses_toc_titles_only_after_chapter_and_section_are_still_large():
+    long_body = "甲" * 3600
+    document = docx_service.parse_docx(
+        make_docx(
+            [
+                ("目录小标题一 1", "TOC1"),
+                ("目录小标题二 2", "TOC1"),
+                "第一章 开始",
+                "第一节 小节",
+                "目录小标题一",
+                long_body,
+                "目录小标题二",
+                long_body,
+            ]
+        )
+    )
+
+    chunks = docx_service.split_docx_into_chunks(document)
+
+    assert any(chunk.text.startswith("第一节 小节") for chunk in chunks)
+    assert any(chunk.text.startswith("目录小标题一") for chunk in chunks)
+    assert any(chunk.text.startswith("目录小标题二") for chunk in chunks)
+
+
+def test_split_docx_does_not_use_heading3_as_toc_without_toc_entries():
+    long_body = "甲" * 3600
+    document = docx_service.parse_docx(
+        make_docx(
+            [
+                "第一章 开始",
+                "第一节 小节",
+                ("普通三级标题一", "Heading3"),
+                long_body,
+                ("普通三级标题二", "Heading3"),
+                long_body,
+            ]
+        )
+    )
+
+    chunks = docx_service.split_docx_into_chunks(document)
+
+    assert not any(chunk.text.startswith("普通三级标题一") for chunk in chunks)
+    assert not any(chunk.text.startswith("普通三级标题二") for chunk in chunks)
 
 
 def test_write_docx_result_inserts_comment(tmp_path: Path):

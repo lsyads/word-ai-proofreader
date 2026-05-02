@@ -32,7 +32,7 @@ backend/
 - 在配置 `AI_API_KEY` 时按 `provider_api` 调用 OpenAI 兼容 Responses API 或 Chat Completions。
 - 把 AI 精简输出转换为结构化 `issues[]`，过滤纯空白差异，计算 `start/end/locator`。
 - 当前选区 `> 7000` 字时按默认 `chunk_size=5000` 分块；分块结果额外返回 `global_start/global_end`。
-- 全书 `.docx` 任务仅支持 `.docx`，不支持旧二进制 `.doc`；后端抽取目录可见文本、正文、表格和常见文本框文字，优先按章、节和目录小标题分块，最后生成新的 `.docx` 结果文件。
+- 全书 `.docx` 任务仅支持 `.docx`，不支持旧二进制 `.doc`；后端抽取目录可见文本、正文、表格和常见文本框文字，先按章、节拆分，仍超过 7000 字时再按可提取的目录小标题辅助拆分，最后生成新的 `.docx` 结果文件。
 - 通过内存任务提供分块进度、SSE、取消、当前分块重试和失败分块重试。
 
 ## 本地运行

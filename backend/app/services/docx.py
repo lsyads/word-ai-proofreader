@@ -33,6 +33,7 @@ DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessin
 CHAPTER_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[章篇部卷]\b")
 SECTION_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[节回]\b")
 TOC_STYLE_RE = re.compile(r"^toc\d*|^TOC\d*|目录", re.IGNORECASE)
+TRAILING_PAGE_NUMBER_RE = re.compile(r"[\s.\u00a0·…\t]+[ivxlcdmIVXLCDM\d一二三四五六七八九十百千万零〇]+$")
 
 ET.register_namespace("w", W_NS)
 ET.register_namespace("r", R_NS)
@@ -157,6 +158,7 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
 
 
 def split_docx_into_chunks(document: DocxDocument, chunk_size: int = chunking.DEFAULT_CHUNK_SIZE) -> list[ProofreadChunk]:
+    toc_titles = _extract_toc_titles(document.blocks)
     block_groups = _split_blocks_by_boundaries(document.blocks, "chapter")
     refined_groups: list[list[DocxBlock]] = []
 
@@ -165,7 +167,7 @@ def split_docx_into_chunks(document: DocxDocument, chunk_size: int = chunking.DE
 
     toc_refined_groups: list[list[DocxBlock]] = []
     for group in refined_groups:
-        toc_refined_groups.extend(_split_large_group(group, "toc"))
+        toc_refined_groups.extend(_split_large_group_by_toc_titles(group, toc_titles))
 
     chunks: list[ProofreadChunk] = []
     for group in toc_refined_groups:
@@ -239,12 +241,43 @@ def _split_large_group(group: list[DocxBlock], boundary_kind: str) -> list[list[
     return split_groups
 
 
+def _split_large_group_by_toc_titles(
+    group: list[DocxBlock],
+    toc_titles: set[str],
+) -> list[list[DocxBlock]]:
+    if _group_length(group) <= chunking.SELECTION_CHUNK_THRESHOLD or not toc_titles:
+        return [group]
+
+    split_groups = _split_blocks_by_toc_titles(group, toc_titles)
+    if len(split_groups) == 1:
+        return [group]
+
+    return split_groups
+
+
 def _split_blocks_by_boundaries(blocks: list[DocxBlock], boundary_kind: str) -> list[list[DocxBlock]]:
     groups: list[list[DocxBlock]] = []
     current: list[DocxBlock] = []
 
     for block in blocks:
         is_boundary = _is_boundary_block(block, boundary_kind)
+        if current and is_boundary:
+            groups.append(current)
+            current = []
+        current.append(block)
+
+    if current:
+        groups.append(current)
+
+    return groups or [blocks]
+
+
+def _split_blocks_by_toc_titles(blocks: list[DocxBlock], toc_titles: set[str]) -> list[list[DocxBlock]]:
+    groups: list[list[DocxBlock]] = []
+    current: list[DocxBlock] = []
+
+    for block in blocks:
+        is_boundary = _normalized_toc_title(block.text) in toc_titles and not _is_toc_entry_block(block)
         if current and is_boundary:
             groups.append(current)
             current = []
@@ -290,10 +323,38 @@ def _is_boundary_block(block: DocxBlock, boundary_kind: str) -> bool:
     if boundary_kind == "section":
         return bool(SECTION_RE.match(text)) or style.lower() in {"heading2", "2", "标题2"}
 
-    if boundary_kind == "toc":
-        return bool(TOC_STYLE_RE.search(style)) or style.lower() in {"heading3", "3", "标题3"}
-
     return False
+
+
+def _extract_toc_titles(blocks: list[DocxBlock]) -> set[str]:
+    titles: set[str] = set()
+
+    for block in blocks:
+        if not _is_toc_entry_block(block):
+            continue
+
+        title = _normalized_toc_title(block.text)
+        if title:
+            titles.add(title)
+
+    return titles
+
+
+def _is_toc_entry_block(block: DocxBlock) -> bool:
+    style = block.style or ""
+    return bool(TOC_STYLE_RE.search(style))
+
+
+def _normalized_toc_title(text: str) -> str:
+    title = text.strip()
+    if not title:
+        return ""
+
+    title = title.replace("\u00a0", " ")
+    title = re.sub(r"\s+", " ", title)
+    title = TRAILING_PAGE_NUMBER_RE.sub("", title).strip()
+    title = re.sub(r"^[\d一二三四五六七八九十百千万零〇]+(?:[.、．]\d+)*[.、．]?\s*", "", title)
+    return title.strip()
 
 
 def _try_insert_comment(

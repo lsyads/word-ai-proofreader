@@ -15,6 +15,8 @@ def test_settings_defaults():
     assert settings.backend_cors_origins == "https://localhost:3000,http://localhost:3000"
     assert settings.backend_cors_origin_list == ["https://localhost:3000", "http://localhost:3000"]
     assert settings.backend_log_level == "INFO"
+    assert settings.docx_output_dir.name == "docx-results"
+    assert settings.docx_retention_days == 7
 
 
 def test_settings_parses_comma_separated_cors_origins():
@@ -29,3 +31,17 @@ def test_settings_reads_comma_separated_cors_origins_from_env(monkeypatch):
     settings = Settings()
 
     assert settings.backend_cors_origin_list == ["https://localhost:3000", "http://localhost:3000"]
+
+
+def test_settings_enforces_minimum_docx_retention_days():
+    settings = Settings(DOCX_RETENTION_DAYS=1)
+
+    assert settings.docx_retention_days == 7
+
+
+def test_settings_resolves_relative_docx_output_dir_from_backend_root():
+    settings = Settings(DOCX_OUTPUT_DIR="var/docx-results")
+
+    assert settings.docx_output_dir.is_absolute()
+    assert settings.docx_output_dir.name == "docx-results"
+    assert settings.docx_output_dir.parent.name == "var"

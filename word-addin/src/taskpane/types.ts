@@ -52,6 +52,8 @@ export interface DocxProofreadResponse {
   application_mode: ApplicationMode;
   output_filename?: string | null;
   download_url?: string | null;
+  expires_at?: string | null;
+  retention_days?: number | null;
   error_message?: string | null;
 }
 
@@ -68,6 +70,8 @@ export interface ProofreadStatusEvent {
   source_filename?: string;
   output_filename?: string | null;
   download_url?: string | null;
+  expires_at?: string | null;
+  retention_days?: number | null;
   chunk_index?: number;
   chunk_start?: number;
   chunk_end?: number;
@@ -133,6 +137,8 @@ export interface ProofreadHistoryEntry {
   sourceFilename?: string | null;
   outputFilename?: string | null;
   downloadUrl?: string | null;
+  expiresAt?: string | null;
+  retentionDays?: number | null;
 }
 
 export interface IssueApplicationSummary {
@@ -171,6 +177,8 @@ export interface PendingProofreadResult {
   sourceFilename?: string | null;
   outputFilename?: string | null;
   downloadUrl?: string | null;
+  expiresAt?: string | null;
+  retentionDays?: number | null;
 }
 
 export interface ControlsState {

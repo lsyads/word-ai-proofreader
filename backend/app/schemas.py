@@ -132,6 +132,8 @@ class DocxProofreadResult(BaseModel):
     application_mode: ApplicationMode
     output_filename: str | None = None
     download_url: str | None = None
+    expires_at: str | None = None
+    retention_days: int | None = None
     error_message: str | None = None
 
 

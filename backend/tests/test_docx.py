@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeAlias
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import ProofreadIssue
 from app.services import docx as docx_service
+from app.services import docx_store
 from app.services import docx_tasks as docx_task_service
 
 
@@ -227,7 +229,7 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     assert "正字" in document_xml
 
 
-def test_docx_task_api_uploads_generates_and_downloads(monkeypatch):
+def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Path):
     async def fake_proofread_text(
         text,
         book,
@@ -249,6 +251,7 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch):
         ]
 
     monkeypatch.setattr(docx_task_service, "proofread_text", fake_proofread_text)
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
     source = make_docx(["这里有错字。"])
     response = client.post(
         "/api/proofread/docx/tasks",
@@ -274,11 +277,150 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch):
     assert payload["status"] == "succeeded"
     assert payload["issue_count"] == 1
     assert payload["output_filename"].endswith(".docx")
+    assert payload["retention_days"] == 7
+    assert datetime.fromisoformat(payload["expires_at"]) - datetime.now(UTC) > timedelta(days=6)
 
     download = client.get(f"/api/proofread/docx/tasks/{task_id}/download")
     assert download.status_code == 200
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert "word/document.xml" in archive.namelist()
+
+
+def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Path):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+    ):
+        return []
+
+    monkeypatch.setattr(docx_task_service, "proofread_text", fake_proofread_text)
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
+    source = make_docx(["第一章 开始", "没有问题。"])
+    response = client.post(
+        "/api/proofread/docx/tasks",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "application_mode": "comment",
+        },
+        content=source,
+        headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    )
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+
+    with client.stream("GET", f"/api/proofread/docx/tasks/{task_id}/events") as stream:
+        assert "completed" in stream.read().decode()
+
+    docx_task_service.clear_tasks_for_tests()
+
+    final = client.get(f"/api/proofread/docx/tasks/{task_id}")
+    assert final.status_code == 200
+    assert final.json()["output_filename"].endswith(".docx")
+
+    download = client.get(f"/api/proofread/docx/tasks/{task_id}/download")
+    assert download.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        assert "word/document.xml" in archive.namelist()
+
+
+def test_docx_store_cleanup_deletes_only_expired_results(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
+    root = docx_store.output_dir()
+    expired_file = root / "expired-task" / "expired.docx"
+    active_file = root / "active-task" / "active.docx"
+    expired_file.parent.mkdir(parents=True)
+    active_file.parent.mkdir(parents=True)
+    expired_file.write_bytes(b"expired")
+    active_file.write_bytes(b"active")
+    now = datetime.now(UTC)
+
+    docx_store.save_result(
+        task_id="expired-task",
+        source_filename="源.docx",
+        output_filename="expired.docx",
+        application_mode="comment",
+        status="succeeded",
+        total_chunks=1,
+        completed_chunks=1,
+        failed_chunks=0,
+        issue_count=0,
+        relative_path="expired-task/expired.docx",
+        created_at=(now - timedelta(days=8)).isoformat(),
+        updated_at=(now - timedelta(days=8)).isoformat(),
+        expires_at=(now - timedelta(seconds=1)).isoformat(),
+    )
+    docx_store.save_result(
+        task_id="active-task",
+        source_filename="源.docx",
+        output_filename="active.docx",
+        application_mode="revision",
+        status="partial_succeeded",
+        total_chunks=2,
+        completed_chunks=1,
+        failed_chunks=1,
+        issue_count=3,
+        relative_path="active-task/active.docx",
+        created_at=now.isoformat(),
+        updated_at=now.isoformat(),
+        expires_at=(now + timedelta(days=7)).isoformat(),
+    )
+
+    assert docx_store.cleanup_expired() == 1
+    assert not expired_file.exists()
+    assert active_file.exists()
+    assert docx_store.get_result("expired-task") is None
+    assert docx_store.get_result("active-task") is not None
+
+
+def test_docx_download_reports_expired_or_missing_result(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
+    now = datetime.now(UTC)
+    expired_file = docx_store.output_dir() / "expired-task" / "expired.docx"
+    expired_file.parent.mkdir(parents=True)
+    expired_file.write_bytes(b"expired")
+    docx_store.save_result(
+        task_id="expired-task",
+        source_filename="源.docx",
+        output_filename="expired.docx",
+        application_mode="comment",
+        status="succeeded",
+        total_chunks=1,
+        completed_chunks=1,
+        failed_chunks=0,
+        issue_count=0,
+        relative_path="expired-task/expired.docx",
+        created_at=(now - timedelta(days=8)).isoformat(),
+        updated_at=(now - timedelta(days=8)).isoformat(),
+        expires_at=(now - timedelta(seconds=1)).isoformat(),
+    )
+    docx_store.save_result(
+        task_id="missing-task",
+        source_filename="源.docx",
+        output_filename="missing.docx",
+        application_mode="comment",
+        status="succeeded",
+        total_chunks=1,
+        completed_chunks=1,
+        failed_chunks=0,
+        issue_count=0,
+        relative_path="missing-task/missing.docx",
+        created_at=now.isoformat(),
+        updated_at=now.isoformat(),
+        expires_at=(now + timedelta(days=7)).isoformat(),
+    )
+
+    expired = client.get("/api/proofread/docx/tasks/expired-task/download")
+    missing = client.get("/api/proofread/docx/tasks/missing-task/download")
+
+    assert expired.status_code == 409
+    assert "expired" in expired.json()["detail"]
+    assert missing.status_code == 409
+    assert "missing" in missing.json()["detail"]
 
 
 def test_docx_upload_rejects_doc_extension():

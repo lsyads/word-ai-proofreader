@@ -21,7 +21,7 @@ Word 插件任务窗格
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
-V2 支持两条范围链路：当前选区不超过 7000 字时使用单段链路，超过 7000 字时创建文本分块任务；“全书正文”上传 `.docx`，后端抽取目录可见文本、正文、表格和常见文本框文字，先按章拆分，再按节拆分，仍超过 7000 字时用可提取的目录小标题辅助拆分，最后按段落/句末规则分块，并生成新的 `.docx`。任务状态只存内存，服务重启后不可恢复。
+V2 支持两条范围链路：当前选区不超过 7000 字时使用单段链路，超过 7000 字时创建文本分块任务；“全书正文”上传 `.docx`，后端抽取目录可见文本、正文、表格和常见文本框文字，先按章拆分，再按节拆分，仍超过 7000 字时用可提取的目录小标题辅助拆分，最后按段落/句末规则分块，并生成新的 `.docx`。运行中任务状态仍以内存为主；已生成的 DOCX 结果文件写入稳定目录和 SQLite 索引，默认至少保留 7 天，服务重启后未过期结果仍可下载。
 
 ## Word 插件到后端
 
@@ -272,7 +272,9 @@ Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 
 后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端先在 chunk 文本中按 `original` 定位，再映射回 OOXML 节点写入批注或修订，因此全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
 
-DOCX 分块优先级是严格流水线：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可识别目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区分块规则。目录小标题不会提前打断章/节结构。任务 SSE、停止、重试当前分块和重试失败分块与文本分块任务同形，接口路径前缀为 `/api/proofread/docx/tasks`。终态成功或部分成功时，任务快照包含 `output_filename` 和 `download_url`，插件展示“下载审校后 Word”。
+DOCX 分块优先级是严格流水线：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可识别目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区分块规则。目录小标题不会提前打断章/节结构。任务 SSE、停止、重试当前分块和重试失败分块与文本分块任务同形，接口路径前缀为 `/api/proofread/docx/tasks`。终态成功或部分成功时，任务快照包含 `output_filename`、`download_url`、`expires_at` 和 `retention_days`，插件展示“下载审校后 Word”。
+
+结果文件保存到 `DOCX_OUTPUT_DIR`，默认 `backend/var/docx-results`；`DOCX_RETENTION_DAYS` 默认并强制最少为 7。后端用 SQLite 索引记录 task ID、源文件名、输出文件名、应用方式、分块统计、问题数和过期时间。启动、创建任务和下载时会清理过期结果；历史记录里的下载入口不保存文件本体，只要后端文件未过期且未被外部清理，就可以继续下载。
 
 批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记。修订模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
 
@@ -446,7 +448,7 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 当前选区修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
 
-全书 DOCX 模式下，插件不执行 Office.js 写回。后端按文档位置倒序写入批注或 `w:del/w:ins` 修订，保存新文件并把 `output_filename/download_url` 返回给插件。历史记录保存源文件名、输出文件名、应用方式、分块状态和问题数，不保存原文件或全文。
+全书 DOCX 模式下，插件不执行 Office.js 写回。后端按文档位置倒序写入批注或 `w:del/w:ins` 修订，保存新文件并把 `output_filename/download_url/expires_at` 返回给插件。历史记录保存源文件名、输出文件名、应用方式、分块状态、问题数、下载入口和过期时间，不保存原文件或全文。
 
 批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数、未定位数、是否已应用、`selectedIssueIds` 和 `skippedIssueCount`。开发阶段历史记录使用新 schema，不兼容旧历史数据。
 

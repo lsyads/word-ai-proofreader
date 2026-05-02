@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DEFAULT_DOCX_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "var" / "docx-results"
 
 
 class Settings(BaseSettings):
@@ -20,6 +26,18 @@ class Settings(BaseSettings):
         alias="BACKEND_CORS_ORIGINS",
     )
     backend_log_level: str = Field(default="INFO", alias="BACKEND_LOG_LEVEL")
+    docx_output_dir: Path = Field(default=DEFAULT_DOCX_OUTPUT_DIR, alias="DOCX_OUTPUT_DIR")
+    docx_retention_days: int = Field(default=7, alias="DOCX_RETENTION_DAYS")
+
+    @field_validator("docx_output_dir")
+    @classmethod
+    def relative_docx_output_dir_uses_backend_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else Path(__file__).resolve().parents[1] / value
+
+    @field_validator("docx_retention_days")
+    @classmethod
+    def docx_retention_days_must_be_at_least_seven(cls, value: int) -> int:
+        return max(7, value)
 
     @property
     def backend_cors_origin_list(self) -> list[str]:

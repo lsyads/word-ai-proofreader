@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
 import time
 import uuid
 from collections import OrderedDict
@@ -14,12 +13,12 @@ from typing import Any
 
 from app.schemas import BookInfo, ChunkedProofreadIssue, ChunkedTaskStatus, DocxProofreadResult
 from app.services import docx as docx_service
+from app.services import docx_store
 from app.services.ai_client import AIClientError, AIStreamEvent
 from app.services.proofread import ProofreadMode, ProviderAPI, proofread_text
 
 MAX_TASKS = 30
 HEARTBEAT_INTERVAL_SECONDS = 15.0
-OUTPUT_DIR = Path(tempfile.gettempdir()) / "word-ai-proofreader-docx"
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +54,7 @@ class DocxProofreadTask:
     error_message: str | None = None
     output_filename: str | None = None
     output_path: Path | None = None
+    expires_at: str | None = None
     cancel_requested: bool = False
     current_chunk_index: int | None = None
     current_chunk_started_at: float | None = None
@@ -73,6 +73,7 @@ _tasks: OrderedDict[str, DocxProofreadTask] = OrderedDict()
 
 
 def create_task(request: DocxProofreadRequestData) -> DocxProofreadResult:
+    cleanup_expired_results()
     document = docx_service.parse_docx(request.content)
     chunks = docx_service.split_docx_into_chunks(document)
     task_id = f"docx_task_{uuid.uuid4().hex}"
@@ -94,7 +95,15 @@ def create_task(request: DocxProofreadRequestData) -> DocxProofreadResult:
 
 
 def get_task(task_id: str) -> DocxProofreadResult:
-    return snapshot_task(_require_task(task_id))
+    task = _tasks.get(task_id)
+    if task:
+        return snapshot_task(task)
+
+    stored = docx_store.get_result(task_id)
+    if stored:
+        return snapshot_stored_result(stored)
+
+    raise DocxProofreadTaskNotFound(task_id)
 
 
 def cancel_task(task_id: str) -> DocxProofreadResult:
@@ -160,10 +169,19 @@ def retry_failed_chunks(task_id: str) -> DocxProofreadResult:
 
 
 def get_download_path(task_id: str) -> tuple[Path, str]:
-    task = _require_task(task_id)
-    if not task.output_path or not task.output_filename or not task.output_path.exists():
-        raise DocxProofreadTaskConflict("DOCX proofread result is not available for download.")
-    return task.output_path, task.output_filename
+    try:
+        output_path, stored = docx_store.resolve_download(task_id)
+    except KeyError as exc:
+        task = _tasks.get(task_id)
+        if task and task.output_path and task.output_filename and task.output_path.exists():
+            cleanup_expired_results()
+            return task.output_path, task.output_filename
+        raise DocxProofreadTaskNotFound(task_id) from exc
+    except (docx_store.DocxResultExpired, docx_store.DocxResultFileMissing) as exc:
+        raise DocxProofreadTaskConflict(str(exc)) from exc
+
+    cleanup_expired_results()
+    return output_path, stored.output_filename
 
 
 async def stream_task_events(task_id: str) -> AsyncIterator[AIStreamEvent]:
@@ -193,6 +211,14 @@ async def stream_task_events(task_id: str) -> AsyncIterator[AIStreamEvent]:
 
 def clear_tasks_for_tests() -> None:
     _tasks.clear()
+
+
+def clear_store_for_tests() -> None:
+    docx_store.clear_store_for_tests()
+
+
+def cleanup_expired_results() -> int:
+    return docx_store.cleanup_expired()
 
 
 async def _run_task(
@@ -283,8 +309,8 @@ async def _run_task(
             _emit(task, "error", _progress_payload(task, "DOCX 审校任务失败。"))
             return
 
-        _save_output_file(task)
         task.status = "partial_succeeded" if task.failed_chunks > 0 else "succeeded"
+        _save_output_file(task)
         _touch(task)
         message = "DOCX 审校任务部分完成，已生成可下载文件。" if task.failed_chunks else "DOCX 审校任务完成，已生成可下载文件。"
         _emit(task, "completed", _progress_payload(task, message))
@@ -383,7 +409,8 @@ def _globalize_issues(chunk: Any, issues: list[Any]) -> list[ChunkedProofreadIss
 
 def _save_output_file(task: DocxProofreadTask) -> None:
     output_filename = docx_service.build_output_filename(task.request.filename, task.request.application_mode)
-    output_path = OUTPUT_DIR / task.task_id / output_filename
+    relative_path = (Path(task.task_id) / output_filename).as_posix()
+    output_path = docx_store.result_path(relative_path)
     docx_service.write_docx_result(
         task.request.content,
         task.issues,
@@ -392,6 +419,22 @@ def _save_output_file(task: DocxProofreadTask) -> None:
     )
     task.output_filename = output_filename
     task.output_path = output_path
+    task.expires_at = docx_store.build_expires_at()
+    docx_store.save_result(
+        task_id=task.task_id,
+        source_filename=task.request.filename,
+        output_filename=output_filename,
+        application_mode=task.request.application_mode,
+        status=task.status,
+        total_chunks=task.total_chunks,
+        completed_chunks=task.completed_chunks,
+        failed_chunks=task.failed_chunks,
+        issue_count=task.issue_count,
+        relative_path=relative_path,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        expires_at=task.expires_at,
+    )
 
 
 def snapshot_task(task: DocxProofreadTask) -> DocxProofreadResult:
@@ -406,7 +449,27 @@ def snapshot_task(task: DocxProofreadTask) -> DocxProofreadResult:
         application_mode=task.request.application_mode,
         output_filename=task.output_filename,
         download_url=f"/api/proofread/docx/tasks/{task.task_id}/download" if task.output_filename else None,
+        expires_at=task.expires_at,
+        retention_days=docx_store.retention_days() if task.output_filename else None,
         error_message=task.error_message,
+    )
+
+
+def snapshot_stored_result(stored: docx_store.StoredDocxResult) -> DocxProofreadResult:
+    return DocxProofreadResult(
+        task_id=stored.task_id,
+        status=stored.status,
+        total_chunks=stored.total_chunks,
+        completed_chunks=stored.completed_chunks,
+        failed_chunks=stored.failed_chunks,
+        issue_count=stored.issue_count,
+        source_filename=stored.source_filename,
+        application_mode=stored.application_mode,
+        output_filename=stored.output_filename,
+        download_url=f"/api/proofread/docx/tasks/{stored.task_id}/download",
+        expires_at=stored.expires_at,
+        retention_days=docx_store.retention_days(),
+        error_message=None,
     )
 
 
@@ -440,6 +503,8 @@ def _progress_payload(
         "source_filename": task.request.filename,
         "output_filename": task.output_filename,
         "download_url": f"/api/proofread/docx/tasks/{task.task_id}/download" if task.output_filename else None,
+        "expires_at": task.expires_at,
+        "retention_days": docx_store.retention_days() if task.output_filename else None,
         "message": message,
     }
     if extra:

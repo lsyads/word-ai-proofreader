@@ -276,6 +276,8 @@ export function docxTaskSnapshotToStatus(
     source_filename: task.source_filename,
     output_filename: task.output_filename || undefined,
     download_url: task.download_url || undefined,
+    expires_at: task.expires_at || undefined,
+    retention_days: task.retention_days || undefined,
     error_message: task.error_message || undefined,
   };
 }
@@ -770,6 +772,9 @@ function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
     output_filename:
       typeof payload.output_filename === "string" ? payload.output_filename : undefined,
     download_url: typeof payload.download_url === "string" ? payload.download_url : undefined,
+    expires_at: typeof payload.expires_at === "string" ? payload.expires_at : undefined,
+    retention_days:
+      typeof payload.retention_days === "number" ? payload.retention_days : undefined,
   };
 }
 

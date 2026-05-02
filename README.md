@@ -21,8 +21,9 @@
 - AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions；未配置 `AI_API_KEY` 时返回 mock 结果，方便本地联调。
 - 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息作为 prompt 背景，但只审校传入正文。
 - 结果处理：后端把 AI 输出转换为结构化 `issues[]`，过滤纯空白差异，并按 `original` 计算 `start/end/locator`。
-- Word 写回：当前选区审校完成后先展示结果，编辑筛选、勾选并确认后由插件写回批注或修订；全书 `.docx` 由后端直接生成带批注或修订的新文件，插件展示新文件名和下载入口。
-- 历史记录：插件在本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；历史不保存完整正文。
+- Word 写回：当前选区审校完成后先展示结果，编辑筛选、勾选并确认后由插件写回批注或修订；全书 `.docx` 由后端直接生成带批注或修订的新文件，插件展示新文件名、保留期限和下载入口。
+- 结果保留：全书 `.docx` 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；历史记录里的下载入口在文件未过期且未被外部清理时可继续下载。
+- 历史记录：插件在本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；历史不保存完整正文或原始 DOCX。
 
 完整 API 契约见 [spec.md](spec.md)，通讯链路见 [docs/architecture.md](docs/architecture.md)。
 
@@ -49,6 +50,8 @@ BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
+DOCX_OUTPUT_DIR=var/docx-results
+DOCX_RETENTION_DAYS=7
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
@@ -125,7 +128,7 @@ npm run start
 5. 当前选区审校：在 Word 文档中选中正文；全书审校：准备一个 `.docx` 文件。
 6. 打开任务窗格，填写书名，按需选择审校范围、审校模式、API 模式和应用方式；全书模式需选择 `.docx` 文件。
 7. 点击“AI 审校”。当前选区会先展示问题；全书 `.docx` 会展示分块进度并在完成后显示新文件名。
-8. 当前选区可筛选、勾选、定位并点击“应用 N 条到 Word”；全书 `.docx` 点击“下载审校后 Word”获取后端生成的新文件。
+8. 当前选区可筛选、勾选、定位并点击“应用 N 条到 Word”；全书 `.docx` 点击“下载审校后 Word”获取后端生成的新文件，默认至少 7 天内可从历史记录再次下载。
 9. 验证停止审校、重试当前分块、重试失败分块、历史导出和历史导入等常用流程。
 
 ## 测试与验证

@@ -15,7 +15,7 @@ import {
 } from "./types";
 
 const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v2";
-const HISTORY_SCHEMA_VERSION = 3;
+const HISTORY_SCHEMA_VERSION = 4;
 const MAX_HISTORY_ENTRIES = 20;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
@@ -48,6 +48,8 @@ export function saveHistoryEntry(input: {
   sourceFilename?: string | null;
   outputFilename?: string | null;
   downloadUrl?: string | null;
+  expiresAt?: string | null;
+  retentionDays?: number | null;
   errorMessage?: string;
 }) {
   if (input.text.trim().length === 0) {
@@ -92,6 +94,8 @@ export function saveHistoryEntry(input: {
     sourceFilename: input.sourceFilename || null,
     outputFilename: input.outputFilename || null,
     downloadUrl: input.downloadUrl || null,
+    expiresAt: input.expiresAt || null,
+    retentionDays: input.retentionDays || null,
   };
 
   localStorage.setItem(
@@ -139,6 +143,8 @@ export function savePendingResultHistory(input: {
     sourceFilename: input.result.sourceFilename,
     outputFilename: input.result.outputFilename,
     downloadUrl: input.result.downloadUrl,
+    expiresAt: input.result.expiresAt,
+    retentionDays: input.result.retentionDays,
     errorMessage: input.errorMessage,
   });
 }
@@ -180,6 +186,8 @@ export function saveAppliedResultHistory(input: {
     sourceFilename: input.result.sourceFilename,
     outputFilename: input.result.outputFilename,
     downloadUrl: input.result.downloadUrl,
+    expiresAt: input.result.expiresAt,
+    retentionDays: input.result.retentionDays,
   });
 }
 
@@ -431,7 +439,13 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
       typeof value.outputFilename === "string") &&
     (typeof value.downloadUrl === "undefined" ||
       value.downloadUrl === null ||
-      typeof value.downloadUrl === "string")
+      typeof value.downloadUrl === "string") &&
+    (typeof value.expiresAt === "undefined" ||
+      value.expiresAt === null ||
+      typeof value.expiresAt === "string") &&
+    (typeof value.retentionDays === "undefined" ||
+      value.retentionDays === null ||
+      typeof value.retentionDays === "number")
   );
 }
 

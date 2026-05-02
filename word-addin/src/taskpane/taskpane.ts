@@ -417,6 +417,8 @@ async function proofreadDocxFile(
     sourceFilename: docxResult.source_filename,
     outputFilename: docxResult.output_filename || null,
     downloadUrl: docxResult.download_url || null,
+    expiresAt: docxResult.expires_at || null,
+    retentionDays: docxResult.retention_days || null,
   };
   issueReviewState = null;
   taskState = docxResult.status;
@@ -435,7 +437,7 @@ async function proofreadDocxFile(
   }
 
   const outputText = docxResult.output_filename
-    ? `已生成：${docxResult.output_filename}`
+    ? `已生成：${docxResult.output_filename}${formatRetentionSuffix(docxResult.expires_at)}`
     : "审校完成，但尚未生成可下载文件。";
   showMessage(outputText, docxResult.failed_chunks > 0 ? "default" : "success");
 }
@@ -512,6 +514,8 @@ async function retryFailedChunks() {
         issueCount: retryResult.issue_count,
         outputFilename: retryResult.output_filename || null,
         downloadUrl: retryResult.download_url || null,
+        expiresAt: retryResult.expires_at || null,
+        retentionDays: retryResult.retention_days || null,
       };
       issueReviewState = null;
       taskState = retryResult.status;
@@ -669,7 +673,7 @@ function renderDocxPendingResult() {
 
   const issueCount = pendingResult.issueCount || 0;
   const outputText = pendingResult.outputFilename
-    ? `已生成审校后 Word：${pendingResult.outputFilename}`
+    ? `已生成审校后 Word：${pendingResult.outputFilename}${formatRetentionSuffix(pendingResult.expiresAt)}`
     : "尚未生成审校后 Word。";
   getElement("docx-output").textContent = outputText;
   renderEmptyResult(
@@ -1042,6 +1046,8 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       sourceFilename: entry.sourceFilename,
       outputFilename: entry.outputFilename || null,
       downloadUrl: entry.downloadUrl || null,
+      expiresAt: entry.expiresAt || null,
+      retentionDays: entry.retentionDays || null,
     };
     issueReviewState = null;
     taskState = entry.status;
@@ -1167,7 +1173,7 @@ function updateDocxFileOutput() {
   const output = getElement("docx-output");
   const file = getInput("docx-file").files?.[0];
   if (pendingResult?.sourceFilename && pendingResult.outputFilename) {
-    output.textContent = `已生成：${pendingResult.outputFilename}`;
+    output.textContent = `已生成：${pendingResult.outputFilename}${formatRetentionSuffix(pendingResult.expiresAt)}`;
     return;
   }
   output.textContent = file ? `已选择：${file.name}` : "尚未生成审校后 Word。";
@@ -1221,7 +1227,7 @@ async function getDocxDownloadErrorMessage(response: Response): Promise<string> 
     const payload = (await response.json()) as { detail?: string };
     if (payload.detail) {
       if (response.status === 404 || response.status === 409) {
-        return `${payload.detail}。历史记录只保存下载入口；如果后端已重启、任务被清理或结果文件不存在，需要重新审校生成。`;
+        return `${payload.detail}。历史记录只保存下载入口；如果结果文件已过期或已被清理，需要重新审校生成。`;
       }
       return payload.detail;
     }
@@ -1230,6 +1236,19 @@ async function getDocxDownloadErrorMessage(response: Response): Promise<string> 
   }
 
   return `后端返回 HTTP ${response.status}`;
+}
+
+function formatRetentionSuffix(expiresAt?: string | null): string {
+  if (!expiresAt) {
+    return "";
+  }
+
+  const expiresDate = new Date(expiresAt);
+  if (Number.isNaN(expiresDate.getTime())) {
+    return "";
+  }
+
+  return `，保留至 ${expiresDate.toLocaleString()}`;
 }
 
 function persistBookInfo() {

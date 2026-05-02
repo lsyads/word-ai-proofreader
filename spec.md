@@ -105,7 +105,8 @@ Word 当前选区或 DOCX 文件
 - 后端抽取可见文本时同步建立“文本字符范围 -> OOXML 文本节点”映射。AI 仍只返回精简 issue，后端在 chunk 文本中定位 `original` 后直接映射回 DOCX 写回，不把 Word 写回 `locator` 交给前端。
 - 分块优先级：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可提取目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区的段落/句末规则。
 - 批注模式生成 Word 原生批注；修订模式对有 `replacement` 的问题生成 `w:del/w:ins` 原生修订，无 `replacement` 或无法安全定位时降级为汇总批注。
-- 任务完成后后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口。
+- 任务完成后后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口和保留期限。
+- 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；后端通过 SQLite 索引恢复重启后的下载能力，过期或文件被外部清理时下载返回明确错误。
 
 ## API 契约
 
@@ -337,17 +338,19 @@ Response:
   "application_mode": "comment",
   "output_filename": null,
   "download_url": null,
+  "expires_at": null,
+  "retention_days": null,
   "error_message": null
 }
 ```
 
 ### `GET /api/proofread/docx/tasks/{task_id}`
 
-查询 DOCX 任务状态。终态成功或部分成功时，`output_filename` 和 `download_url` 非空。
+查询 DOCX 任务状态。终态成功或部分成功时，`output_filename`、`download_url`、`expires_at` 和 `retention_days` 非空。后端重启后，如果结果索引和文件仍未过期，该接口仍可返回终态快照。
 
 ### `GET /api/proofread/docx/tasks/{task_id}/events`
 
-订阅 DOCX 任务 SSE。事件名与普通分块任务一致，事件数据额外包含 `source_filename`、`output_filename` 和 `download_url`。
+订阅 DOCX 任务 SSE。事件名与普通分块任务一致，事件数据额外包含 `source_filename`、`output_filename`、`download_url`、`expires_at` 和 `retention_days`。
 
 ### `DELETE /api/proofread/docx/tasks/{task_id}`
 
@@ -363,7 +366,7 @@ Response:
 
 ### `GET /api/proofread/docx/tasks/{task_id}/download`
 
-下载后端生成的审校后 `.docx` 文件。结果尚未生成时返回 409。
+下载后端生成的审校后 `.docx` 文件。结果尚未生成、已过期或文件丢失时返回明确错误；未过期结果即使后端重启也可通过持久化索引下载。
 
 ## Word 写回规则
 
@@ -419,9 +422,9 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 点击停止审校会中断前端请求并取消后端异步任务；分块审校保留已收到 issues 供查看和应用。
 - Word 中书名为空或空选区时显示错误，不调用审校接口。
 - 后端返回非空 `issues[]` 时，插件只展示结果；点击“应用 N 条到 Word”后才写回已选问题。
-- 全书 `.docx` 完成后插件显示后端保存的新文件名和“下载审校后 Word”按钮。
+- 全书 `.docx` 完成后插件显示后端保存的新文件名、保留期限和“下载审校后 Word”按钮。
 - 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 批注模式不改正文；修订模式生成可接受/拒绝的 Word 修订，并在完成后恢复原修订设置。
 - 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订。
 - `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
-- 插件本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；新历史可再次筛选、勾选、定位和应用，旧历史缺少 locator occurrence 时只读。
+- 插件本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；DOCX 历史保存输出文件名、下载入口和过期时间，不保存原文件或全文。当前选区新历史可再次筛选、勾选、定位和应用，旧历史缺少 locator occurrence 时只读。

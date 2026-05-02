@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,13 @@ def configure_logging(level_name: str) -> None:
     logging.getLogger("app").setLevel(level)
 
 
-app = FastAPI(title="Word AI Proofreader", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    docx_task_service.cleanup_expired_results()
+    yield
+
+
+app = FastAPI(title="Word AI Proofreader", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
 configure_logging(settings.backend_log_level)
 logger = logging.getLogger(__name__)

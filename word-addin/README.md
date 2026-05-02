@@ -1,128 +1,39 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office 插件前端。当前 V2 提供“当前选区 / 全书正文”审校范围，并支持单独开启“深度思考”以控制后端 Chat `reasoning.enabled`。审校完成后先在任务窗格展示结果，用户可筛选、逐条勾选并定位原文，再点击“应用 N 条到 Word”写回已选问题：批注模式按后端返回的 `locator` 分批定位，把可精准写回的审校建议作为逐条批注插入对应原文片段；修订模式用 `replacement` 替换原文并生成 Word 原生修订；可定位但无 `replacement` 的建议回退为原位批注；已选但不可精准写回建议按字符预算拆成多条汇总批注，未选建议不会写回。
+`word-addin/` 是 Word AI 审校助手的 Office.js 前端。它读取 Word 当前选区或全书正文，调用后端审校接口，展示结构化问题，并在用户确认后把已选问题写成 Word 批注或修订。
+
+完整 API 契约见仓库根目录 [spec.md](../spec.md)；通讯链路见 [docs/architecture.md](../docs/architecture.md)。
 
 ## 目录结构
 
 ```text
 word-addin/
-├── assets/
-├── src/
-│   └── taskpane/
-│       ├── api.ts
-│       ├── history.ts
-│       ├── render.ts
-│       ├── taskpane.css
-│       ├── taskpane.html
-│       ├── taskpane.ts
-│       ├── types.ts
-│       └── word.ts
-├── .eslintrc.json
-├── babel.config.json
+├── assets/              # manifest 和任务窗格使用的图标
+├── src/taskpane/
+│   ├── api.ts           # 后端 API、SSE、任务轮询
+│   ├── debug.ts         # 前端调试日志
+│   ├── history.ts       # localStorage 历史记录
+│   ├── render.ts        # 任务窗格渲染和控件状态
+│   ├── taskpane.html    # 任务窗格 HTML
+│   ├── taskpane.css     # 任务窗格样式
+│   ├── taskpane.ts      # 页面入口和主流程编排
+│   ├── types.ts         # 前端类型和常量
+│   └── word.ts          # Word API 读取、定位、批注、修订
 ├── manifest.xml
-├── package-lock.json
 ├── package.json
 ├── tsconfig.json
 └── webpack.config.js
 ```
 
-## 文件说明
+## 主要职责
 
-- `manifest.xml`
-  - Office Add-in 清单文件。
-  - 定义插件 ID、名称、图标、权限、宿主应用、任务窗格地址。
-  - 当前插件宿主是 Word 文档，权限是 `ReadWriteDocument`。
-  - 功能区按钮文案是“AI 审校”，点击后打开 `taskpane.html`。
-
-- `package.json`
-  - Node 依赖和脚本入口。
-  - 常用脚本：
-    - `npm run dev-server`：启动 HTTPS Webpack dev server。
-    - `npm run start`：启动调试并旁加载到 Word。
-    - `npm run stop`：停止调试会话。
-    - `npm run lint`：运行 Office add-in lint。
-    - `npm run build`：生产构建。
-    - `npm run validate`：联网验证 manifest。
-
-- `webpack.config.js`
-  - Webpack 构建配置。
-  - 入口包含 `taskpane`。
-  - 复制 assets 和 manifest 到构建产物。
-  - 本地 dev server 使用 HTTPS，默认端口 `3000`。
-  - 将同源 `/api` 请求代理到 `http://127.0.0.1:8000`，避免 Word WebView 从 HTTPS 页面直接访问 HTTP 后端导致 `Load failed`。
-
-- `src/taskpane/taskpane.html`
-  - 任务窗格 HTML。
-  - 定义标题、状态提示、书名/书籍介绍输入、快速/深度审校切换、深度思考开关、Responses/Chat API 切换、批注/修订模式切换、审校范围切换、“AI 审校”、“应用到 Word”、审校结果展示区域、历史记录管理按钮。
-  - 当前不再保留独立的 WordApi 检测、读取选区、测试批注按钮。
-
-- `src/taskpane/taskpane.css`
-  - 任务窗格样式。
-  - 控制页面布局、按钮、状态消息、审校结果列表。
-
-- `src/taskpane/taskpane.ts`
-  - 当前的核心前端逻辑。
-  - `Office.onReady` 后绑定“AI 审校”、“应用到 Word”、“清空当前结果”、历史清空/导出/导入按钮。
-  - 点击后内部流程：
-    1. 校验书名必填，并把书名和可选介绍保存在 `localStorage`。
-    2. 检查 Word 批注 API 能力。
-    3. 按审校范围读取当前 Word 选区或正文文本。
-    4. 小选区走 `/api/proofread/stream` 或 `/api/proofread`；长选区和全书正文走 `/api/proofread/tasks`，通过 SSE 或轮询展示分块进度；收到 `chunk_started` 后本地每秒刷新当前块耗时，超时后可手动重试当前分块，任务结束后可重试失败分块。
-    5. 审校完成后只在任务窗格展示结果，初始化所有 issue 为已选，并支持按严重程度、类别、定位状态和是否可直接替换筛选。
-    6. 用户可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项；“应用到 Word”按钮显示当前已选数量。
-    7. 单条“定位”优先使用 `locator.key` 搜索低重复片段；context locator 会先找到 key range，再在小范围内搜索 `original`，不插入批注或修订。
-    8. 批注模式：只对已选且可精准写回的 issue 插入单条批注；无可靠 `locator` 或 Word 搜索失败的问题按 1200 字预算拆成多条短汇总批注。批注写入按 16 条一批提交，正常情况下每 64 条复用同一个 `Word.run`；某批失败时换新上下文拆成单条重试。
-    9. 修订模式：临时将 `document.changeTrackingMode` 设为 `TrackAll`，只对已选、可精准写回且有 `replacement` 的 issue 用 `insertText(..., Replace)` 生成 Word 修订，完成后恢复原设置。修订按全文位置倒序、16 条一批提交，正常情况下每 64 条复用同一个 `Word.run`，失败批次会换 fresh 上下文单条重试。
-    10. 修订模式中已选、可精准写回但无 `replacement` 的 issue 回退为原位批注；未选 issue 不写回 Word。
-    11. “应用到 Word”不限制总条数，但会按 16 个 locator key 一批执行 Word search，并按 16 条一批提交批注或修订，任务窗格区分显示“正在定位 / 正在写入批注 / 正在写入修订 / 正在写入汇总批注”。
-    12. 批注正文写入前会移除不可见控制字符，精准批注超过 1500 字会截断并提示到任务窗格查看完整建议；汇总批注按 1200 字拆分，并默认最多写入 10 条；没有成功定位 range 时，汇总批注固定到当前应用范围首字符附近。某条被 Word 拒绝写入时，后续条目继续应用，最终提示并保存失败数量。
-    13. 将最近 20 条历史保存到 `localStorage`，支持清空、另存为 JSON、导入 JSON；新历史保存 locator 定位包和 `key_occurrence_index`，不保存完整审校正文。可回写历史打开后恢复为当前结果，可筛选、勾选、定位并再次应用；旧历史缺少定位包时只读。
-
-- `assets/`
-  - 插件图标和 logo。
-  - 被 manifest 和任务窗格引用，并由 Webpack 复制到构建产物。
-
-- `.eslintrc.json`
-  - Office add-in lint 配置。
-
-- `babel.config.json`
-  - TypeScript/Babel 转译配置。
-
-- `tsconfig.json`
-  - TypeScript 编译配置。
-
-- `.vscode/`
-  - Office add-in 模板生成的 VS Code 调试配置。
-
-## 前后端通信
-
-任务窗格页面运行在：
-
-```text
-https://localhost:3000/taskpane.html
-```
-
-前端请求：
-
-```text
-POST /api/proofread/stream
-POST /api/proofread
-```
-
-请求体包含必填 `book.title` 和可选 `book.introduction`，后端会把它们作为 prompt 背景传给 AI；书名为空时前端会直接提示，不读取 Word 选区，也不调用后端审校接口。
-
-Webpack dev server 转发：
-
-```text
-https://localhost:3000/api/proofread/stream -> http://127.0.0.1:8000/api/proofread/stream
-https://localhost:3000/api/proofread -> http://127.0.0.1:8000/api/proofread
-```
-
-注意：
-
-- API Key 只存在后端运行环境。
-- 前端源码、manifest、Webpack 构建产物中不应出现 `AI_API_KEY`、`Authorization` 或真实 Key。
-- 修改 `webpack.config.js` 后需要重启 dev server。
+- 插件按钮打开 `https://localhost:3000/taskpane.html`。
+- 校验书名，读取当前选区或 `document.body.text`。
+- 当前选区 `> 7000` 字或全书正文时走 `/api/proofread/tasks`；默认分块大小与后端保持 `5000`。
+- Responses 模式优先走 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接走 `/api/proofread`。
+- 审校结果先展示在任务窗格，不自动写回 Word。
+- 支持筛选、逐条勾选、批量选择、单条定位、批注模式和修订模式。
+- 本地保存最近 20 条新 schema 历史，支持清空、导出 JSON 和导入 JSON。
 
 ## 本地运行
 
@@ -133,10 +44,16 @@ cd word-addin
 npm install
 ```
 
-启动 dev server：
+启动 HTTPS dev server：
 
 ```bash
 npm run dev-server
+```
+
+默认地址：
+
+```text
+https://localhost:3000/taskpane.html
 ```
 
 旁加载到 Word：
@@ -145,35 +62,21 @@ npm run dev-server
 npm run start
 ```
 
-停止调试：
+停止旁加载调试：
 
 ```bash
 npm run stop
 ```
 
-## 联调前置条件
+## 后端代理
 
-先启动后端：
+Webpack dev server 将同源 `/api` 请求代理到后端：
 
-```bash
-cd ../backend
-source .venv/bin/activate
-uvicorn app.main:app --env-file ../.env --host 127.0.0.1 --port 8000 --reload
+```text
+https://localhost:3000/api/* -> http://127.0.0.1:8000/api/*
 ```
 
-确认后端可用：
-
-```bash
-curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
-```
-
-确认 dev server 代理可用：
-
-```bash
-curl --noproxy localhost -k -X POST https://localhost:3000/api/proofread \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"这是一段需要审校的文本。","book":{"title":"测试书名","introduction":"这是一部用于联调的测试图书。"}}'
-```
+这样可以避免 Word WebView 从 HTTPS 任务窗格直接请求 HTTP 后端时被拦截。修改 `webpack.config.js` 后需要重启 dev server。
 
 ## 测试与构建
 
@@ -181,11 +84,19 @@ curl --noproxy localhost -k -X POST https://localhost:3000/api/proofread \
 cd word-addin
 npm run lint
 npm run build
+```
+
+Manifest 联网校验：
+
+```bash
 npm run validate
 ```
 
-说明：
+`npm run validate` 需要访问 Microsoft Office manifest validation service，离线或网络受限时可能失败。
 
-- `npm run validate` 需要访问 Microsoft Office manifest validation service。
-- `dist/` 是构建产物，不应提交。
-- `node_modules/` 不应提交。
+## 开发注意事项
+
+- API 字段和端点以 [../spec.md](../spec.md) 为准。
+- 不要在前端源码、manifest、Webpack 配置或构建产物中写入 `AI_API_KEY`、`Authorization` 或真实 Key。
+- `dist/`、`node_modules/`、本地证书和调试缓存不应提交。
+- 修改 Word 用户流程时，同步更新根目录 [../README.md](../README.md) 的联调流程。

@@ -1,51 +1,40 @@
 # Word AI 审校助手
 
-面向出版社责任编辑的 Word AI 审校助手。
+面向出版社责任编辑的 Word AI 审校助手。编辑在 Word 中选中一段正文，或选择“全书正文”，点击插件按钮后由 FastAPI 后端调用 AI 审校，返回结构化问题；插件先展示结果，待编辑确认后再把已选问题写成 Word 批注或修订。
 
 ## 项目结构
 
 ```text
 .
 ├── backend/      # Python FastAPI 后端服务
+├── docs/         # 架构和补充文档
 ├── scripts/      # 本地开发辅助脚本
-├── word-addin/   # Office.js + TypeScript + Webpack 的 Word 插件
-├── AGENTS.md     # 项目协作约定
-└── spec.md       # 技术方案和开发计划
+├── word-addin/   # Office.js + TypeScript + Webpack Word 插件
+├── AGENTS.md     # 协作约定
+└── spec.md       # API 契约和验收标准
 ```
 
-## 当前 V2 能力
+## 当前能力
 
-- Word 任务窗格提供一个正式入口：“AI 审校”。
-- 插件打开时会创建一个本地 session；点击“清空当前结果”会清空任务窗格中的当前审校结果，并创建新的本地 session。后端不使用 session 续接 AI 上下文。
-- 插件可选择审校范围：“当前选区”或“全书正文”。全书正文以 `document.body.text` 为范围，暂不包含页眉页脚、脚注、文本框等非正文内容。
-- 当前选区不超过 7000 字时沿用单段审校；当前选区超过 7000 字或选择全书正文时，会自动按约 5000 字分块审校，并优先在段落或句末边界切分，不硬切自然句。
-- 插件提供书籍信息输入：书名必填，介绍可选，并保存在本地用于同一本书连续审校；书籍信息会作为 prompt 背景传给后端。
-- 插件可切换“快速审校/深度审校”、`Responses/Chat` API，并可单独开启“深度思考”；深度思考默认关闭，Chat 模式下对应后端 `reasoning.enabled`。
-- 插件可切换“批注模式/修订模式”；默认批注模式，避免默认改正文。
-- 插件调用后端 `POST /api/proofread`。
-- Responses 模式下，插件优先调用后端 `POST /api/proofread/stream`，并在任务窗格“运行过程”区域展示阶段进度；流式不可用时自动回退 `POST /api/proofread`。Chat 模式直接调用 `POST /api/proofread`，由后端使用标准 Chat Completions。
-- 分块审校使用 `POST /api/proofread/tasks` 创建内存异步任务，优先通过 `GET /api/proofread/tasks/{task_id}/events` 获取 SSE 进度；进度流不可用时回退 `GET /api/proofread/tasks/{task_id}` 轮询。
-- 分块审校运行中，当前块超过等待阈值后可手动“重试当前分块”；任务结束后如存在失败块，可手动“重试失败分块”并继续合并结果。
-- AI 原始输出只包含精简 `issues[]`，不返回 `start/end/locator`；其中 `replacement` 是可直接替换正文的新文本。后端会过滤纯空白差异 issue，并按 `original` 在选区文本中搜索、计算位置和带 `key_occurrence_index` 的低重复 `locator`。
-- 分块结果会把每条问题转换成全文全局位置 `global_start/global_end`，并平移 `locator.key_start/key_end`；插件用 `locator.key` 分批定位，避免长文或全书中反复全文搜索。历史记录不保存完整审校正文，但新历史可用 locator 定位包恢复后再次回写。
-- 审校完成后先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选问题，并可逐条勾选、全选、全不选、只选高/中风险或只选可直接替换项。
-- 可定位问题支持在应用前点击“定位”选中 Word 原文；点击“应用到 Word”时，插件只把已勾选的问题按当前“批注模式/修订模式”插入批注或生成修订。
-- 可定位问题会写回对应原文片段；修订模式下可定位且有 `replacement` 的问题生成 Word 修订，可定位但无 `replacement` 的问题回退为原位批注；已勾选但未定位的问题会在“应用到 Word”时按 1200 字预算拆成多条汇总批注，优先贴近本批成功定位 range，没有成功定位时固定在当前应用范围首字符附近；插件默认开启汇总批注截断保护，最多写入 10 条汇总批注，超出部分留在任务窗格查看；未勾选问题不会写回 Word。
-- “应用到 Word”不限制总条数，但定位、批注写入和修订写入都会分批执行并持续显示进度。定位批次触发 Word 异常时会降级汇总；批注和修订写入按 16 条写入批提交，正常情况下每 64 条复用同一个 Word 请求上下文，某批被 Word 拒绝时再换 fresh 上下文重试；汇总批注也只用 fresh 上下文写入，已成功提交的批注和修订不会回滚。
-- 插件支持停止当前审校，并在本地保存最近 20 条新 schema 审校历史用于回看、清空、另存为 JSON 和导入 JSON；历史记录保存已选问题 ID、跳过数量和 locator 定位包，不保存完整正文；新历史打开后可像当前结果一样筛选、勾选、定位和回写，旧历史缺少定位包时只读。
-- 未配置 `AI_API_KEY` 时，后端返回 mock 审校结果，方便本地联调。
+- 审校范围：当前选区或全书正文。全书正文使用 `document.body.text`，暂不包含页眉页脚、脚注、文本框等非正文内容。
+- 分块规则：当前选区 `> 7000` 字或选择全书正文时，走后端内存异步任务；默认 `chunk_size=5000`，优先在段落或句末边界切分，不硬切自然句。
+- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions；未配置 `AI_API_KEY` 时返回 mock 结果，方便本地联调。
+- 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息作为 prompt 背景，但只审校传入正文。
+- 结果处理：后端把 AI 输出转换为结构化 `issues[]`，过滤纯空白差异，并按 `original` 计算 `start/end/locator`。
+- Word 写回：审校完成后只展示结果；编辑筛选、勾选并确认后，插件按批注模式或修订模式写回已选问题。
+- 历史记录：插件在本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；历史不保存完整正文。
 
-完整通讯链路和数据格式见 [docs/architecture.md](docs/architecture.md)。
+完整 API 契约见 [spec.md](spec.md)，通讯链路见 [docs/architecture.md](docs/architecture.md)。
 
 ## 环境变量
 
-复制 `.env.example` 后按需填写本地配置。
+复制模板后按需填写：
 
 ```bash
 cp .env.example .env
 ```
 
-常用变量：
+常用配置：
 
 ```text
 AI_API_KEY=local-omlx-dev-key
@@ -63,39 +52,14 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-当前前端 V2 在开发环境中先请求同源 `/api/sessions` 创建本地 session。Responses 模式优先请求同源 `/api/proofread/stream`；Chat 模式请求同源 `/api/proofread`。这些请求由 `https://localhost:3000` 的 Webpack dev server 代理到 `http://127.0.0.1:8000`，避免 Word 任务窗格从 HTTPS 页面直接请求 HTTP 后端时被 WebView 拦截。Responses 流式读取不可用时，插件会自动回退到同源 `/api/proofread`。
-
-V2 分块审校同样走同源 `/api/proofread/tasks`、`/api/proofread/tasks/{task_id}` 和 `/api/proofread/tasks/{task_id}/events`，由 dev server 代理到 FastAPI。异步任务只保存在后端内存中，服务重启后任务状态和结果会丢失。前端收到 `chunk_started` 后会本地每秒刷新当前块耗时，后端低频 `heartbeat` 事件用于保活和校准进度；当前块长时间无响应时可调用 `/api/proofread/tasks/{task_id}/retry-current` 重试当前块，任务结束后可调用 `/api/proofread/tasks/{task_id}/retry-failed` 重试失败块。部分 chunk 失败但有结果时，任务状态为 `partial_succeeded`，后端 INFO 级别日志和前端进度区都会显示失败 chunk 的编号、范围、耗时和错误信息。
-
-API Key 只配置在后端运行环境中。本地开发使用根目录 `.env`；生产环境使用部署平台提供的 Secret 或 Environment Variables。不要把真实 Key 写入 `manifest.xml`、`taskpane.ts`、Webpack 配置、前端构建产物或文档。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。配置真实 AI 时，后端默认使用 `/v1/responses` 单轮审校，不发送 `previous_response_id`；插件也可以切换到 `/v1/chat/completions` 单轮审校。快速审校使用 `AI_FAST_MAX_TOKENS`，深度审校使用 `AI_THINKING_MAX_TOKENS`。
-
-后端默认 `BACKEND_LOG_LEVEL=INFO`，会打印请求模式、文本长度、provider 状态码、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因等信息，不打印 API Key 或完整请求正文。AI 返回报文可能包含 `original` 原文摘录，便于联调定位；模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符时，后端会先清理再做结构校验。临时设为 `DEBUG` 时会额外打印 `/api/proofread`、`/api/proofread/stream` 和 AI provider 请求报文；DEBUG 日志会包含选区文本、书名、介绍和 AI 返回内容，但仍不会打印 API Key、`Authorization` 或 Bearer token，不建议生产开启。
+API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest.xml`、前端源码、Webpack 配置、构建产物或文档。
 
 ## 启动 oMLX 本地 AI 服务
 
-本地真实 AI 联调推荐先用 oMLX 启动 OpenAI 兼容服务。脚本默认读取 `/Users/wulala/AI/models`，监听 `8001` 端口，避免和 FastAPI 后端 `8000` 冲突。
+本地真实 AI 联调可用 oMLX 启动 OpenAI 兼容服务。脚本默认读取 `/Users/wulala/AI/models`，监听 `8001` 端口。
 
 ```bash
 ./scripts/start-omlx.sh
-```
-
-脚本默认会在启动前把 `Qwen3.6-35B-A3B-4.4bit-msq` 写入 `~/.omlx/model_settings.json`，设置为 default + pinned。oMLX 启动时会预加载 pinned 模型，因此正常情况下不需要再到管理页手动加载。
-
-可按需覆盖默认配置：
-
-```bash
-OMLX_MODEL_DIR=/Users/wulala/AI/models \
-OMLX_BASE_PATH="$HOME/.omlx" \
-OMLX_PORT=8001 \
-OMLX_API_KEY=local-omlx-dev-key \
-OMLX_PRELOAD_MODEL=Qwen3.6-35B-A3B-4.4bit-msq \
-./scripts/start-omlx.sh
-```
-
-如只想启动服务、不改 oMLX 的模型设置，可使用：
-
-```bash
-OMLX_CONFIGURE_MODEL_SETTINGS=0 ./scripts/start-omlx.sh
 ```
 
 模型服务检查：
@@ -105,7 +69,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8001/v1/models \
   -H 'Authorization: Bearer local-omlx-dev-key'
 ```
 
-默认后端联调模型使用 `Qwen3.6-35B-A3B-4.4bit-msq`。如果 `/v1/models` 返回的模型 ID 和目录名不同，请把 `.env` 中的 `OPENAI_MODEL` 改成返回的模型 ID。
+如 `/v1/models` 返回的模型 ID 和 `.env` 不一致，请更新 `OPENAI_MODEL`。
 
 ## 启动后端
 
@@ -127,35 +91,6 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 
 ```json
 {"status":"ok"}
-```
-
-审校接口 smoke test。未配置 `AI_API_KEY` 时返回 mock；使用上面的 oMLX 配置时调用本地真实 AI：
-
-```bash
-SESSION_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/sessions | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
-curl --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread \
-  -H 'Content-Type: application/json' \
-  -d "{\"text\":\"这是一段需要审校的文本。\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
-```
-
-流式审校接口 smoke test。预期会依次看到 `status`、`result` 等 SSE 事件：
-
-```bash
-curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: text/event-stream' \
-  -d "{\"text\":\"这是一段需要审校的文本。\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"context\":{\"source\":\"manual-curl\"}}"
-```
-
-分块任务 smoke test。创建任务后用返回的 `task_id` 查询状态，或连接任务 SSE：
-
-```bash
-TASK_ID="$(curl --noproxy 127.0.0.1 -sS -X POST http://127.0.0.1:8000/api/proofread/tasks \
-  -H 'Content-Type: application/json' \
-  -d "{\"text\":\"$(printf '这是一段需要分块审校的文本。%.0s' {1..400})\",\"book\":{\"title\":\"测试书名\",\"introduction\":\"这是一部用于联调的测试图书。\"},\"session_id\":\"${SESSION_ID}\",\"provider_api\":\"responses\",\"proofread_mode\":\"fast\",\"scope\":\"document\",\"chunk_size\":5000,\"context\":{\"source\":\"manual-curl\"}}" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')"
-curl --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}
-curl --no-buffer --noproxy 127.0.0.1 http://127.0.0.1:8000/api/proofread/tasks/${TASK_ID}/events
 ```
 
 ## 启动 Word 插件
@@ -181,32 +116,18 @@ cd word-addin
 npm run start
 ```
 
-如果 3000 端口已经被占用，先确认占用的是否是当前插件 dev server：
-
-```bash
-lsof -nP -iTCP:3000 -sTCP:LISTEN
-curl --noproxy localhost -k -I https://localhost:3000/taskpane.html
-```
-
 ## 联调流程
 
-1. 启动 oMLX 本地 AI 服务，确认 `http://127.0.0.1:8001/v1/models` 可访问。
+1. 启动 oMLX 或配置远程 OpenAI 兼容 API。
 2. 启动后端，确认 `/health` 返回 `{"status":"ok"}`。
 3. 启动 `word-addin` dev server。
 4. 运行 `npm run start` 旁加载插件到 Word。
-5. 在 Word 文档中选中一段文本，或准备使用“全书正文”范围。
-6. 打开任务窗格，填写书名，按需填写书籍介绍，并选择“当前选区/全书正文”、“快速审校/深度审校”、`Responses/Chat` 和“批注模式/修订模式”。
-7. 点击“AI 审校”。
-8. 确认任务窗格“运行过程”区域先逐条显示阶段进度；长选区或全书会显示分块进度、失败块数和累计问题数。
-9. 审校完成后，确认任务窗格只展示结果，不会立即新增 Word 批注或修订。
-10. 使用筛选器、复选框和批量选择按钮调整待应用问题；点击单条“定位”，确认 Word 选中对应原文片段。
-11. 点击“应用 N 条到 Word”，确认只有已勾选问题写回；批注模式下可定位问题批注在对应原文片段上，修订模式下有 `replacement` 且可定位的问题会在 Word 审阅面板中显示为可接受/拒绝的修订；任务窗格会显示定位和写入批次进度。
-12. 已勾选但无法精准写回的问题会先显示在任务窗格；点击“应用 N 条到 Word”后，默认最多写入 10 条、每条 1200 字以内的短汇总批注，优先锚定在本批首个成功定位 range；没有成功定位时固定在当前应用范围首字符附近；未勾选问题不写回 Word。如果某条批注或修订被 Word 拒绝，确认后续条目继续应用，最终提示写入失败数量。
-13. 如果后端返回空 `issues[]`，确认任务窗格提示未发现明显问题，且 Word 中不新增批注或修订。
-14. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
-15. 审校运行中点击“停止审校”，确认提示“当前分块完成后结束”；分块审校会保留已收到的 issues，可继续查看或应用，并在历史记录中保存为已停止。
-16. 分块审校当前块等待超过阈值后，确认“重试当前分块”按钮可用；部分完成或失败后如存在失败块，确认“重试失败分块”按钮可用并能继续合并结果。
-17. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理；打开新历史后可再次筛选、勾选、定位并应用到当前 Word 文档，旧历史缺少定位包时只读。
+5. 在 Word 文档中选中正文，或准备使用“全书正文”范围。
+6. 打开任务窗格，填写书名，按需选择审校范围、审校模式、API 模式和应用方式。
+7. 点击“AI 审校”，确认结果先展示在任务窗格，不会立即写回 Word。
+8. 筛选并勾选问题，点击单条“定位”确认能选中对应原文。
+9. 点击“应用 N 条到 Word”，确认只有已勾选问题写回；批注模式插入批注，修订模式对可直接替换项生成 Word 修订。
+10. 验证清空、停止审校、分块重试、历史导出和历史导入等常用流程。
 
 ## 测试与验证
 
@@ -224,16 +145,21 @@ python -m pytest -q
 cd word-addin
 npm run lint
 npm run build
+```
+
+Manifest 联网校验：
+
+```bash
+cd word-addin
 npm run validate
 ```
 
-`npm run validate` 需要访问 Office manifest validation service，离线或网络受限时可能失败。
+`npm run validate` 需要访问 Microsoft Office manifest validation service，离线或网络受限时可能失败。
 
 ## 文档维护约定
 
-开发完成后需要同步更新文档：
-
-- 改接口契约时，更新 `spec.md` 和本文件的 API 说明。
-- 改启动命令、端口、环境变量时，更新本文件的运行说明。
-- 改 Word 插件用户流程时，更新联调流程和常见问题。
-- 改项目协作规则时，更新 `AGENTS.md`。
+- 改接口契约时，更新 [spec.md](spec.md)。
+- 改通讯链路、SSE、Word 写回流程时，更新 [docs/architecture.md](docs/architecture.md)。
+- 改启动方式、端口、环境变量或联调流程时，更新本文件。
+- 改 Windows 试点部署流程时，更新 [DEPLOYMENT.md](DEPLOYMENT.md)。
+- 临时排障记录放在 `docs/tmp/`，不要写进长期 README。

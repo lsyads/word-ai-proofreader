@@ -1,6 +1,6 @@
 # Word AI 审校助手链路说明
 
-本文说明 Word 插件、FastAPI 后端、AI provider 之间的通讯链路、数据格式和 SSE 使用位置。
+本文说明 Word 插件、FastAPI 后端、AI provider 之间的通讯链路、数据格式和 SSE 使用位置。接口字段和验收标准以根目录 `spec.md` 为准，本文只解释链路和内部流程。
 
 ## 总览
 
@@ -20,7 +20,7 @@ Word 插件任务窗格
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
-V2 支持统一范围审校：当前选区不超过 5000 字时使用原单段链路；当前选区超过 5000 字或选择“全书正文”时，插件创建后端内存异步任务，后端按约 3000 字顺序分块审校。分块优先在段落或句末边界切分，找不到时向后延伸到下一个边界，不硬切自然句。任务状态只存内存，服务重启后不可恢复。
+V2 支持统一范围审校：当前选区不超过 7000 字时使用单段链路；当前选区超过 7000 字或选择“全书正文”时，插件创建后端内存异步任务，后端默认按约 5000 字顺序分块审校。分块优先在段落或句末边界切分，找不到时向后延伸到下一个边界，不硬切自然句。任务状态只存内存，服务重启后不可恢复。
 
 ## Word 插件到后端
 
@@ -207,7 +207,7 @@ Content-Type: application/json
   "provider_api": "responses",
   "proofread_mode": "fast",
   "scope": "document",
-  "chunk_size": 3000,
+  "chunk_size": 5000,
   "context": {
     "source": "word-addin",
     "flow": "chunked-task"
@@ -228,8 +228,8 @@ Response:
   "task_id": "task_xxx",
   "scope": "document",
   "status": "succeeded",
-  "total_chunks": 3,
-  "completed_chunks": 3,
+  "total_chunks": 2,
+  "completed_chunks": 2,
   "failed_chunks": 0,
   "issues": [
     {
@@ -242,8 +242,8 @@ Response:
       "start": 0,
       "end": 4,
       "chunk_index": 1,
-      "global_start": 3000,
-      "global_end": 3004
+      "global_start": 5000,
+      "global_end": 5004
     }
   ],
   "error_message": null

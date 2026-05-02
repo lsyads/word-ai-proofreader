@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.schemas import (
+    AIProfileResponse,
     ApplicationMode,
     BookInfo,
     ChunkedProofreadRequest,
@@ -27,6 +28,7 @@ from app.services import docx as docx_service
 from app.services import docx_tasks as docx_task_service
 from app.services import tasks as task_service
 from app.services.ai_client import AIClientError
+from app.services.ai_profiles import AIProfileError, list_public_ai_profiles
 from app.services.sessions import create_session
 from app.settings import get_settings
 
@@ -75,12 +77,33 @@ async def create_ai_session() -> SessionResponse:
     return session
 
 
+@app.get("/api/ai-profiles", response_model=list[AIProfileResponse])
+async def get_ai_profiles() -> list[AIProfileResponse]:
+    try:
+        profiles = list_public_ai_profiles()
+    except AIProfileError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return [
+        AIProfileResponse(
+            id=profile.id,
+            label=profile.label,
+            model=profile.model,
+            default_api=profile.default_api,
+            supported_apis=list(profile.supported_apis),
+            configured=profile.configured,
+        )
+        for profile in profiles
+    ]
+
+
 @app.post("/api/proofread", response_model=ProofreadResponse)
 async def proofread(request: ProofreadRequest) -> ProofreadResponse:
     logger.info(
-        "proofread request received text_len=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread request received text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         _mask_session_id(request.session_id),
+        request.ai_profile_id or "default",
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
@@ -91,10 +114,13 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
             request.text,
             request.book,
             session_id=request.session_id,
+            ai_profile_id=request.ai_profile_id,
             provider_api=request.provider_api,
             proofread_mode=request.proofread_mode,
             reasoning_enabled=request.reasoning_enabled,
         )
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except AIClientError as exc:
         logger.warning(
             "proofread request failed text_len=%s session_id=%s error=%s",
@@ -117,7 +143,10 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
 
 @app.post("/api/proofread/stream")
 async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
-    provider_api = proofread_service.resolve_provider_api(request.provider_api)
+    try:
+        provider_api = proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if provider_api == "chat":
         raise HTTPException(
             status_code=400,
@@ -125,9 +154,10 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
         )
 
     logger.info(
-        "proofread stream accepted text_len=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread stream accepted text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         _mask_session_id(request.session_id),
+        request.ai_profile_id or "default",
         provider_api,
         request.proofread_mode,
         request.reasoning_enabled,
@@ -147,16 +177,21 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
 @app.post("/api/proofread/chunked", response_model=ChunkedProofreadResult)
 async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
         _mask_session_id(request.session_id),
+        request.ai_profile_id or "default",
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
     )
     _debug_log_json("chunked proofread request body", request.model_dump())
+    try:
+        proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = await chunking.proofread_chunked(request)
     logger.info(
         "chunked proofread request completed total_chunks=%s completed_chunks=%s failed_chunks=%s issue_count=%s",
@@ -172,16 +207,21 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
 @app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
 async def create_proofread_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
         _mask_session_id(request.session_id),
+        request.ai_profile_id or "default",
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
     )
     _debug_log_json("proofread task request body", request.model_dump())
+    try:
+        proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return task_service.create_task(request)
 
 
@@ -245,6 +285,7 @@ async def create_docx_proofread_task(
     filename: str = Query(..., min_length=1),
     book: str = Query(..., min_length=1),
     session_id: str | None = Query(default=None),
+    ai_profile_id: str | None = Query(default=None),
     provider_api: proofread_service.ProviderAPI | None = Query(default=None),
     proofread_mode: proofread_service.ProofreadMode = Query(default="fast"),
     reasoning_enabled: bool = Query(default=False),
@@ -265,10 +306,11 @@ async def create_docx_proofread_task(
         raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
 
     logger.info(
-        "docx proofread task create requested filename=%s bytes=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s application_mode=%s",
+        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s application_mode=%s",
         filename,
         len(content),
         _mask_session_id(session_id),
+        ai_profile_id or "default",
         provider_api or "default",
         proofread_mode,
         reasoning_enabled,
@@ -276,12 +318,14 @@ async def create_docx_proofread_task(
     )
 
     try:
+        proofread_service.resolve_provider_api(provider_api, ai_profile_id)
         return docx_task_service.create_task(
             docx_task_service.DocxProofreadRequestData(
                 filename=filename,
                 content=content,
                 book=book_info,
                 session_id=session_id,
+                ai_profile_id=ai_profile_id,
                 provider_api=provider_api,
                 proofread_mode=proofread_mode,
                 reasoning_enabled=reasoning_enabled,
@@ -369,6 +413,8 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
             "provider_api": request.provider_api,
             "proofread_mode": request.proofread_mode,
         }
+        if request.ai_profile_id is not None:
+            stream_kwargs["ai_profile_id"] = request.ai_profile_id
         if request.reasoning_enabled:
             stream_kwargs["reasoning_enabled"] = True
 
@@ -386,7 +432,7 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
                 )
                 _debug_log_json("proofread stream result body", event.data)
             yield _format_sse(event.event, event.data)
-    except AIClientError as exc:
+    except (AIClientError, AIProfileError) as exc:
         logger.warning(
             "proofread stream failed text_len=%s session_id=%s error=%s",
             len(request.text),

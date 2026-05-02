@@ -103,6 +103,15 @@ export type ProofreadMode = "fast" | "thinking";
 export type ApplicationMode = "comment" | "revision";
 export type ProofreadScope = "selection" | "document";
 
+export interface AIProfile {
+  id: string;
+  label: string;
+  model: string;
+  default_api: ProviderAPI;
+  supported_apis: ProviderAPI[];
+  configured: boolean;
+}
+
 export interface ProofreadHistoryEntry {
   id: string;
   historySchemaVersion?: number;
@@ -117,6 +126,7 @@ export interface ProofreadHistoryEntry {
   revisionCount: number;
   fallbackCount: number;
   failedCount?: number;
+  aiProfileId?: string | null;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
@@ -169,6 +179,7 @@ export interface PendingProofreadResult {
   totalChunks: number;
   completedChunks: number;
   failedChunks: number;
+  aiProfileId?: string | null;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
@@ -182,6 +193,7 @@ export interface PendingProofreadResult {
 }
 
 export interface ControlsState {
+  aiProfileId: string;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;

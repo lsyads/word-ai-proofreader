@@ -133,6 +133,25 @@ Response:
 }
 ```
 
+### `GET /api/ai-profiles`
+
+返回后端 `.env` 解析出的 AI 配置档案，供 Word 插件下拉选择。响应不包含 API Key。
+
+Response:
+
+```json
+[
+  {
+    "id": "default",
+    "label": "Default AI (.env)",
+    "model": "Qwen3.6-35B-A3B-4.4bit-msq",
+    "default_api": "responses",
+    "supported_apis": ["responses", "chat"],
+    "configured": true
+  }
+]
+```
+
 ### `POST /api/proofread`
 
 普通审校接口。Chat 模式直接使用该接口；Responses 模式在流式接口不可用时回退到该接口。
@@ -147,6 +166,7 @@ Request:
     "introduction": "可选书籍介绍"
   },
   "session_id": "session_xxx",
+  "ai_profile_id": "default",
   "provider_api": "responses",
   "proofread_mode": "fast",
   "reasoning_enabled": false,
@@ -161,7 +181,8 @@ Request:
 - `text` 必填，去掉首尾空白后不能为空。
 - `book` 必填，规则见 `BookInfo`。
 - `session_id` 可选，不用于 AI 上下文续接。
-- `provider_api` 可选，支持 `responses`、`chat`；缺省使用 `AI_PROVIDER_API`，默认 `responses`。
+- `ai_profile_id` 可选；缺省使用后端 profile 列表第一项。旧 `.env` 配置会生成 `default` profile。
+- `provider_api` 可选，支持 `responses`、`chat`；缺省使用所选 profile 的 `default_api`。
 - `proofread_mode` 可选，支持 `fast`、`thinking`；默认 `fast`。
 - `reasoning_enabled` 可选，默认 `false`；Chat 模式下写入请求体 `reasoning.enabled`。
 - `context` 可选，用于调用来源等调试信息。
@@ -385,6 +406,7 @@ Response:
 ```text
 AI_API_KEY=local-omlx-dev-key
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -398,7 +420,9 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 - `AI_API_KEY` 为空时走 mock fallback。
-- `AI_PROVIDER_API` 默认 `responses`。
+- 不配置 `AI_PROFILES_JSON` 时，后端根据 `AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL` 生成 `default` profile。
+- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。
+- `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
 
@@ -407,7 +431,8 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `GET /health` 返回 200 和 `{ "status": "ok" }`。
 - 空文本、缺少 `book` 或空 `book.title` 返回 422。
 - 未配置 `AI_API_KEY` 时返回 mock `issues[]`。
-- 配置 `AI_API_KEY` 时按 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
+- 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
+- `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
 - 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异 issue 被过滤。

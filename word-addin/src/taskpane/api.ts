@@ -2,6 +2,7 @@
 
 import {
   ApplicationMode,
+  AIProfile,
   BookInfo,
   ChunkedProofreadIssue,
   ChunkedProofreadResponse,
@@ -31,10 +32,23 @@ export async function createSession(): Promise<SessionResponse> {
   return (await response.json()) as SessionResponse;
 }
 
+export async function getAIProfiles(): Promise<AIProfile[]> {
+  const response = await fetch(`${API_BASE_URL}/api/ai-profiles`, {
+    method: "GET",
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as AIProfile[];
+}
+
 export async function requestProofread(
   text: string,
   book: BookInfo,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -47,6 +61,7 @@ export async function requestProofread(
       text,
       book,
       sessionId,
+      aiProfileId,
       providerApi,
       proofreadMode,
       reasoningEnabled,
@@ -60,6 +75,7 @@ export async function requestProofread(
       text,
       book,
       sessionId,
+      aiProfileId,
       providerApi,
       proofreadMode,
       reasoningEnabled,
@@ -76,6 +92,7 @@ export async function requestProofread(
       text,
       book,
       sessionId,
+      aiProfileId,
       providerApi,
       proofreadMode,
       reasoningEnabled,
@@ -89,6 +106,7 @@ export async function requestChunkedProofreadTask(
   book: BookInfo,
   scope: ProofreadScope,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -109,6 +127,7 @@ export async function requestChunkedProofreadTask(
     book,
     scope,
     sessionId,
+    aiProfileId,
     providerApi,
     proofreadMode,
     reasoningEnabled,
@@ -130,6 +149,7 @@ export async function requestDocxProofreadTask(
   file: File,
   book: BookInfo,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -143,6 +163,7 @@ export async function requestDocxProofreadTask(
     file,
     book,
     sessionId,
+    aiProfileId,
     providerApi,
     proofreadMode,
     reasoningEnabled,
@@ -317,6 +338,7 @@ async function requestProofreadJson(
   text: string,
   book: BookInfo,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -332,6 +354,7 @@ async function requestProofreadJson(
       text,
       book,
       session_id: sessionId,
+      ai_profile_id: aiProfileId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
@@ -352,6 +375,7 @@ async function requestProofreadStream(
   text: string,
   book: BookInfo,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -369,6 +393,7 @@ async function requestProofreadStream(
       text,
       book,
       session_id: sessionId,
+      ai_profile_id: aiProfileId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
@@ -436,6 +461,7 @@ async function createProofreadTask(
   book: BookInfo,
   scope: ProofreadScope,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -451,6 +477,7 @@ async function createProofreadTask(
       text,
       book,
       session_id: sessionId,
+      ai_profile_id: aiProfileId,
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
@@ -474,6 +501,7 @@ async function createDocxProofreadTask(
   file: File,
   book: BookInfo,
   sessionId: string,
+  aiProfileId: string,
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
@@ -484,6 +512,7 @@ async function createDocxProofreadTask(
     filename: file.name,
     book: JSON.stringify(book),
     session_id: sessionId,
+    ai_profile_id: aiProfileId,
     provider_api: providerApi,
     proofread_mode: proofreadMode,
     reasoning_enabled: String(reasoningEnabled),

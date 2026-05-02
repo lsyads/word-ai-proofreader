@@ -4,7 +4,6 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from app.schemas import (
-    BookInfo,
     ChunkedProofreadIssue,
     ChunkedProofreadRequest,
     ChunkedProofreadResult,
@@ -22,17 +21,7 @@ BOUNDARY_LOOKBACK = 1500
 PARAGRAPH_BOUNDARIES = ("\n\n", "\r\n\r\n", "\n", "\r")
 SENTENCE_BOUNDARIES = ("。", "！", "？", "；", ".", "!", "?", ";")
 
-ProofreadChunkCallable = Callable[
-    [
-        str,
-        BookInfo,
-        str | None,
-        proofread_service.ProviderAPI | None,
-        proofread_service.ProofreadMode,
-        bool,
-    ],
-    Awaitable[list[ProofreadIssue]],
-]
+ProofreadChunkCallable = Callable[..., Awaitable[list[ProofreadIssue]]]
 
 logger = logging.getLogger(__name__)
 
@@ -115,22 +104,43 @@ async def proofread_chunks(
     for chunk in chunks:
         try:
             if request.reasoning_enabled:
-                chunk_issues = await proofread_chunk(
-                    chunk.text,
-                    request.book,
-                    request.session_id,
-                    request.provider_api,
-                    request.proofread_mode,
-                    True,
-                )
+                if request.ai_profile_id is not None:
+                    chunk_issues = await proofread_chunk(
+                        chunk.text,
+                        request.book,
+                        request.session_id,
+                        request.ai_profile_id,
+                        request.provider_api,
+                        request.proofread_mode,
+                        True,
+                    )
+                else:
+                    chunk_issues = await proofread_chunk(
+                        chunk.text,
+                        request.book,
+                        request.session_id,
+                        request.provider_api,
+                        request.proofread_mode,
+                        True,
+                    )
             else:
-                chunk_issues = await proofread_chunk(
-                    chunk.text,
-                    request.book,
-                    request.session_id,
-                    request.provider_api,
-                    request.proofread_mode,
-                )
+                if request.ai_profile_id is not None:
+                    chunk_issues = await proofread_chunk(
+                        chunk.text,
+                        request.book,
+                        request.session_id,
+                        request.ai_profile_id,
+                        request.provider_api,
+                        request.proofread_mode,
+                    )
+                else:
+                    chunk_issues = await proofread_chunk(
+                        chunk.text,
+                        request.book,
+                        request.session_id,
+                        request.provider_api,
+                        request.proofread_mode,
+                    )
         except Exception:
             failed_chunks += 1
             logger.exception("chunk proofread failed chunk_index=%s", chunk.index)

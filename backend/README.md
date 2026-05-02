@@ -72,6 +72,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 ```text
 AI_API_KEY=local-omlx-dev-key
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -84,7 +85,9 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 说明：
 
 - `AI_API_KEY` 为空时使用 mock fallback。
-- `AI_PROVIDER_API` 支持 `responses`、`chat`，也可由请求体临时覆盖。
+- 不配置 `AI_PROFILES_JSON` 时，后端根据旧变量生成 `Default AI (.env)`。
+- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；插件通过 `/api/ai-profiles` 加载下拉选项，后端不会返回 API Key。
+- `AI_PROVIDER_API` 支持 `responses`、`chat`，作为默认 profile 的 `default_api`，也可由请求体临时覆盖。
 - `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - 真实 API Key 不要提交到 Git，不要写入前端源码或文档。
 

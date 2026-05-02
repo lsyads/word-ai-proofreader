@@ -399,6 +399,8 @@ async def _proofread_chunk(
         "provider_api": task.request.provider_api,
         "proofread_mode": task.request.proofread_mode,
     }
+    if task.request.ai_profile_id is not None:
+        proofread_kwargs["ai_profile_id"] = task.request.ai_profile_id
     if task.request.reasoning_enabled:
         proofread_kwargs["reasoning_enabled"] = True
 

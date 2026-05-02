@@ -11,6 +11,12 @@ import httpx
 from pydantic import ValidationError
 
 from app.schemas import BookInfo, ProofreadIssue
+from app.services.ai_profiles import (
+    AIProfile,
+    AIProfileError,
+    resolve_ai_profile,
+    resolve_provider_api,
+)
 from app.settings import Settings, get_settings
 
 ProviderAPI = Literal["responses", "chat"]
@@ -118,44 +124,52 @@ async def proofread_with_ai(
     text: str,
     book: BookInfo,
     settings: Settings | None = None,
+    ai_profile_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
-    provider_api = _resolve_provider_api(settings, provider_api)
+    try:
+        profile = resolve_ai_profile(settings, ai_profile_id)
+        provider_api = resolve_provider_api(profile, provider_api)
+    except AIProfileError as exc:
+        raise AIClientError(str(exc)) from exc
 
     if provider_api == "chat":
         return await _proofread_with_chat(
             text,
             book,
             settings,
+            profile,
             proofread_mode=proofread_mode,
             reasoning_enabled=reasoning_enabled,
         )
 
-    _ensure_responses_api(settings)
+    _ensure_responses_api(profile)
 
     payload = _build_responses_payload(
         text,
         book,
         settings,
+        profile,
         proofread_mode=proofread_mode,
     )
     logger.info(
-        "AI responses request started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
-        settings.openai_model,
+        "AI responses request started profile_id=%s model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
+        profile.id,
+        profile.model,
         proofread_mode,
         len(text),
         payload["max_output_tokens"],
     )
 
     _debug_log_json("AI responses request payload", payload)
-    headers = _auth_headers(settings)
+    headers = _auth_headers(profile)
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
-            _responses_url(settings),
+            _responses_url(profile),
             headers=headers,
             json=payload,
         )
@@ -183,41 +197,48 @@ async def stream_proofread_with_ai(
     text: str,
     book: BookInfo,
     settings: Settings | None = None,
+    ai_profile_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = settings or get_settings()
-    provider_api = _resolve_provider_api(settings, provider_api)
+    try:
+        profile = resolve_ai_profile(settings, ai_profile_id)
+        provider_api = resolve_provider_api(profile, provider_api)
+    except AIProfileError as exc:
+        raise AIClientError(str(exc)) from exc
 
     if provider_api == "chat":
         raise AIClientError("Chat mode uses the standard Chat Completions response, not SSE.")
 
-    _ensure_responses_api(settings)
+    _ensure_responses_api(profile)
 
     payload = _build_responses_payload(
         text,
         book,
         settings,
+        profile,
         proofread_mode=proofread_mode,
         stream=True,
     )
     output_text = ""
     logger.info(
-        "AI responses stream started model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
-        settings.openai_model,
+        "AI responses stream started profile_id=%s model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
+        profile.id,
+        profile.model,
         proofread_mode,
         len(text),
         payload["max_output_tokens"],
     )
 
     _debug_log_json("AI responses stream request payload", payload)
-    headers = _auth_headers(settings)
+    headers = _auth_headers(profile)
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         async with client.stream(
             "POST",
-            _responses_url(settings),
+            _responses_url(profile),
             headers=headers,
             json=payload,
         ) as response:
@@ -278,28 +299,31 @@ async def stream_proofread_with_ai(
                     raise AIClientError(f"AI provider Responses API returned {event_name}")
 
 
-def _ensure_responses_api(settings: Settings) -> None:
-    _ensure_api_key(settings)
+def _ensure_responses_api(profile: AIProfile) -> None:
+    _ensure_api_key(profile)
 
 
 async def _proofread_with_chat(
     text: str,
     book: BookInfo,
     settings: Settings,
+    profile: AIProfile,
     proofread_mode: ProofreadMode,
     reasoning_enabled: bool,
 ) -> AIProofreadResult:
-    _ensure_api_key(settings)
+    _ensure_api_key(profile)
     payload = _build_chat_payload(
         text,
         book,
         settings,
+        profile,
         proofread_mode=proofread_mode,
         reasoning_enabled=reasoning_enabled,
     )
     logger.info(
-        "AI chat request started model=%s proofread_mode=%s reasoning_enabled=%s text_len=%s max_tokens=%s",
-        settings.openai_model,
+        "AI chat request started profile_id=%s model=%s proofread_mode=%s reasoning_enabled=%s text_len=%s max_tokens=%s",
+        profile.id,
+        profile.model,
         proofread_mode,
         reasoning_enabled,
         len(text),
@@ -307,11 +331,11 @@ async def _proofread_with_chat(
     )
 
     _debug_log_json("AI chat request payload", payload)
-    headers = _auth_headers(settings)
+    headers = _auth_headers(profile)
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
         response = await client.post(
-            _chat_url(settings),
+            _chat_url(profile),
             headers=headers,
             json=payload,
         )
@@ -339,11 +363,12 @@ def _build_responses_payload(
     text: str,
     book: BookInfo,
     settings: Settings,
+    profile: AIProfile,
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": settings.openai_model,
+        "model": profile.model,
         "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
         "temperature": 0.2,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
@@ -360,11 +385,12 @@ def _build_chat_payload(
     text: str,
     book: BookInfo,
     settings: Settings,
+    profile: AIProfile,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
 ) -> dict[str, Any]:
     return {
-        "model": settings.openai_model,
+        "model": profile.model,
         "messages": [
             {"role": "system", "content": _build_system_prompt(proofread_mode)},
             {"role": "user", "content": _build_user_prompt(text, book)},
@@ -449,16 +475,16 @@ def _max_tokens_for_mode(settings: Settings, proofread_mode: ProofreadMode) -> i
     return settings.ai_fast_max_tokens
 
 
-def _responses_url(settings: Settings) -> str:
-    return f"{settings.openai_api_base_url.rstrip('/')}/responses"
+def _responses_url(profile: AIProfile) -> str:
+    return f"{profile.api_base_url.rstrip('/')}/responses"
 
 
-def _chat_url(settings: Settings) -> str:
-    return f"{settings.openai_api_base_url.rstrip('/')}/chat/completions"
+def _chat_url(profile: AIProfile) -> str:
+    return f"{profile.api_base_url.rstrip('/')}/chat/completions"
 
 
-def _auth_headers(settings: Settings) -> dict[str, str]:
-    return {"Authorization": f"Bearer {settings.ai_api_key}"}
+def _auth_headers(profile: AIProfile) -> dict[str, str]:
+    return {"Authorization": f"Bearer {profile.api_key}"}
 
 
 def _raise_for_provider_error(status_code: int, provider_api: ProviderAPI = "responses") -> None:
@@ -473,18 +499,9 @@ def _raise_for_provider_error(status_code: int, provider_api: ProviderAPI = "res
     raise AIClientError(f"AI provider returned HTTP {status_code}")
 
 
-def _resolve_provider_api(settings: Settings, provider_api: ProviderAPI | None) -> ProviderAPI:
-    resolved = provider_api or settings.ai_provider_api
-
-    if resolved not in {"responses", "chat"}:
-        raise AIClientError("AI_PROVIDER_API must be responses or chat")
-
-    return resolved
-
-
-def _ensure_api_key(settings: Settings) -> None:
-    if not settings.ai_api_key:
-        raise AIClientError("AI_API_KEY is not configured")
+def _ensure_api_key(profile: AIProfile) -> None:
+    if not profile.api_key:
+        raise AIClientError(f"{profile.api_key_env} is not configured")
 
 
 def _parse_response_payload(data: dict[str, Any], fallback_content: str = "") -> AIProofreadResult:

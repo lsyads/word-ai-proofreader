@@ -63,6 +63,53 @@ def test_create_session_returns_unique_session_ids():
     assert first.json()["created_at"]
 
 
+def test_ai_profiles_returns_default_profile_without_key():
+    response = client.get("/api/ai-profiles")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": "default",
+            "label": "Default AI (.env)",
+            "model": "gpt-4o-mini",
+            "default_api": "responses",
+            "supported_apis": ["responses", "chat"],
+            "configured": False,
+        }
+    ]
+
+
+def test_proofread_rejects_unsupported_profile_api(monkeypatch):
+    monkeypatch.setenv(
+        "AI_PROFILES_JSON",
+        json.dumps(
+            [
+                {
+                    "id": "chat-only",
+                    "label": "Chat Only",
+                    "api_base_url": "https://example.test/v1",
+                    "api_key_env": "CHAT_ONLY_KEY",
+                    "model": "chat-model",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        ),
+    )
+
+    response = client.post(
+        "/api/proofread",
+        json=proofread_payload(
+            "这是一段文本。",
+            ai_profile_id="chat-only",
+            provider_api="responses",
+        ),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "AI profile chat-only does not support provider_api=responses"
+
+
 def test_proofread_rejects_blank_text():
     response = client.post("/api/proofread", json=proofread_payload("   "))
 

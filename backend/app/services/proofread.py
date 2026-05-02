@@ -7,6 +7,8 @@ from typing import Literal
 
 from app.schemas import BookInfo, ProofreadIssue, ProofreadLocator
 from app.services.ai_client import AIClientError, AIStreamEvent, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_profiles import resolve_ai_profile
+from app.services.ai_profiles import resolve_provider_api as resolve_profile_provider_api
 from app.settings import get_settings
 
 ProviderAPI = Literal["responses", "chat"]
@@ -21,30 +23,39 @@ async def proofread_text(
     text: str,
     book: BookInfo,
     session_id: str | None = None,
+    ai_profile_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
 ) -> list[ProofreadIssue]:
     settings = get_settings()
-    provider_api = resolve_provider_api(provider_api)
+    profile = resolve_ai_profile(settings, ai_profile_id)
+    provider_api = resolve_profile_provider_api(profile, provider_api)
     logger.info(
-        "proofread service started text_len=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
+        "proofread service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
         len(text),
+        profile.id,
         provider_api,
         proofread_mode,
         reasoning_enabled,
-        bool(settings.ai_api_key),
+        bool(profile.api_key),
         _mask_session_id(session_id),
     )
 
-    if settings.ai_api_key:
+    if profile.api_key:
         logger.info(
-            "proofread service calling AI provider provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+            "proofread service calling AI provider ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+            profile.id,
             provider_api,
             proofread_mode,
             reasoning_enabled,
         )
-        ai_kwargs = {"provider_api": provider_api, "proofread_mode": proofread_mode}
+        ai_kwargs = {
+            "provider_api": provider_api,
+            "proofread_mode": proofread_mode,
+        }
+        if ai_profile_id is not None:
+            ai_kwargs["ai_profile_id"] = profile.id
         if reasoning_enabled:
             ai_kwargs["reasoning_enabled"] = True
 
@@ -59,19 +70,22 @@ async def stream_proofread_text(
     text: str,
     book: BookInfo,
     session_id: str | None = None,
+    ai_profile_id: str | None = None,
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = get_settings()
-    provider_api = resolve_provider_api(provider_api)
+    profile = resolve_ai_profile(settings, ai_profile_id)
+    provider_api = resolve_profile_provider_api(profile, provider_api)
     logger.info(
-        "proofread stream service started text_len=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
+        "proofread stream service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
         len(text),
+        profile.id,
         provider_api,
         proofread_mode,
         reasoning_enabled,
-        bool(settings.ai_api_key),
+        bool(profile.api_key),
         _mask_session_id(session_id),
     )
 
@@ -80,9 +94,9 @@ async def stream_proofread_text(
     if provider_api == "chat":
         raise AIClientError("Chat mode uses /api/proofread with standard Chat Completions, not SSE.")
 
-    if not settings.ai_api_key:
+    if not profile.api_key:
         logger.info("proofread stream service using mock issues")
-        yield AIStreamEvent("status", {"stage": "calling_ai", "message": "当前未配置 AI_API_KEY，正在返回本地 mock 审校结果。"})
+        yield AIStreamEvent("status", {"stage": "calling_ai", "message": f"当前未配置 {profile.api_key_env}，正在返回本地 mock 审校结果。"})
         yield AIStreamEvent("status", {"stage": "normalizing", "message": "正在整理结构化审校结果。"})
         yield AIStreamEvent("result", {"issues": [issue.model_dump() for issue in locate_issues(text, build_mock_issues(text))]})
         yield AIStreamEvent("status", {"stage": "completed", "message": "审校完成。"})
@@ -90,7 +104,12 @@ async def stream_proofread_text(
 
     yield AIStreamEvent("status", {"stage": "calling_ai", "message": "正在调用 AI Responses API。"})
 
-    ai_kwargs = {"provider_api": provider_api, "proofread_mode": proofread_mode}
+    ai_kwargs = {
+        "provider_api": provider_api,
+        "proofread_mode": proofread_mode,
+    }
+    if ai_profile_id is not None:
+        ai_kwargs["ai_profile_id"] = profile.id
     if reasoning_enabled:
         ai_kwargs["reasoning_enabled"] = True
 
@@ -119,15 +138,13 @@ def build_mock_issues(text: str) -> list[ProofreadIssue]:
     ]
 
 
-def resolve_provider_api(provider_api: ProviderAPI | None) -> ProviderAPI:
-    if provider_api:
-        return provider_api
-
+def resolve_provider_api(
+    provider_api: ProviderAPI | None,
+    ai_profile_id: str | None = None,
+) -> ProviderAPI:
     settings = get_settings()
-    if settings.ai_provider_api in {"responses", "chat"}:
-        return settings.ai_provider_api
-
-    raise AIClientError("AI_PROVIDER_API must be responses or chat")
+    profile = resolve_ai_profile(settings, ai_profile_id)
+    return resolve_profile_provider_api(profile, provider_api)
 
 
 def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssue]:

@@ -5,6 +5,7 @@ import {
   cancelProofreadTask,
   createSession,
   formatProgressResult,
+  getAIProfiles,
   getDocxDownloadUrl,
   getProofreadTask,
   isAbortError,
@@ -49,6 +50,7 @@ import {
 } from "./render";
 import {
   ApplicationMode,
+  AIProfile,
   BookInfo,
   ControlsState,
   IssueApplicationSummary,
@@ -74,6 +76,7 @@ import {
 } from "./word";
 
 const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
+const AI_PROFILE_STORAGE_KEY = "word-ai-proofreader-ai-profile-v1";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v2";
 const REASONING_ENABLED_STORAGE_KEY = "word-ai-proofreader-reasoning-enabled-v2";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v2";
@@ -102,6 +105,7 @@ let activeChunkTimer: number | null = null;
 let activeChunkStartedAtMs = 0;
 let activeChunkProgress: ProofreadStatusEvent | null = null;
 let currentTaskKind: "text" | "docx" = "text";
+let aiProfiles: AIProfile[] = [];
 
 Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
@@ -118,6 +122,7 @@ Office.onReady((info) => {
     getInput("history-file").onchange = importHistory;
     getInput("book-title").oninput = persistBookInfo;
     getTextArea("book-introduction").oninput = persistBookInfo;
+    getSelect("ai-profile").onchange = handleAIProfileChange;
     getSelect("provider-api").onchange = persistControls;
     getSelect("proofread-mode").onchange = persistControls;
     getInput("reasoning-enabled").onchange = persistControls;
@@ -126,6 +131,7 @@ Office.onReady((info) => {
     getSelect("proofread-scope").onchange = persistControls;
     getInput("docx-file").onchange = updateDocxFileOutput;
     initializeControls();
+    initializeAIProfiles();
     syncScopeControls();
     refreshHistory();
     updateActionButtons();
@@ -242,6 +248,7 @@ export async function proofreadSelection() {
         book,
         controls.scope,
         currentSessionId,
+        controls.aiProfileId,
         controls.providerApi,
         controls.proofreadMode,
         controls.reasoningEnabled,
@@ -262,6 +269,7 @@ export async function proofreadSelection() {
         sourceText,
         book,
         currentSessionId,
+        controls.aiProfileId,
         controls.providerApi,
         controls.proofreadMode,
         controls.reasoningEnabled,
@@ -285,6 +293,7 @@ export async function proofreadSelection() {
       completedChunks,
       failedChunks,
       providerApi: controls.providerApi,
+      aiProfileId: controls.aiProfileId,
       proofreadMode: controls.proofreadMode,
       reasoningEnabled: controls.reasoningEnabled,
       issues,
@@ -386,6 +395,7 @@ async function proofreadDocxFile(
     file,
     book,
     currentSessionId || "",
+    controls.aiProfileId,
     controls.providerApi,
     controls.proofreadMode,
     controls.reasoningEnabled,
@@ -410,6 +420,7 @@ async function proofreadDocxFile(
     completedChunks: docxResult.completed_chunks,
     failedChunks: docxResult.failed_chunks,
     providerApi: controls.providerApi,
+    aiProfileId: controls.aiProfileId,
     proofreadMode: controls.proofreadMode,
     reasoningEnabled: controls.reasoningEnabled,
     issues: [],
@@ -953,6 +964,7 @@ function saveStoppedOrFailedHistory(input: {
     completedChunks: 0,
     failedChunks: 0,
     providerApi: input.controls.providerApi,
+    aiProfileId: input.controls.aiProfileId,
     proofreadMode: input.controls.proofreadMode,
     reasoningEnabled: input.controls.reasoningEnabled,
     applicationMode: input.controls.applicationMode,
@@ -991,6 +1003,7 @@ async function preserveCurrentTaskSnapshotAfterStop(input: {
       completedChunks: task.completed_chunks,
       failedChunks: task.failed_chunks,
       providerApi: input.controls.providerApi,
+      aiProfileId: input.controls.aiProfileId,
       proofreadMode: input.controls.proofreadMode,
       reasoningEnabled: input.controls.reasoningEnabled,
       issues,
@@ -1039,6 +1052,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       completedChunks: entry.completedChunks,
       failedChunks: entry.failedChunks,
       providerApi: entry.providerApi,
+      aiProfileId: entry.aiProfileId || "default",
       proofreadMode: entry.proofreadMode,
       reasoningEnabled: entry.reasoningEnabled,
       issues: [],
@@ -1075,6 +1089,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       completedChunks: entry.completedChunks,
       failedChunks: entry.failedChunks,
       providerApi: entry.providerApi,
+      aiProfileId: entry.aiProfileId || "default",
       proofreadMode: entry.proofreadMode,
       reasoningEnabled: entry.reasoningEnabled,
       issues: entry.issues,
@@ -1109,6 +1124,7 @@ function initializeControls() {
   getInput("book-title").value = localStorage.getItem(BOOK_TITLE_STORAGE_KEY) || "";
   getTextArea("book-introduction").value =
     localStorage.getItem(BOOK_INTRODUCTION_STORAGE_KEY) || "";
+  getSelect("ai-profile").value = readStoredAIProfileId();
   getSelect("provider-api").value = readStoredProviderApi();
   getSelect("proofread-mode").value = readStoredProofreadMode();
   getInput("reasoning-enabled").checked = readStoredReasoningEnabled();
@@ -1119,7 +1135,44 @@ function initializeControls() {
   syncScopeControls();
 }
 
+async function initializeAIProfiles() {
+  try {
+    aiProfiles = await getAIProfiles();
+    renderAIProfileOptions();
+    syncProviderApiOptionsForProfile();
+    persistControls();
+  } catch (error) {
+    aiProfiles = [];
+    syncProviderApiOptionsForProfile();
+    appendDebugLog(`AI 配置列表加载失败：${getErrorMessage(error)}`);
+  }
+}
+
+function renderAIProfileOptions() {
+  const select = getSelect("ai-profile");
+  const storedProfileId = readStoredAIProfileId();
+  const selectedProfileId = aiProfiles.some((profile) => profile.id === storedProfileId)
+    ? storedProfileId
+    : aiProfiles[0]?.id || "default";
+
+  select.innerHTML = "";
+  const profiles = aiProfiles.length > 0 ? aiProfiles : [defaultAIProfile()];
+  profiles.forEach((profile) => {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = `${profile.label} (${profile.model})${profile.configured ? "" : " - 未配置 Key"}`;
+    select.appendChild(option);
+  });
+  select.value = selectedProfileId;
+}
+
+function handleAIProfileChange() {
+  syncProviderApiOptionsForProfile();
+  persistControls();
+}
+
 function persistControls() {
+  localStorage.setItem(AI_PROFILE_STORAGE_KEY, getAIProfileId());
   localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
   localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
@@ -1278,6 +1331,7 @@ function getValidatedBookInfo(): BookInfo | null {
 
 function getControlsState(): ControlsState {
   return {
+    aiProfileId: getAIProfileId(),
     providerApi: getProviderApi(),
     proofreadMode: getProofreadMode(),
     reasoningEnabled: getReasoningEnabled(),
@@ -1285,6 +1339,10 @@ function getControlsState(): ControlsState {
     fallbackSummaryTruncateEnabled: getFallbackSummaryTruncateEnabled(),
     scope: getProofreadScope(),
   };
+}
+
+function getAIProfileId(): string {
+  return getSelect("ai-profile").value || "default";
 }
 
 function getProviderApi(): ProviderAPI {
@@ -1320,6 +1378,10 @@ function readStoredProviderApi(): ProviderAPI {
   return isProviderApi(value) ? value : "responses";
 }
 
+function readStoredAIProfileId(): string {
+  return localStorage.getItem(AI_PROFILE_STORAGE_KEY) || "default";
+}
+
 function readStoredProofreadMode(): ProofreadMode {
   const value = localStorage.getItem(PROOFREAD_MODE_STORAGE_KEY);
   return isProofreadMode(value) ? value : "fast";
@@ -1346,6 +1408,31 @@ function readStoredProofreadScope(): ProofreadScope {
 
 function isProviderApi(value: unknown): value is ProviderAPI {
   return value === "responses" || value === "chat";
+}
+
+function syncProviderApiOptionsForProfile() {
+  const profile = aiProfiles.find((item) => item.id === getAIProfileId());
+  const supportedApis = profile?.supported_apis || ["responses", "chat"];
+  const select = getSelect("provider-api");
+
+  Array.from(select.options).forEach((option) => {
+    option.disabled = !supportedApis.includes(option.value as ProviderAPI);
+  });
+
+  if (!supportedApis.includes(getProviderApi())) {
+    select.value = profile?.default_api || supportedApis[0] || "responses";
+  }
+}
+
+function defaultAIProfile(): AIProfile {
+  return {
+    id: "default",
+    label: "Default AI (.env)",
+    model: "default",
+    default_api: "responses",
+    supported_apis: ["responses", "chat"],
+    configured: false,
+  };
 }
 
 function isProofreadMode(value: unknown): value is ProofreadMode {
@@ -1438,6 +1525,7 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
   getButton("import-history").disabled = isBusy;
   getInput("book-title").disabled = isBusy;
   getTextArea("book-introduction").disabled = isBusy;
+  getSelect("ai-profile").disabled = isBusy;
   getSelect("provider-api").disabled = isBusy;
   getSelect("proofread-mode").disabled = isBusy;
   getInput("reasoning-enabled").disabled = isBusy;

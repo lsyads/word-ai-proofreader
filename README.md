@@ -40,6 +40,7 @@ cp .env.example .env
 ```text
 AI_API_KEY=local-omlx-dev-key
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -55,6 +56,16 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest.xml`、前端源码、Webpack 配置、构建产物或文档。
+
+不配置 `AI_PROFILES_JSON` 时，后端会用上面的旧变量生成 `Default AI (.env)`，插件里可直接选择。需要在插件中快速切换多个 OpenAI 兼容供应商时，可额外配置：
+
+```text
+OPENROUTER_API_KEY=...
+LOCAL_OMLX_API_KEY=local-omlx-dev-key
+AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_url":"https://openrouter.ai/api/v1","api_key_env":"OPENROUTER_API_KEY","model":"qwen/xxx","default_api":"chat","supported_apis":["chat"]},{"id":"local-omlx","label":"本地 oMLX","api_base_url":"http://127.0.0.1:8001/v1","api_key_env":"LOCAL_OMLX_API_KEY","model":"Qwen3.6-35B-A3B-4.4bit-msq","default_api":"responses","supported_apis":["responses","chat"]}]
+```
+
+后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。
 
 ## 启动 oMLX 本地 AI 服务
 

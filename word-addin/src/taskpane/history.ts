@@ -15,7 +15,7 @@ import {
 } from "./types";
 
 const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v2";
-const HISTORY_SCHEMA_VERSION = 4;
+const HISTORY_SCHEMA_VERSION = 5;
 const MAX_HISTORY_ENTRIES = 20;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
@@ -38,6 +38,7 @@ export function saveHistoryEntry(input: {
   completedChunks: number;
   failedChunks: number;
   sessionId: string;
+  aiProfileId?: string | null;
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
@@ -72,6 +73,7 @@ export function saveHistoryEntry(input: {
     revisionCount: input.revisionCount,
     fallbackCount: input.fallbackCount,
     failedCount: input.failedCount || 0,
+    aiProfileId: input.aiProfileId || null,
     providerApi: input.providerApi,
     proofreadMode: input.proofreadMode,
     reasoningEnabled: input.reasoningEnabled,
@@ -133,6 +135,7 @@ export function savePendingResultHistory(input: {
     completedChunks: input.result.completedChunks,
     failedChunks: input.result.failedChunks,
     sessionId: input.result.sessionId,
+    aiProfileId: input.result.aiProfileId,
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
     reasoningEnabled: input.result.reasoningEnabled,
@@ -179,6 +182,7 @@ export function saveAppliedResultHistory(input: {
     completedChunks: input.result.completedChunks,
     failedChunks: input.result.failedChunks,
     sessionId: input.result.sessionId,
+    aiProfileId: input.result.aiProfileId,
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
     reasoningEnabled: input.result.reasoningEnabled,
@@ -416,6 +420,9 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     typeof value.revisionCount === "number" &&
     typeof value.fallbackCount === "number" &&
     (typeof value.failedCount === "undefined" || typeof value.failedCount === "number") &&
+    (typeof value.aiProfileId === "undefined" ||
+      value.aiProfileId === null ||
+      typeof value.aiProfileId === "string") &&
     isProviderApi(value.providerApi) &&
     isProofreadMode(value.proofreadMode) &&
     typeof value.reasoningEnabled === "boolean" &&

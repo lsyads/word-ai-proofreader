@@ -210,6 +210,43 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
 
 
+def test_proofread_with_ai_uses_selected_profile(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "profile-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "openrouter-qwen",
+                    "label": "OpenRouter / Qwen",
+                    "api_base_url": "https://openrouter.ai/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "model": "qwen/test",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    result = asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="openrouter-qwen",
+            settings=profile_settings,
+        )
+    )
+
+    assert result.response_id == "chatcmpl-1"
+    call = FakeAsyncClient.calls[0]
+    assert call["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert call["headers"] == {"Authorization": "Bearer profile-key"}
+    assert call["json"]["model"] == "qwen/test"
+
+
 def test_proofread_with_ai_can_enable_chat_reasoning(monkeypatch):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=chat_payload())

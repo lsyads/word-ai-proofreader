@@ -17,7 +17,7 @@ Word 插件任务窗格
   -> 全书 DOCX: FastAPI 后端按 OOXML 文本映射写入批注或修订+批注，保存新 .docx
 ```
 
-当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
+当前实现支持从 `.env` 解析一个或多个 AI profile。旧变量 `AI_API_KEY`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL`、`AI_PROVIDER_API` 会生成默认 profile；可选的 `AI_PROFILES_JSON` 可配置多个 OpenAI 兼容 profile。每个 profile 再选择 Responses 或 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
@@ -104,7 +104,7 @@ Response:
 
 `issues` 为空表示未发现明显问题。插件此时只更新任务窗格，不插入 Word 批注。
 
-`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用后端环境变量 `AI_PROVIDER_API`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。`reasoning_enabled` 可选，默认 `false`，用于控制 Chat Completions 请求体中的 `reasoning.enabled`，不改变审校 prompt。
+`book.title` 必填，去掉首尾空白后不能为空；`book.introduction` 可选，空白会归一为 `null`。后端会把书籍信息加入 prompt 作为背景，但书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回问题。`ai_profile_id` 可选；不传时使用 profile 列表第一项。`provider_api` 可选，支持 `responses` 和 `chat`；不传时使用所选 profile 的 `default_api`。`proofread_mode` 可选，支持 `fast` 和 `thinking`；默认 `fast`。`reasoning_enabled` 可选，默认 `false`，用于控制 Chat Completions 请求体中的 `reasoning.enabled`，不改变审校 prompt。
 
 AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后，会按每条 issue 的 `original` 在请求文本中搜索并填充 `start/end` 和可选 `locator`。重复 `original` 按 issue 顺序匹配下一处；找不到时保留该 issue，但返回 `start/end/locator: null`。`locator.key` 是 Word 插件搜索用的低重复片段；`key_occurrence_index` 固化 key 在审校文本中的 occurrence，用于历史记录不保存完整正文时再次回写；长且低重复的 `original` 直接作为 key，短文本或重复文本使用上下文 key，仍不可靠时为空并在应用时汇总批注。
 

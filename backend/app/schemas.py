@@ -31,6 +31,7 @@ class ProofreadRequest(BaseModel):
     text: str = Field(..., min_length=1)
     book: BookInfo
     session_id: str | None = None
+    ai_profile_id: str | None = None
     provider_api: Literal["responses", "chat"] | None = None
     proofread_mode: Literal["fast", "thinking"] = "fast"
     reasoning_enabled: bool = False
@@ -140,3 +141,12 @@ class DocxProofreadResult(BaseModel):
 class SessionResponse(BaseModel):
     session_id: str
     created_at: str
+
+
+class AIProfileResponse(BaseModel):
+    id: str
+    label: str
+    model: str
+    default_api: Literal["responses", "chat"]
+    supported_apis: list[Literal["responses", "chat"]]
+    configured: bool

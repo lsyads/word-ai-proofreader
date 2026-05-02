@@ -36,6 +36,7 @@ class DocxProofreadRequestData:
     content: bytes
     book: BookInfo
     session_id: str | None = None
+    ai_profile_id: str | None = None
     provider_api: ProviderAPI | None = None
     proofread_mode: ProofreadMode = "fast"
     reasoning_enabled: bool = False
@@ -386,6 +387,8 @@ async def _proofread_chunk(task: DocxProofreadTask, chunk: Any) -> list[Any]:
         "provider_api": task.request.provider_api,
         "proofread_mode": task.request.proofread_mode,
     }
+    if task.request.ai_profile_id is not None:
+        kwargs["ai_profile_id"] = task.request.ai_profile_id
     if task.request.reasoning_enabled:
         kwargs["reasoning_enabled"] = True
     return await proofread_text(chunk.text, task.request.book, **kwargs)

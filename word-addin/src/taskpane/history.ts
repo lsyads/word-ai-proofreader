@@ -166,7 +166,10 @@ export function saveAppliedResultHistory(input: {
     issues: input.result.issues,
     insertedComment: input.summary.commentCount > 0 || input.summary.fallbackCount > 0,
     appliedToWord: true,
-    locatedIssueCount: input.summary.commentCount + input.summary.revisionCount,
+    locatedIssueCount: Math.min(
+      selectedIssues.length,
+      input.summary.commentCount + input.summary.revisionCount
+    ),
     revisionCount: input.summary.revisionCount,
     fallbackCount: input.summary.fallbackCount,
     failedCount: input.summary.failedCount,

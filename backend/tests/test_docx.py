@@ -229,12 +229,52 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
 
     summary = docx_service.write_docx_result(source, [chunked_issue], "revision", output)
 
+    assert summary.comment_count == 1
     assert summary.revision_count == 1
     with zipfile.ZipFile(output) as archive:
         document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "commentRangeStart" in document_xml
     assert "<w:del" in document_xml
     assert "<w:ins" in document_xml
     assert "正字" in document_xml
+    assert "修正错字" in comments_xml
+    assert document_xml.index("<w:del") < document_xml.index("commentRangeStart")
+    assert document_xml.index("commentRangeStart") < document_xml.index("<w:ins")
+    assert document_xml.index("<w:ins") < document_xml.index("commentRangeEnd")
+
+
+def test_write_docx_result_comment_mode_does_not_insert_revision(tmp_path: Path):
+    source = make_docx(["这里有错字。"])
+    document = docx_service.parse_docx(source)
+    start = document.text.index("错字")
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="错字",
+        replacement="正字",
+        suggestion="修正错字。",
+    )
+    chunked_issue = docx_service.ChunkedProofreadIssue(
+        **issue.model_dump(),
+        chunk_index=0,
+        global_start=start,
+        global_end=start + 2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, [chunked_issue], "comment", output)
+
+    assert summary.comment_count == 1
+    assert summary.revision_count == 0
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "commentRangeStart" in document_xml
+    assert "<w:del" not in document_xml
+    assert "<w:ins" not in document_xml
+    assert "修正错字" in comments_xml
 
 
 def test_write_docx_result_preserves_ignorable_namespace_declarations(tmp_path: Path):
@@ -279,6 +319,7 @@ def test_build_output_filename_uses_utc_plus_8_timestamp(monkeypatch):
     monkeypatch.setattr(docx_service, "datetime", FixedDatetime)
 
     assert docx_service.build_output_filename("书稿.docx", "comment") == "书稿-AI审校-批注-20260502090203.docx"
+    assert docx_service.build_output_filename("书稿.docx", "revision") == "书稿-AI审校-修订批注-20260502090203.docx"
 
 
 def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Path):

@@ -58,6 +58,10 @@ interface WriteBatchResult {
   contextFailed?: boolean;
 }
 
+interface RevisionWriteBatchResult extends WriteBatchResult {
+  commentCount: number;
+}
+
 interface CommentBatchResult {
   commentCount: number;
   fallbackCount: number;
@@ -85,6 +89,10 @@ interface RevisionBatchResult {
   revisionCount: number;
   retryIssues: ProofreadIssue[];
   fallbackIssues: ProofreadIssue[];
+}
+
+interface BestEffortCommentResult {
+  commentCount: number;
 }
 
 type WordOperationStage =
@@ -703,7 +711,11 @@ function applyRevisionIssueBatch(
 
     const commentResult = await insertCommentsInBatches(context, commentApplications, options);
 
-    let revisionResult: WriteBatchResult = { successCount: 0, failedIssues: [] };
+    let revisionResult: RevisionWriteBatchResult = {
+      successCount: 0,
+      failedIssues: [],
+      commentCount: 0,
+    };
     let originalTrackingMode:
       | Word.ChangeTrackingMode
       | "Off"
@@ -730,6 +742,7 @@ function applyRevisionIssueBatch(
         revisionResult = {
           successCount: 0,
           failedIssues: revisionApplications.map(({ issue }) => issue),
+          commentCount: 0,
           contextFailed: true,
         };
       } finally {
@@ -739,7 +752,7 @@ function applyRevisionIssueBatch(
             await context.sync();
           } catch (error) {
             logWordOperationFailure("revision", error);
-            appendDebugLog("error", "恢复 Word 修订模式失败", {
+            appendDebugLog("error", "恢复 Word 修订设置失败", {
               error: getWordErrorDetails(error),
             });
           }
@@ -754,12 +767,33 @@ function applyRevisionIssueBatch(
     ];
 
     return {
-      commentCount: commentResult.successCount,
+      commentCount: commentResult.successCount + revisionResult.commentCount,
       revisionCount: revisionResult.successCount,
       retryIssues: revisionResult.contextFailed ? revisionResult.failedIssues : [],
       fallbackIssues,
     };
   });
+}
+
+async function insertRevisionReasonCommentsBestEffort(
+  context: Word.RequestContext,
+  targets: ResolvedIssueTarget[],
+  options: ApplyIssuesOptions
+): Promise<BestEffortCommentResult> {
+  if (targets.length === 0) {
+    return { commentCount: 0 };
+  }
+
+  const result = await insertCommentsInBatches(context, targets, options);
+  if (result.contextFailed || result.failedIssues.length > 0) {
+    appendDebugLog("warn", "修订说明批注部分写入失败，仍继续写入修订", {
+      attemptedCount: targets.length,
+      commentCount: result.successCount,
+      failedCount: result.failedIssues.length,
+    });
+  }
+
+  return { commentCount: result.successCount };
 }
 
 async function retryRevisionIssuesInFreshContexts(
@@ -862,13 +896,14 @@ async function insertRevisionsInBatches(
   context: Word.RequestContext,
   targets: ResolvedIssueTarget[],
   options: ApplyIssuesOptions
-): Promise<WriteBatchResult> {
+): Promise<RevisionWriteBatchResult> {
   const orderedTargets = [...targets].sort((left, right) => {
     const rightStart = typeof right.issue.start === "number" ? right.issue.start : 0;
     const leftStart = typeof left.issue.start === "number" ? left.issue.start : 0;
     return rightStart - leftStart;
   });
   const failedIssues: ProofreadIssue[] = [];
+  const insertedTargets: ResolvedIssueTarget[] = [];
   let successCount = 0;
   const totalBatches = Math.ceil(orderedTargets.length / REVISION_INSERT_BATCH_SIZE);
 
@@ -879,11 +914,16 @@ async function insertRevisionsInBatches(
   ) {
     const batch = orderedTargets.slice(batchStart, batchStart + REVISION_INSERT_BATCH_SIZE);
     const batchIndex = Math.floor(batchStart / REVISION_INSERT_BATCH_SIZE) + 1;
+    const insertedBatchTargets: ResolvedIssueTarget[] = [];
 
     try {
       batch.forEach(({ issue, targetRange }) => {
         try {
-          targetRange.insertText(issue.replacement as string, Word.InsertLocation.replace);
+          const replacementRange = targetRange.insertText(
+            issue.replacement as string,
+            Word.InsertLocation.replace
+          );
+          insertedBatchTargets.push({ issue, targetRange: replacementRange });
         } catch (error) {
           logWordOperationFailure("revision", error, {
             batchIndex,
@@ -898,6 +938,7 @@ async function insertRevisionsInBatches(
       // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional write batch boundary so earlier revisions stay committed.
       await context.sync();
       successCount += batch.length;
+      insertedTargets.push(...insertedBatchTargets);
       appendDebugLog("info", "批量修订写入成功", {
         batchIndex,
         batchSize: batch.length,
@@ -915,7 +956,17 @@ async function insertRevisionsInBatches(
         error: getWordErrorDetails(error),
       });
       failedIssues.push(...batch.map(({ issue }) => issue));
-      return { successCount, failedIssues, contextFailed: true };
+      const commentResult = await insertRevisionReasonCommentsBestEffort(
+        context,
+        insertedTargets,
+        options
+      );
+      return {
+        successCount,
+        failedIssues,
+        commentCount: commentResult.commentCount,
+        contextFailed: true,
+      };
     }
 
     options.onProgress?.({
@@ -927,7 +978,12 @@ async function insertRevisionsInBatches(
     });
   }
 
-  return { successCount, failedIssues };
+  const commentResult = await insertRevisionReasonCommentsBestEffort(
+    context,
+    insertedTargets,
+    options
+  );
+  return { successCount, failedIssues, commentCount: commentResult.commentCount };
 }
 
 function getWordErrorDetails(error: unknown): object {

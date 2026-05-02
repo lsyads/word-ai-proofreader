@@ -4,7 +4,7 @@
 
 ## 范围
 
-目标是在 Word 中完成审校闭环：当前选区由插件读取并在用户确认后写回 Word；全书正文通过上传 `.docx` 交给后端抽取、分块、审校并生成带批注或修订的新 Word 文件。
+目标是在 Word 中完成审校闭环：当前选区由插件读取并在用户确认后写回 Word；全书正文通过上传 `.docx` 交给后端抽取、分块、审校并生成带批注或修订+批注的新 Word 文件。
 
 包含：
 
@@ -39,7 +39,7 @@ Word 当前选区或 DOCX 文件
   -> 全书 DOCX: POST /api/proofread/docx/tasks + SSE/轮询
   -> backend 调用 OpenAI 兼容 provider 或 mock
   -> 当前选区: backend 计算 start/end/locator，word-addin 展示并按用户勾选写回
-  -> 全书 DOCX: backend 按 OOXML 位置映射写入批注/修订，保存新 .docx，word-addin 展示下载入口
+  -> 全书 DOCX: backend 按 OOXML 位置映射写入批注或修订+批注，保存新 .docx，word-addin 展示下载入口
 ```
 
 ## 通用模型
@@ -104,7 +104,7 @@ Word 当前选区或 DOCX 文件
 - 审校范围包含目录可见文本、正文段落、表格文字和常见文本框文字；页眉页脚、脚注、尾注暂不纳入。
 - 后端抽取可见文本时同步建立“文本字符范围 -> OOXML 文本节点”映射。AI 仍只返回精简 issue，后端在 chunk 文本中定位 `original` 后直接映射回 DOCX 写回，不把 Word 写回 `locator` 交给前端。
 - 分块优先级：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可提取目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区的段落/句末规则。
-- 批注模式生成 Word 原生批注；修订模式对有 `replacement` 的问题生成 `w:del/w:ins` 原生修订，无 `replacement` 或无法安全定位时降级为汇总批注。
+- 批注模式生成 Word 原生批注；修订+批注模式对有 `replacement` 的问题生成 `w:del/w:ins` 原生修订并在 `replacement` 插入文本上附原因批注，无 `replacement` 或无法安全定位时降级为批注或汇总批注。
 - 任务完成后后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口和保留期限。
 - 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；后端通过 SQLite 索引恢复重启后的下载能力，过期或文件被外部清理时下载返回明确错误。
 
@@ -174,7 +174,7 @@ Response:
 }
 ```
 
-`issues` 为空表示未发现明显问题；插件只显示结果，不插入批注或修订。
+`issues` 为空表示未发现明显问题；插件只显示结果，不插入批注或修订+批注。
 
 ### `POST /api/proofread/stream`
 
@@ -322,7 +322,7 @@ Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 - `filename` 必填，必须以 `.docx` 结尾；`.doc` 返回 400。
 - `book` 必填，是 URL 编码后的 `BookInfo` JSON。
 - `provider_api`、`proofread_mode`、`reasoning_enabled` 与普通审校一致。
-- `application_mode` 支持 `comment`、`revision`；决定后端生成批注版还是修订版 Word。
+- `application_mode` 支持 `comment`、`revision`；`comment` 生成批注版 Word，`revision` 生成修订+批注版 Word。
 
 Response:
 
@@ -373,8 +373,8 @@ Response:
 - 当前选区：插件拿到 `issues` 后先展示结果，不立即写回 Word。
 - 默认选中全部问题，用户可按严重程度、类别、定位状态和是否有 `replacement` 筛选。
 - 已勾选 + 批注模式 + 可定位：在 `original` 对应片段插入逐条批注。
-- 已勾选 + 修订模式 + 可定位 + `replacement` 非空：临时开启 `TrackAll`，用 `replacement` 替换 `original`，生成 Word 原生修订。
-- 已勾选 + 修订模式 + 可定位 + 无 `replacement`：回退为原位批注。
+- 已勾选 + 修订+批注 + 可定位 + `replacement` 非空：临时开启 `TrackAll`，用 `replacement` 替换 `original`，生成 Word 原生修订，再把原因批注锚定到插入后的 `replacement` 文本。
+- 已勾选 + 修订+批注 + 可定位 + 无 `replacement`：回退为原位批注。
 - 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条按约 1200 字预算。
 - 未勾选问题不写回。
 - 已成功提交的批注或修订不回滚；某批失败时换 fresh `Word.run` 重试或降级汇总。
@@ -423,7 +423,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 后端返回非空 `issues[]` 时，插件只展示结果；点击“应用 N 条到 Word”后才写回已选问题。
 - 全书 `.docx` 完成后插件显示后端保存的新文件名、保留期限和“下载审校后 Word”按钮。
 - 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
-- 批注模式不改正文；修订模式生成可接受/拒绝的 Word 修订，并在完成后恢复原修订设置。
-- 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订。
+- 批注模式不改正文；修订+批注模式生成可接受/拒绝的 Word 修订，并把原因批注锚定到插入后的 `replacement` 文本，完成后恢复原修订设置。
+- 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订+批注。
 - `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
 - 插件本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；DOCX 历史保存输出文件名、下载入口和过期时间，不保存原文件或全文。当前选区新历史可再次筛选、勾选、定位和应用，旧历史缺少 locator occurrence 时只读。

@@ -802,7 +802,7 @@ function formatIssueApplicationPreview(issues: ProofreadIssue[]): string {
   const skippedCount = pendingResult ? pendingResult.issues.length - issues.length : 0;
   const batchText = batchCount > 0 ? `，预计分 ${batchCount} 批应用` : "";
 
-  return `预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，将汇总批注 ${fallbackCount} 条，跳过 ${skippedCount} 条${batchText}`;
+  return `预计精准批注 ${commentCount} 条，生成修订并附批注 ${revisionCount} 条，将汇总批注 ${fallbackCount} 条，跳过 ${skippedCount} 条${batchText}`;
 }
 
 function isLocatedIssue(issue: ProofreadIssue): boolean {

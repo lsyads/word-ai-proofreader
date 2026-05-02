@@ -14,7 +14,7 @@ Word 插件任务窗格
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
   -> 当前选区: FastAPI 后端按 original 计算 start/end 和 locator；插件确认后写回
-  -> 全书 DOCX: FastAPI 后端按 OOXML 文本映射写入批注/修订，保存新 .docx
+  -> 全书 DOCX: FastAPI 后端按 OOXML 文本映射写入批注或修订+批注，保存新 .docx
 ```
 
 当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
@@ -119,7 +119,7 @@ AI 原始输出不包含 `start/end/comment/locator`。后端解析 AI 输出后
 - 当前选区审校会在读取选区文本时缓存送审选区 range，后续单条“定位”和“应用到 Word”优先在该送审范围内搜索，不依赖用户当前光标或第一次定位后留下的新选区；如果送审范围已被修改到与原审校文本不一致，则精准写回降级为汇总批注或提示定位失败。
 - 定位阶段按 `locator.key` 分批搜索，优先精准写回；无可靠 locator、搜索失败或某个 Word search 批次触发 `GeneralException` 时，当前批及后续条目降级为汇总批注，不让定位异常穿透成整次应用失败。
 - 批注模式下，可精准定位的问题按 16 条一批插入批注并立即 `context.sync()`。正常情况下每 64 条复用同一个 `Word.run`；某批触发 `GeneralException` 时，失败批次会换新上下文拆成单条重试，单条仍失败的问题进入汇总批注候选。
-- 修订模式下，有 `replacement` 的问题在 `TrackAll` 下按全文位置倒序、16 条一批替换；正常情况下每 64 条复用同一个 `Word.run`，批失败后切换 fresh `Word.run` 重试，不复用可能已污染的请求上下文。
+- 修订+批注模式下，有 `replacement` 的问题先在 `TrackAll` 下按全文位置倒序、16 条一批替换，再把原因批注锚定到 `insertText(..., replace)` 返回的 `replacement` 范围；正常情况下每 64 条复用同一个 `Word.run`，批失败后切换 fresh `Word.run` 重试，不复用可能已污染的请求上下文。
 - 批注正文写入前会移除不可见控制字符，单条精准批注超过 1500 字会截断并提示到任务窗格查看完整建议；汇总批注按 1200 字预算拆成多条短批注，默认最多写入 10 条，单个 issue 过长时只截断该条汇总文本。
 - 汇总批注只通过 fresh `Word.run` 单独提交，一次获取锚点后逐条提交可见汇总 chunk；锚点优先使用本批第一个成功定位 range，没有成功定位时固定到当前应用范围首字符附近，避免给整篇正文或整段大选区插入批注。超出默认上限的 issue 计入截断提示，前面已经成功提交的批注或修订不会回滚。
 
@@ -270,13 +270,13 @@ POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&application_mode=
 Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
 ```
 
-后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端先在 chunk 文本中按 `original` 定位，再映射回 OOXML 节点写入批注或修订，因此全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
+后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端先在 chunk 文本中按 `original` 定位，再映射回 OOXML 节点写入批注或修订+批注，因此全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
 
 DOCX 分块优先级是严格流水线：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可识别目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区分块规则。目录小标题不会提前打断章/节结构。任务 SSE、停止、重试当前分块和重试失败分块与文本分块任务同形，接口路径前缀为 `/api/proofread/docx/tasks`。终态成功或部分成功时，任务快照包含 `output_filename`、`download_url`、`expires_at` 和 `retention_days`，插件展示“下载审校后 Word”。
 
 结果文件保存到 `DOCX_OUTPUT_DIR`，默认 `backend/var/docx-results`；`DOCX_RETENTION_DAYS` 默认并强制最少为 7。后端用 SQLite 索引记录 task ID、源文件名、输出文件名、应用方式、分块统计、问题数和过期时间。启动、创建任务和下载时会清理过期结果；历史记录里的下载入口不保存文件本体，只要后端文件未过期且未被外部清理，就可以继续下载。
 
-批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记。修订模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
+批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记。修订+批注模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`，并让批注范围只包住 `w:ins` 插入文本；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
 
 ## 后端到 AI Provider
 
@@ -436,8 +436,8 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 
 ```text
 已勾选 + 批注模式 + locator 可用 -> 按 locator.key 分批搜索，在 original 对应原文片段插入逐条批注
-已勾选 + 修订模式 + locator 可用 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订
-已勾选 + 修订模式 + locator 可用 + 无 replacement -> 在 original 对应原文片段插入逐条批注
+已勾选 + 修订+批注 + locator 可用 + replacement 非空 -> 临时开启 TrackAll，用 replacement 替换 original，生成 Word 原生修订，再把原因批注锚定到插入后的 replacement 文本
+已勾选 + 修订+批注 + locator 可用 + 无 replacement -> 在 original 对应原文片段插入逐条批注
 已勾选 + 无 locator 或定位失败 -> 在“应用 N 条到 Word”时拆成多条短汇总批注
 未勾选 -> 不写回 Word
 issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
@@ -446,9 +446,9 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 
 文本分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索。插件用 `locator.key` 去重并按 16 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则固定到当前应用范围首字符附近，并默认最多写入 10 条。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
 
-当前选区修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
+当前选区修订+批注模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订，并通过锚定在插入文本上的批注查看修订原因。
 
-全书 DOCX 模式下，插件不执行 Office.js 写回。后端按文档位置倒序写入批注或 `w:del/w:ins` 修订，保存新文件并把 `output_filename/download_url/expires_at` 返回给插件。历史记录保存源文件名、输出文件名、应用方式、分块状态、问题数、下载入口和过期时间，不保存原文件或全文。
+全书 DOCX 模式下，插件不执行 Office.js 写回。后端按文档位置倒序写入批注，或写入带原因批注的 `w:del/w:ins` 修订，保存新文件并把 `output_filename/download_url/expires_at` 返回给插件。历史记录保存源文件名、输出文件名、应用方式、分块状态、问题数、下载入口和过期时间，不保存原文件或全文。
 
 批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数、未定位数、是否已应用、`selectedIssueIds` 和 `skippedIssueCount`。开发阶段历史记录使用新 schema，不兼容旧历史数据。
 

@@ -214,6 +214,11 @@ def write_docx_result(
             continue
 
         if application_mode == "revision" and issue.replacement:
+            if _try_insert_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
+                summary.comment_count += 1
+                summary.revision_count += 1
+                continue
+
             if _try_insert_revision(document, issue.global_start, issue.global_end, issue, package):
                 summary.revision_count += 1
                 continue
@@ -236,7 +241,7 @@ def write_docx_result(
 
 def build_output_filename(source_filename: str, application_mode: ApplicationMode) -> str:
     stem = Path(source_filename).stem.strip() or "审校文件"
-    suffix = "修订" if application_mode == "revision" else "批注"
+    suffix = "修订批注" if application_mode == "revision" else "批注"
     timestamp = datetime.now(OUTPUT_FILENAME_TIMEZONE).strftime("%Y%m%d%H%M%S")
     safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", stem)
     return f"{safe_stem}-AI审校-{suffix}-{timestamp}.docx"
@@ -423,6 +428,58 @@ def _try_insert_revision(
         replacement_nodes.append(_make_run(before, rpr))
     replacement_nodes.append(package.revision_delete(target, rpr))
     replacement_nodes.append(package.revision_insert(issue.replacement, rpr))
+    if after:
+        replacement_nodes.append(_make_run(after, rpr))
+
+    _replace_child(run_parent, run, replacement_nodes)
+    return True
+
+
+def _try_insert_revision_with_comment(
+    document: DocxDocument,
+    start: int,
+    end: int,
+    issue: ProofreadIssue,
+    package: "_DocxPackage",
+) -> bool:
+    if not issue.replacement:
+        return False
+
+    span = _single_span_for_range(document, start, end)
+    if span is None:
+        return False
+
+    parent_map = _build_parent_map(document.document_root)
+    run = _ancestor(span.node, parent_map, _w("r"))
+    if run is None:
+        return False
+
+    run_parent = parent_map.get(run)
+    if run_parent is None:
+        return False
+
+    original_text = span.node.text or ""
+    relative_start = start - span.start
+    relative_end = end - span.start
+    before = original_text[:relative_start]
+    target = original_text[relative_start:relative_end]
+    after = original_text[relative_end:]
+
+    if target != issue.original:
+        return False
+
+    comment_id = package.add_comment(_format_issue_comment(issue, prefix="文本框" if span.in_textbox else None))
+    start_marker, end_marker, reference_run = package.comment_markers(comment_id)
+    replacement_nodes: list[ET.Element] = []
+    rpr = run.find(_w("rPr"))
+
+    if before:
+        replacement_nodes.append(_make_run(before, rpr))
+    replacement_nodes.append(package.revision_delete(target, rpr))
+    replacement_nodes.append(start_marker)
+    replacement_nodes.append(package.revision_insert(issue.replacement, rpr))
+    replacement_nodes.append(end_marker)
+    replacement_nodes.append(reference_run)
     if after:
         replacement_nodes.append(_make_run(after, rpr))
 

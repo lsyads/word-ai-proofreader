@@ -355,7 +355,7 @@ function renderIssueItem(input: {
   const preciselyWritable = input.sourceText
     ? isPreciselyWritableIssue(input.sourceText, issue)
     : hasReplayableLocator(issue);
-  const canLocate = Boolean(input.sourceText && locatable && !input.readonly);
+  const canLocate = Boolean(!input.readonly && locatable);
   const needsReview = !hasReplacement(issue);
   const statusClass = preciselyWritable ? "is-located" : "is-unlocated";
   const replacementClass = needsReview ? "needs-review" : "has-replacement";

@@ -61,6 +61,7 @@ import {
 } from "./types";
 import {
   applyIssuesToScope,
+  clearTrackedSelectionRange,
   ensureWordCommentSupport,
   getDocumentBodyText,
   getSelectedText,
@@ -142,6 +143,7 @@ async function clearCurrentResult() {
     cancelCurrentProofread();
   }
 
+  await clearTrackedSelectionRange();
   pendingResult = null;
   issueReviewState = null;
   stopChunkElapsedTimer();

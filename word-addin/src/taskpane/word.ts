@@ -122,22 +122,35 @@ const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
 const CONTEXT_LOCATOR_WINDOWS = [16, 32, 64];
 
+let trackedProofreadSelectionRange: Word.Range | null = null;
+
 export async function getSelectedText(): Promise<string> {
+  await clearTrackedSelectionRange();
+
   return Word.run(async (context) => {
     const selection = context.document.getSelection();
     selection.load("text");
+    selection.track();
     await context.sync();
 
     const selectedText = (selection.text || "").trim();
     if (selectedText.length === 0) {
+      selection.untrack();
+      await context.sync();
       throw new Error("请先在 Word 中选中一段文字。");
     }
 
+    trackedProofreadSelectionRange = selection;
+    appendDebugLog("info", "已缓存送审选区范围", {
+      selectedTextLength: selectedText.length,
+    });
     return selectedText;
   });
 }
 
 export async function getDocumentBodyText(): Promise<string> {
+  await clearTrackedSelectionRange();
+
   return Word.run(async (context) => {
     const body = context.document.body;
     body.load("text");
@@ -150,6 +163,27 @@ export async function getDocumentBodyText(): Promise<string> {
 
     return bodyText;
   });
+}
+
+export async function clearTrackedSelectionRange(): Promise<void> {
+  const range = trackedProofreadSelectionRange;
+  trackedProofreadSelectionRange = null;
+
+  if (!range) {
+    return;
+  }
+
+  try {
+    await Word.run(range, async (context) => {
+      range.untrack();
+      await context.sync();
+    });
+    appendDebugLog("info", "已释放送审选区范围");
+  } catch (error) {
+    appendDebugLog("warn", "释放送审选区范围失败，已丢弃本地引用", {
+      error: getWordErrorDetails(error),
+    });
+  }
 }
 
 export function ensureWordCommentSupport(): boolean {
@@ -175,7 +209,7 @@ export async function selectIssueInScope(
   issue: ProofreadIssue,
   scope: ProofreadScope
 ): Promise<void> {
-  return Word.run(async (context) => {
+  return runWordBatchForScope(sourceText, scope, async (context) => {
     appendDebugLog("info", "Word.run 定位开始", {
       issueId: issue.id,
       scope,
@@ -329,7 +363,7 @@ async function insertCommentIssueBatch(
   scope: ProofreadScope,
   options: ApplyIssuesOptions
 ): Promise<CommentBatchResult> {
-  return Word.run(async (context) => {
+  return runWordBatchForScope(sourceText, scope, async (context) => {
     const searchContext = await createSearchContext(context, scope, sourceText);
     const resolved = await resolveIssueTargets(context, searchContext, sourceText, issues, options);
 
@@ -474,7 +508,7 @@ async function insertFallbackCommentChunksInFreshContexts(
   }
 
   try {
-    await Word.run(async (context) => {
+    await runWordBatchForScope(sourceText, scope, async (context) => {
       const searchContext = await createSearchContext(context, scope, sourceText);
       const anchorRange = await getFallbackAnchorRange(context, searchContext);
 
@@ -640,7 +674,7 @@ function applyRevisionIssueBatch(
   scope: ProofreadScope,
   options: ApplyIssuesOptions
 ): Promise<RevisionBatchResult> {
-  return Word.run(async (context) => {
+  return runWordBatchForScope(sourceText, scope, async (context) => {
     const document = context.document;
 
     const searchContext = await createSearchContext(context, scope, sourceText);
@@ -959,6 +993,11 @@ async function createSearchContext(
     };
   }
 
+  const trackedSelectionContext = await createTrackedSelectionSearchContext(context, sourceText);
+  if (trackedSelectionContext) {
+    return trackedSelectionContext;
+  }
+
   let selection: Word.Range;
 
   try {
@@ -993,6 +1032,56 @@ async function createSearchContext(
 
   return {
     root: selection,
+    rootKind: "selection",
+    occurrenceText: sourceText,
+    canSearch,
+  };
+}
+
+function runWordBatchForScope<T>(
+  sourceText: string,
+  scope: ProofreadScope,
+  batch: (context: Word.RequestContext) => Promise<T>
+): Promise<T> {
+  if (scope === "selection" && sourceText.length > 0 && trackedProofreadSelectionRange) {
+    return Word.run(trackedProofreadSelectionRange, batch);
+  }
+
+  return Word.run(batch);
+}
+
+async function createTrackedSelectionSearchContext(
+  context: Word.RequestContext,
+  sourceText: string
+): Promise<SearchContext | null> {
+  if (!trackedProofreadSelectionRange) {
+    return null;
+  }
+
+  try {
+    trackedProofreadSelectionRange.load("text");
+    await context.sync();
+  } catch (error) {
+    logWordOperationFailure("locate", error);
+    appendDebugLog("warn", "读取送审选区范围失败，将尝试当前选区", {
+      sourceTextLength: sourceText.length,
+      error: getWordErrorDetails(error),
+    });
+    trackedProofreadSelectionRange = null;
+    return null;
+  }
+
+  const selectionText = (trackedProofreadSelectionRange.text || "").trim();
+  const canSearch = selectionText === sourceText;
+
+  appendDebugLog(canSearch ? "info" : "warn", "使用送审选区范围定位", {
+    sourceTextLength: sourceText.length,
+    selectionTextLength: selectionText.length,
+    canSearch,
+  });
+
+  return {
+    root: trackedProofreadSelectionRange,
     rootKind: "selection",
     occurrenceText: sourceText,
     canSearch,
@@ -1415,7 +1504,7 @@ function getOccurrenceCount(text: string, target: string): number {
     }
 
     count += 1;
-    searchFrom = foundAt + target.length;
+    searchFrom = foundAt + 1;
   }
 
   return count;

@@ -3,15 +3,27 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from app.schemas import ChunkedProofreadRequest, ChunkedProofreadResult, ProofreadRequest, ProofreadResponse, SessionResponse
+from app.schemas import (
+    ApplicationMode,
+    BookInfo,
+    ChunkedProofreadRequest,
+    ChunkedProofreadResult,
+    DocxProofreadResult,
+    ProofreadRequest,
+    ProofreadResponse,
+    SessionResponse,
+)
 import app.services.proofread as proofread_service
 from app.services import chunking
+from app.services import docx as docx_service
+from app.services import docx_tasks as docx_task_service
 from app.services import tasks as task_service
 from app.services.ai_client import AIClientError
 from app.services.sessions import create_session
@@ -217,6 +229,129 @@ async def proofread_task_events(task_id: str) -> StreamingResponse:
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@app.post("/api/proofread/docx/tasks", response_model=DocxProofreadResult)
+async def create_docx_proofread_task(
+    request: Request,
+    filename: str = Query(..., min_length=1),
+    book: str = Query(..., min_length=1),
+    session_id: str | None = Query(default=None),
+    provider_api: proofread_service.ProviderAPI | None = Query(default=None),
+    proofread_mode: proofread_service.ProofreadMode = Query(default="fast"),
+    reasoning_enabled: bool = Query(default=False),
+    application_mode: ApplicationMode = Query(default="comment"),
+) -> DocxProofreadResult:
+    if Path(filename).suffix.lower() == ".doc":
+        raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
+    if Path(filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="全书文件审校当前仅支持 .docx。")
+
+    try:
+        book_info = BookInfo.model_validate(json.loads(book))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="book 参数必须是有效的书籍信息 JSON。") from exc
+
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
+
+    logger.info(
+        "docx proofread task create requested filename=%s bytes=%s session_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s application_mode=%s",
+        filename,
+        len(content),
+        _mask_session_id(session_id),
+        provider_api or "default",
+        proofread_mode,
+        reasoning_enabled,
+        application_mode,
+    )
+
+    try:
+        return docx_task_service.create_task(
+            docx_task_service.DocxProofreadRequestData(
+                filename=filename,
+                content=content,
+                book=book_info,
+                session_id=session_id,
+                provider_api=provider_api,
+                proofread_mode=proofread_mode,
+                reasoning_enabled=reasoning_enabled,
+                application_mode=application_mode,
+            )
+        )
+    except docx_service.DocxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/proofread/docx/tasks/{task_id}", response_model=DocxProofreadResult)
+async def get_docx_proofread_task(task_id: str) -> DocxProofreadResult:
+    try:
+        return docx_task_service.get_task(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+
+
+@app.delete("/api/proofread/docx/tasks/{task_id}", response_model=DocxProofreadResult)
+async def cancel_docx_proofread_task(task_id: str) -> DocxProofreadResult:
+    try:
+        return docx_task_service.cancel_task(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+
+
+@app.post("/api/proofread/docx/tasks/{task_id}/retry-current", response_model=DocxProofreadResult)
+async def retry_current_docx_proofread_chunk(task_id: str) -> DocxProofreadResult:
+    try:
+        return docx_task_service.retry_current_chunk(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+    except docx_task_service.DocxProofreadTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/proofread/docx/tasks/{task_id}/retry-failed", response_model=DocxProofreadResult)
+async def retry_failed_docx_proofread_chunks(task_id: str) -> DocxProofreadResult:
+    try:
+        return docx_task_service.retry_failed_chunks(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+    except docx_task_service.DocxProofreadTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/proofread/docx/tasks/{task_id}/events")
+async def docx_proofread_task_events(task_id: str) -> StreamingResponse:
+    try:
+        docx_task_service.get_task(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+
+    return StreamingResponse(
+        _task_event_stream(docx_task_service.stream_task_events(task_id)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/proofread/docx/tasks/{task_id}/download")
+async def download_docx_proofread_result(task_id: str) -> FileResponse:
+    try:
+        output_path, output_filename = docx_task_service.get_download_path(task_id)
+    except docx_task_service.DocxProofreadTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail="DOCX proofread task not found") from exc
+    except docx_task_service.DocxProofreadTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return FileResponse(
+        output_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=output_filename,
     )
 
 

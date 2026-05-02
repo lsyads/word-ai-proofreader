@@ -1,6 +1,6 @@
 # Word Add-in README
 
-`word-addin/` 是 Word AI 审校助手的 Office.js 前端。它读取 Word 当前选区或全书正文，调用后端审校接口，展示结构化问题，并在用户确认后把已选问题写成 Word 批注或修订。
+`word-addin/` 是 Word AI 审校助手的 Office.js 前端。它读取 Word 当前选区并支持插件内批注/修订写回；全书正文模式选择 `.docx` 文件上传后端，由后端生成审校后的新 Word 文件，插件展示进度和下载入口。
 
 完整 API 契约见仓库根目录 [spec.md](../spec.md)；通讯链路见 [docs/architecture.md](../docs/architecture.md)。
 
@@ -28,10 +28,10 @@ word-addin/
 ## 主要职责
 
 - 插件按钮打开 `https://localhost:3000/taskpane.html`。
-- 校验书名，读取当前选区或 `document.body.text`。
-- 当前选区 `> 7000` 字或全书正文时走 `/api/proofread/tasks`；默认分块大小与后端保持 `5000`。
+- 校验书名；当前选区读取 Word selection，全书正文选择 `.docx` 文件。
+- 当前选区 `> 7000` 字时走 `/api/proofread/tasks`；全书 `.docx` 走 `/api/proofread/docx/tasks`，保留任务进度、当前分块重试和失败分块重试。
 - Responses 模式优先走 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接走 `/api/proofread`。
-- 审校结果先展示在任务窗格，不自动写回 Word。
+- 当前选区审校结果先展示在任务窗格，不自动写回 Word；全书 `.docx` 完成后显示后端生成的新文件名和下载按钮。
 - 支持筛选、逐条勾选、批量选择、单条定位、批注模式和修订模式。
 - 本地保存最近 20 条新 schema 历史，支持清空、导出 JSON 和导入 JSON。
 

@@ -686,9 +686,12 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
       ? `分块 ${entry.completedChunks}/${entry.totalChunks}，失败 ${entry.failedChunks}`
       : "单段";
   const bookText = entry.bookTitle ? `《${entry.bookTitle}》` : "未记录书名";
+  const fileText = entry.sourceFilename
+    ? ` / 文件 ${entry.sourceFilename}${entry.outputFilename ? ` -> ${entry.outputFilename}` : ""}`
+    : "";
   const errorText = entry.errorMessage ? `：${entry.errorMessage}` : "";
 
-  return `${createdAt} / ${bookText} / ${statusLabels[entry.status]} / ${modeText} / ${chunkText} / ${issueText} / ${locatedText} / ${actionText}${errorText}`;
+  return `${createdAt} / ${bookText}${fileText} / ${statusLabels[entry.status]} / ${modeText} / ${chunkText} / ${issueText} / ${locatedText} / ${actionText}${errorText}`;
 }
 
 function escapeHtml(value: string): string {

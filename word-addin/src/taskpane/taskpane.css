@@ -125,6 +125,18 @@ body {
   margin: 0;
 }
 
+.docx-file-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-output {
+  color: #605e5c;
+  font-size: 12px;
+  margin: 0;
+}
+
 .history-actions {
   display: grid;
   gap: 8px;

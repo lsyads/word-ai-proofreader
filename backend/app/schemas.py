@@ -81,6 +81,7 @@ class ProofreadResponse(BaseModel):
 
 
 ProofreadScope = Literal["selection", "document"]
+ApplicationMode = Literal["comment", "revision"]
 ChunkedTaskStatus = Literal[
     "queued",
     "running",
@@ -117,6 +118,20 @@ class ChunkedProofreadResult(BaseModel):
     completed_chunks: int
     failed_chunks: int
     issues: list[ChunkedProofreadIssue]
+    error_message: str | None = None
+
+
+class DocxProofreadResult(BaseModel):
+    task_id: str
+    status: ChunkedTaskStatus
+    total_chunks: int
+    completed_chunks: int
+    failed_chunks: int
+    issue_count: int
+    source_filename: str
+    application_mode: ApplicationMode
+    output_filename: str | None = None
+    download_url: str | None = None
     error_message: str | None = None
 
 

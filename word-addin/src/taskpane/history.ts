@@ -44,6 +44,10 @@ export function saveHistoryEntry(input: {
   applicationMode: ApplicationMode;
   selectedIssueIds: string[];
   skippedIssueCount: number;
+  issueCount?: number;
+  sourceFilename?: string | null;
+  outputFilename?: string | null;
+  downloadUrl?: string | null;
   errorMessage?: string;
 }) {
   if (input.text.trim().length === 0) {
@@ -61,7 +65,7 @@ export function saveHistoryEntry(input: {
     bookTitle: input.book.title,
     bookIntroductionPreview: (input.book.introduction || "").trim().slice(0, 40),
     status: input.status,
-    issueCount: issues.length,
+    issueCount: input.issueCount ?? issues.length,
     locatedIssueCount: input.locatedIssueCount,
     revisionCount: input.revisionCount,
     fallbackCount: input.fallbackCount,
@@ -85,6 +89,9 @@ export function saveHistoryEntry(input: {
     appliedToWord: input.appliedToWord,
     replayable: issues.some(hasReplayableLocator),
     errorMessage: input.errorMessage,
+    sourceFilename: input.sourceFilename || null,
+    outputFilename: input.outputFilename || null,
+    downloadUrl: input.downloadUrl || null,
   };
 
   localStorage.setItem(
@@ -128,6 +135,10 @@ export function savePendingResultHistory(input: {
     applicationMode: input.applicationMode,
     selectedIssueIds,
     skippedIssueCount: input.result.issues.length - selectedIssueIds.length,
+    issueCount: input.result.issueCount,
+    sourceFilename: input.result.sourceFilename,
+    outputFilename: input.result.outputFilename,
+    downloadUrl: input.result.downloadUrl,
     errorMessage: input.errorMessage,
   });
 }
@@ -165,6 +176,10 @@ export function saveAppliedResultHistory(input: {
     applicationMode: input.applicationMode,
     selectedIssueIds,
     skippedIssueCount: input.result.issues.length - selectedIssues.length,
+    issueCount: input.result.issueCount,
+    sourceFilename: input.result.sourceFilename,
+    outputFilename: input.result.outputFilename,
+    downloadUrl: input.result.downloadUrl,
   });
 }
 
@@ -217,7 +232,7 @@ function createLocalId(): string {
 }
 
 function getHistoryText(result: PendingProofreadResult): string {
-  return result.sourceText || result.historyTextPreview || result.book.title;
+  return result.sourceText || result.sourceFilename || result.historyTextPreview || result.book.title;
 }
 
 function normalizeIssuesForHistory(text: string, issues: ProofreadIssue[]): ProofreadIssue[] {
@@ -407,7 +422,16 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     typeof value.insertedComment === "boolean" &&
     typeof value.appliedToWord === "boolean" &&
     (typeof value.replayable === "undefined" || typeof value.replayable === "boolean") &&
-    (typeof value.errorMessage === "undefined" || typeof value.errorMessage === "string")
+    (typeof value.errorMessage === "undefined" || typeof value.errorMessage === "string") &&
+    (typeof value.sourceFilename === "undefined" ||
+      value.sourceFilename === null ||
+      typeof value.sourceFilename === "string") &&
+    (typeof value.outputFilename === "undefined" ||
+      value.outputFilename === null ||
+      typeof value.outputFilename === "string") &&
+    (typeof value.downloadUrl === "undefined" ||
+      value.downloadUrl === null ||
+      typeof value.downloadUrl === "string")
   );
 }
 

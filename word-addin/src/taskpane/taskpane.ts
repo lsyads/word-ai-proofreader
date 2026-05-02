@@ -1,15 +1,20 @@
-/* global AbortController, Office, clearInterval, clearTimeout, localStorage, setInterval, setTimeout */
+/* global AbortController, Blob, Office, URL, clearInterval, clearTimeout, document, fetch, localStorage, setInterval, setTimeout */
 
 import {
+  cancelDocxProofreadTask,
   cancelProofreadTask,
   createSession,
   formatProgressResult,
+  getDocxDownloadUrl,
   getProofreadTask,
   isAbortError,
   normalizeChunkedIssuesForScope,
   requestChunkedProofreadTask,
+  requestDocxProofreadTask,
   requestProofread,
+  retryCurrentDocxProofreadChunk,
   retryCurrentProofreadChunk,
+  retryFailedDocxProofreadChunks,
   retryFailedProofreadChunks,
 } from "./api";
 import { appendDebugLog, clearDebugLog } from "./debug";
@@ -30,6 +35,7 @@ import {
   formatComment,
   formatCompletionMessage,
   getButton,
+  getElement,
   getErrorMessage,
   getInput,
   getSelect,
@@ -63,7 +69,6 @@ import {
   applyIssuesToScope,
   clearTrackedSelectionRange,
   ensureWordCommentSupport,
-  getDocumentBodyText,
   getSelectedText,
   selectIssueInScope,
 } from "./word";
@@ -92,14 +97,17 @@ let taskState: TaskState = "idle";
 let isApplyingToWord = false;
 let isRetryingCurrentChunk = false;
 let isRetryingFailedChunks = false;
+let isDownloadingDocx = false;
 let activeChunkTimer: number | null = null;
 let activeChunkStartedAtMs = 0;
 let activeChunkProgress: ProofreadStatusEvent | null = null;
+let currentTaskKind: "text" | "docx" = "text";
 
 Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
     getButton("proofread").onclick = proofreadSelection;
     getButton("apply-to-word").onclick = applyPendingResultToWord;
+    getButton("download-docx").onclick = downloadCurrentDocxResult;
     getButton("retry-current-chunk").onclick = retryCurrentChunk;
     getButton("retry-failed-chunks").onclick = retryFailedChunks;
     getButton("new-conversation").onclick = clearCurrentResult;
@@ -116,7 +124,9 @@ Office.onReady((info) => {
     getSelect("application-mode").onchange = persistControls;
     getInput("fallback-summary-truncate-enabled").onchange = persistControls;
     getSelect("proofread-scope").onchange = persistControls;
+    getInput("docx-file").onchange = updateDocxFileOutput;
     initializeControls();
+    syncScopeControls();
     refreshHistory();
     updateActionButtons();
     initializeSession();
@@ -150,6 +160,7 @@ async function clearCurrentResult() {
   setBusy(false);
   resetProgress();
   renderEmptyResult("尚未开始审校");
+  updateDocxFileOutput();
   updateActionButtons();
 
   try {
@@ -175,7 +186,9 @@ export async function proofreadSelection() {
     return;
   }
 
-  if (!ensureWordCommentSupport()) {
+  const controls = getControlsState();
+
+  if (controls.scope === "selection" && !ensureWordCommentSupport()) {
     showMessage("当前 Word 环境不支持批注 API，无法完成审校。", "error");
     return;
   }
@@ -188,10 +201,10 @@ export async function proofreadSelection() {
     return;
   }
 
-  const controls = getControlsState();
   const abortController = new AbortController();
   currentAbortController = abortController;
   currentTaskId = null;
+  currentTaskKind = controls.scope === "document" ? "docx" : "text";
   pendingResult = null;
   issueReviewState = null;
   taskState = "running";
@@ -208,8 +221,12 @@ export async function proofreadSelection() {
   let sourceText = "";
 
   try {
-    sourceText =
-      controls.scope === "document" ? await getDocumentBodyText() : await getSelectedText();
+    if (controls.scope === "document") {
+      await proofreadDocxFile(book, controls, abortController);
+      return;
+    }
+
+    sourceText = await getSelectedText();
     const useChunkedFlow =
       controls.scope === "document" || sourceText.length > SELECTION_CHUNK_THRESHOLD;
     let issues = [];
@@ -353,6 +370,76 @@ export async function proofreadSelection() {
   }
 }
 
+async function proofreadDocxFile(
+  book: BookInfo,
+  controls: ControlsState,
+  abortController: AbortController
+) {
+  const file = getSelectedDocxFile();
+  if (!file) {
+    taskState = "idle";
+    renderEmptyResult("尚未开始审校");
+    return;
+  }
+
+  const docxResult = await requestDocxProofreadTask(
+    file,
+    book,
+    currentSessionId || "",
+    controls.providerApi,
+    controls.proofreadMode,
+    controls.reasoningEnabled,
+    controls.applicationMode,
+    renderChunkedProgress,
+    (createdTaskId) => {
+      currentTaskId = createdTaskId;
+      currentTaskKind = "docx";
+    },
+    abortController.signal
+  );
+
+  pendingResult = {
+    sessionId: currentSessionId || "",
+    sourceText: "",
+    sourceTextAvailable: false,
+    historyTextPreview: docxResult.source_filename,
+    book,
+    scope: "document",
+    taskId: docxResult.task_id,
+    totalChunks: docxResult.total_chunks,
+    completedChunks: docxResult.completed_chunks,
+    failedChunks: docxResult.failed_chunks,
+    providerApi: controls.providerApi,
+    proofreadMode: controls.proofreadMode,
+    reasoningEnabled: controls.reasoningEnabled,
+    issues: [],
+    issueCount: docxResult.issue_count,
+    sourceFilename: docxResult.source_filename,
+    outputFilename: docxResult.output_filename || null,
+    downloadUrl: docxResult.download_url || null,
+  };
+  issueReviewState = null;
+  taskState = docxResult.status;
+  renderDocxPendingResult();
+  savePendingResultHistory({
+    result: pendingResult,
+    applicationMode: controls.applicationMode,
+    status: docxResult.status,
+  });
+  refreshHistory();
+  updateActionButtons();
+
+  if (docxResult.status === "failed") {
+    showMessage("DOCX 全书审校失败，可点击“重试失败分块”。", "error");
+    return;
+  }
+
+  const outputText = docxResult.output_filename
+    ? `已生成：${docxResult.output_filename}`
+    : "审校完成，但尚未生成可下载文件。";
+  showMessage(outputText, docxResult.failed_chunks > 0 ? "default" : "success");
+}
+
 async function retryCurrentChunk() {
   if (!currentTaskId || isRetryingCurrentChunk) {
     return;
@@ -375,7 +462,11 @@ async function retryCurrentChunk() {
   updateActionButtons();
 
   try {
-    await retryCurrentProofreadChunk(currentTaskId);
+    if (currentTaskKind === "docx") {
+      await retryCurrentDocxProofreadChunk(currentTaskId);
+    } else {
+      await retryCurrentProofreadChunk(currentTaskId);
+    }
     appendProgressStatus({
       stage: "chunk_retry_requested",
       message: "已请求重试当前分块。",
@@ -405,36 +496,61 @@ async function retryFailedChunks() {
   showMessage("正在重试失败分块...", "default");
 
   try {
-    const retryResult = await retryFailedProofreadChunks(
-      pendingResult.taskId,
-      renderChunkedProgress,
-      abortController.signal
-    );
-    const issues = normalizeChunkedIssuesForScope(retryResult.issues);
-    pendingResult = {
-      ...pendingResult,
-      totalChunks: retryResult.total_chunks,
-      completedChunks: retryResult.completed_chunks,
-      failedChunks: retryResult.failed_chunks,
-      issues,
-    };
-    issueReviewState = {
-      selectedIssueIds: issues.map((issue) => issue.id),
-      filter: issueReviewState?.filter || createDefaultFilterState(),
-    };
-    taskState = retryResult.status;
-    renderCurrentPendingResult();
+    let remainingFailedChunks = 0;
+    if (pendingResult.sourceFilename) {
+      currentTaskKind = "docx";
+      const retryResult = await retryFailedDocxProofreadChunks(
+        pendingResult.taskId,
+        renderChunkedProgress,
+        abortController.signal
+      );
+      pendingResult = {
+        ...pendingResult,
+        totalChunks: retryResult.total_chunks,
+        completedChunks: retryResult.completed_chunks,
+        failedChunks: retryResult.failed_chunks,
+        issueCount: retryResult.issue_count,
+        outputFilename: retryResult.output_filename || null,
+        downloadUrl: retryResult.download_url || null,
+      };
+      issueReviewState = null;
+      taskState = retryResult.status;
+      remainingFailedChunks = retryResult.failed_chunks;
+      renderDocxPendingResult();
+    } else {
+      currentTaskKind = "text";
+      const retryResult = await retryFailedProofreadChunks(
+        pendingResult.taskId,
+        renderChunkedProgress,
+        abortController.signal
+      );
+      const issues = normalizeChunkedIssuesForScope(retryResult.issues);
+      pendingResult = {
+        ...pendingResult,
+        totalChunks: retryResult.total_chunks,
+        completedChunks: retryResult.completed_chunks,
+        failedChunks: retryResult.failed_chunks,
+        issues,
+      };
+      issueReviewState = {
+        selectedIssueIds: issues.map((issue) => issue.id),
+        filter: issueReviewState?.filter || createDefaultFilterState(),
+      };
+      taskState = retryResult.status;
+      remainingFailedChunks = retryResult.failed_chunks;
+      renderCurrentPendingResult();
+    }
     savePendingResultHistory({
       result: pendingResult,
       applicationMode: getApplicationMode(),
-      status: retryResult.status,
+      status: taskState,
     });
     refreshHistory();
     showMessage(
-      retryResult.failed_chunks > 0
+      remainingFailedChunks > 0
         ? "失败分块已重试，仍有分块失败，可稍后再次重试。"
         : "失败分块已重试完成。",
-      retryResult.failed_chunks > 0 ? "default" : "success"
+      remainingFailedChunks > 0 ? "default" : "success"
     );
   } catch (error) {
     if (isAbortError(error)) {
@@ -528,6 +644,9 @@ function getApplicationMessageType(
 
 function renderCurrentPendingResult() {
   if (!pendingResult || !issueReviewState) {
+    if (pendingResult?.sourceFilename) {
+      renderDocxPendingResult();
+    }
     return;
   }
 
@@ -540,6 +659,22 @@ function renderCurrentPendingResult() {
     onFilterChange: updateIssueFilter,
     onLocateIssue: locateIssue,
   });
+  updateActionButtons();
+}
+
+function renderDocxPendingResult() {
+  if (!pendingResult?.sourceFilename) {
+    return;
+  }
+
+  const issueCount = pendingResult.issueCount || 0;
+  const outputText = pendingResult.outputFilename
+    ? `已生成审校后 Word：${pendingResult.outputFilename}`
+    : "尚未生成审校后 Word。";
+  getElement("docx-output").textContent = outputText;
+  renderEmptyResult(
+    `${pendingResult.sourceFilename}：已审校 ${pendingResult.completedChunks}/${pendingResult.totalChunks} 块，失败 ${pendingResult.failedChunks} 块，累计问题 ${issueCount} 条。${outputText}`
+  );
   updateActionButtons();
 }
 
@@ -705,7 +840,9 @@ function cancelCurrentProofread() {
   }
 
   if (currentTaskId) {
-    cancelProofreadTask(currentTaskId).catch(() => {
+    const cancelTask =
+      currentTaskKind === "docx" ? cancelDocxProofreadTask : cancelProofreadTask;
+    cancelTask(currentTaskId).catch(() => {
       // The local abort is enough for UI state; task cancellation is best effort.
     });
   }
@@ -882,6 +1019,40 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
     filter: createDefaultFilterState(),
   };
 
+  if (entry.sourceFilename) {
+    pendingResult = {
+      sessionId: entry.sessionId,
+      sourceText: "",
+      sourceTextAvailable: false,
+      historyTextPreview: entry.textPreview,
+      book: {
+        title: entry.bookTitle || "历史记录",
+        introduction: entry.bookIntroductionPreview || null,
+      },
+      scope: "document",
+      taskId: entry.taskId || null,
+      totalChunks: entry.totalChunks,
+      completedChunks: entry.completedChunks,
+      failedChunks: entry.failedChunks,
+      providerApi: entry.providerApi,
+      proofreadMode: entry.proofreadMode,
+      reasoningEnabled: entry.reasoningEnabled,
+      issues: [],
+      issueCount: entry.issueCount,
+      sourceFilename: entry.sourceFilename,
+      outputFilename: entry.outputFilename || null,
+      downloadUrl: entry.downloadUrl || null,
+    };
+    issueReviewState = null;
+    taskState = entry.status;
+    getSelect("application-mode").value = entry.applicationMode;
+    getSelect("proofread-scope").value = "document";
+    syncScopeControls();
+    renderDocxPendingResult();
+    showMessage("已打开 DOCX 全书审校历史记录。", "default");
+    return;
+  }
+
   if (isReplayableHistoryEntry(entry)) {
     pendingResult = {
       sessionId: entry.sessionId,
@@ -939,6 +1110,7 @@ function initializeControls() {
   getInput("fallback-summary-truncate-enabled").checked =
     readStoredFallbackSummaryTruncateEnabled();
   getSelect("proofread-scope").value = readStoredProofreadScope();
+  syncScopeControls();
 }
 
 function persistControls() {
@@ -951,10 +1123,113 @@ function persistControls() {
     String(getFallbackSummaryTruncateEnabled())
   );
   localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
+  syncScopeControls();
 
   if (pendingResult && issueReviewState) {
     renderCurrentPendingResult();
   }
+}
+
+function getSelectedDocxFile(): File | null {
+  const input = getInput("docx-file");
+  const file = input.files && input.files[0];
+
+  if (!file) {
+    showMessage("请选择需要全书审校的 .docx 文件。", "error");
+    input.focus();
+    return null;
+  }
+
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".doc")) {
+    showMessage(".doc 是旧二进制格式，请先另存为 .docx 后再上传。", "error");
+    return null;
+  }
+
+  if (!lowerName.endsWith(".docx")) {
+    showMessage("全书文件审校当前仅支持 .docx。", "error");
+    return null;
+  }
+
+  return file;
+}
+
+function syncScopeControls() {
+  const isDocumentScope = getProofreadScope() === "document";
+  getElement("docx-file-panel").hidden = !isDocumentScope;
+  getButton("apply-to-word").hidden = isDocumentScope;
+  getButton("download-docx").hidden = !isDocumentScope;
+  updateDocxFileOutput();
+  updateActionButtons();
+}
+
+function updateDocxFileOutput() {
+  const output = getElement("docx-output");
+  const file = getInput("docx-file").files?.[0];
+  if (pendingResult?.sourceFilename && pendingResult.outputFilename) {
+    output.textContent = `已生成：${pendingResult.outputFilename}`;
+    return;
+  }
+  output.textContent = file ? `已选择：${file.name}` : "尚未生成审校后 Word。";
+}
+
+async function downloadCurrentDocxResult() {
+  if (!pendingResult?.taskId || !pendingResult.outputFilename) {
+    showMessage("尚未生成可下载的审校后 Word。", "error");
+    return;
+  }
+
+  if (isDownloadingDocx) {
+    return;
+  }
+
+  isDownloadingDocx = true;
+  updateActionButtons();
+  showMessage(`正在准备下载：${pendingResult.outputFilename}`, "default");
+
+  try {
+    const response = await fetch(pendingResult.downloadUrl || getDocxDownloadUrl(pendingResult.taskId));
+    if (!response.ok) {
+      throw new Error(await getDocxDownloadErrorMessage(response));
+    }
+
+    const blob = await response.blob();
+    triggerBlobDownload(blob, pendingResult.outputFilename);
+    showMessage(`已开始下载：${pendingResult.outputFilename}`, "success");
+  } catch (error) {
+    showMessage(`下载失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    isDownloadingDocx = false;
+    updateActionButtons();
+  }
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+async function getDocxDownloadErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { detail?: string };
+    if (payload.detail) {
+      if (response.status === 404 || response.status === 409) {
+        return `${payload.detail}。历史记录只保存下载入口；如果后端已重启、任务被清理或结果文件不存在，需要重新审校生成。`;
+      }
+      return payload.detail;
+    }
+  } catch {
+    // Fall through to the generic HTTP status message.
+  }
+
+  return `后端返回 HTTP ${response.status}`;
 }
 
 function persistBookInfo() {
@@ -1149,12 +1424,15 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
   getInput("reasoning-enabled").disabled = isBusy;
   getSelect("application-mode").disabled = isBusy;
   getSelect("proofread-scope").disabled = isBusy;
+  getInput("docx-file").disabled = isBusy;
 }
 
 function updateActionButtons() {
   const selectedCount = getSelectedIssues().length;
-  const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord);
+  const isDocxResult = Boolean(pendingResult?.sourceFilename);
+  const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord && !isDocxResult);
   const applyButton = getButton("apply-to-word");
+  const downloadButton = getButton("download-docx");
   const retryCurrentButton = getButton("retry-current-chunk");
   const retryFailedButton = getButton("retry-failed-chunks");
   const activeProgress = getActiveChunkProgress();
@@ -1178,6 +1456,11 @@ function updateActionButtons() {
 
   applyButton.disabled = !canApply || taskState === "running";
   applyButton.querySelector(".ms-Button-label").textContent = formatApplyButtonLabel(selectedCount);
+  downloadButton.disabled =
+    !pendingResult?.outputFilename || taskState === "running" || isDownloadingDocx;
+  downloadButton.querySelector(".ms-Button-label").textContent = isDownloadingDocx
+    ? "下载中"
+    : "下载审校后 Word";
   retryCurrentButton.disabled = !canRetryCurrent;
   retryFailedButton.disabled = !canRetryFailed;
 }

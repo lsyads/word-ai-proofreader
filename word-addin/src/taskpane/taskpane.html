@@ -72,11 +72,20 @@
                 <option value="document">全书正文</option>
             </select>
 
+            <div id="docx-file-panel" class="docx-file-panel" hidden>
+                <label class="field-label" for="docx-file">全书 DOCX 文件</label>
+                <input id="docx-file" class="control-input" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <p id="docx-output" class="file-output">尚未生成审校后 Word。</p>
+            </div>
+
             <button id="proofread" class="ms-Button ms-Button--primary" type="button">
                 <span class="ms-Button-label">AI 审校</span>
             </button>
             <button id="apply-to-word" class="ms-Button" type="button" disabled>
                 <span class="ms-Button-label">应用到 Word</span>
+            </button>
+            <button id="download-docx" class="ms-Button" type="button" disabled hidden>
+                <span class="ms-Button-label">下载审校后 Word</span>
             </button>
             <button id="retry-current-chunk" class="ms-Button" type="button" disabled>
                 <span class="ms-Button-label">重试当前分块</span>

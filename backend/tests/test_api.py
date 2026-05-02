@@ -9,6 +9,7 @@ from app.main import app
 from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
 from app.services.ai_client import AIClientError, AIProofreadResult, AIStreamEvent
 from app.services.sessions import clear_sessions_for_tests
+from app.services import docx_tasks as docx_task_service
 
 
 client = TestClient(app)
@@ -18,6 +19,7 @@ BOOK = {"title": "测试书名", "introduction": "这是一部测试图书。"}
 def setup_function():
     clear_sessions_for_tests()
     task_service.clear_tasks_for_tests()
+    docx_task_service.clear_tasks_for_tests()
 
 
 def parse_sse_events(body: str):

@@ -1,10 +1,12 @@
-/* global AbortSignal, Response, TextDecoder, clearTimeout, fetch, setTimeout */
+/* global AbortSignal, File, Response, TextDecoder, URLSearchParams, clearTimeout, fetch, setTimeout */
 
 import {
+  ApplicationMode,
   BookInfo,
   ChunkedProofreadIssue,
   ChunkedProofreadResponse,
   DEFAULT_CHUNK_SIZE,
+  DocxProofreadResponse,
   ProofreadIssue,
   ProofreadMode,
   ProofreadResponse,
@@ -124,6 +126,40 @@ export async function cancelProofreadTask(taskId: string): Promise<void> {
   });
 }
 
+export async function requestDocxProofreadTask(
+  file: File,
+  book: BookInfo,
+  sessionId: string,
+  providerApi: ProviderAPI,
+  proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
+  applicationMode: ApplicationMode,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  onTaskCreated: (taskId: string | null) => void,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  onStatus({ stage: "task", message: "正在上传 DOCX 并创建全书审校任务。" });
+  const createdTask = await createDocxProofreadTask(
+    file,
+    book,
+    sessionId,
+    providerApi,
+    proofreadMode,
+    reasoningEnabled,
+    applicationMode,
+    signal
+  );
+  onTaskCreated(createdTask.task_id || null);
+  onStatus(docxTaskSnapshotToStatus("queued", createdTask, "DOCX 审校任务已创建。"));
+  return waitForDocxProofreadTask(createdTask.task_id, onStatus, signal);
+}
+
+export async function cancelDocxProofreadTask(taskId: string): Promise<void> {
+  await fetch(`${API_BASE_URL}/api/proofread/docx/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function retryCurrentProofreadChunk(
   taskId: string
 ): Promise<ChunkedProofreadResponse> {
@@ -136,6 +172,20 @@ export async function retryCurrentProofreadChunk(
   }
 
   return (await response.json()) as ChunkedProofreadResponse;
+}
+
+export async function retryCurrentDocxProofreadChunk(
+  taskId: string
+): Promise<DocxProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks/${taskId}/retry-current`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as DocxProofreadResponse;
 }
 
 export async function retryFailedProofreadChunks(
@@ -155,6 +205,29 @@ export async function retryFailedProofreadChunks(
   const task = (await response.json()) as ChunkedProofreadResponse;
   onStatus(taskSnapshotToStatus("retry_queued", task, "已创建失败分块重试任务。"));
   return waitForProofreadTask(taskId, onStatus, signal);
+}
+
+export async function retryFailedDocxProofreadChunks(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks/${taskId}/retry-failed`, {
+    method: "POST",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const task = (await response.json()) as DocxProofreadResponse;
+  onStatus(docxTaskSnapshotToStatus("retry_queued", task, "已创建 DOCX 失败分块重试任务。"));
+  return waitForDocxProofreadTask(taskId, onStatus, signal);
+}
+
+export function getDocxDownloadUrl(taskId: string): string {
+  return `${API_BASE_URL}/api/proofread/docx/tasks/${taskId}/download`;
 }
 
 export function normalizeChunkedIssuesForScope(issues: ChunkedProofreadIssue[]): ProofreadIssue[] {
@@ -181,6 +254,28 @@ export function taskSnapshotToStatus(
     completed_chunks: task.completed_chunks,
     failed_chunks: task.failed_chunks,
     issue_count: task.issues.length,
+    error_message: task.error_message || undefined,
+  };
+}
+
+export function docxTaskSnapshotToStatus(
+  stage: string,
+  task: DocxProofreadResponse,
+  message: string
+): ProofreadStatusEvent {
+  return {
+    stage,
+    message,
+    task_id: task.task_id,
+    status: task.status,
+    scope: "document",
+    total_chunks: task.total_chunks,
+    completed_chunks: task.completed_chunks,
+    failed_chunks: task.failed_chunks,
+    issue_count: task.issue_count,
+    source_filename: task.source_filename,
+    output_filename: task.output_filename || undefined,
+    download_url: task.download_url || undefined,
     error_message: task.error_message || undefined,
   };
 }
@@ -373,12 +468,96 @@ async function createProofreadTask(
   return (await response.json()) as ChunkedProofreadResponse;
 }
 
+async function createDocxProofreadTask(
+  file: File,
+  book: BookInfo,
+  sessionId: string,
+  providerApi: ProviderAPI,
+  proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
+  applicationMode: ApplicationMode,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  const params = new URLSearchParams({
+    filename: file.name,
+    book: JSON.stringify(book),
+    session_id: sessionId,
+    provider_api: providerApi,
+    proofread_mode: proofreadMode,
+    reasoning_enabled: String(reasoningEnabled),
+    application_mode: applicationMode,
+  });
+  const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks?${params.toString()}`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    body: file,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as DocxProofreadResponse;
+}
+
 async function streamProofreadTaskEvents(
   taskId: string,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/events`, {
+    method: "GET",
+    signal,
+    headers: {
+      Accept: "text/event-stream",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  if (!response.body) {
+    throw new Error("当前 Word WebView 不支持任务进度流。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+
+    events.forEach((eventText) => {
+      const event = parseSseEvent(eventText);
+
+      if (!event) {
+        return;
+      }
+
+      const status = taskEventToStatus(event.name, event.data);
+      onStatus(status);
+    });
+
+    if (done) {
+      break;
+    }
+  }
+}
+
+async function streamDocxProofreadTaskEvents(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks/${taskId}/events`, {
     method: "GET",
     signal,
     headers: {
@@ -446,6 +625,30 @@ async function waitForProofreadTask(
   return finalTask;
 }
 
+async function waitForDocxProofreadTask(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  try {
+    await streamDocxProofreadTaskEvents(taskId, onStatus, signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    onStatus({ stage: "polling", message: "DOCX 任务进度流不可用，正在切换到轮询查询。" });
+    return pollDocxProofreadTask(taskId, onStatus, signal);
+  }
+
+  const finalTask = await getDocxProofreadTask(taskId, signal);
+  if (finalTask.status === "cancelled") {
+    throw createAbortError();
+  }
+
+  return finalTask;
+}
+
 async function pollProofreadTask(
   taskId: string,
   onStatus: (status: ProofreadStatusEvent) => void,
@@ -454,6 +657,30 @@ async function pollProofreadTask(
   while (true) {
     const task = await getProofreadTask(taskId, signal);
     onStatus(taskSnapshotToStatus("polling", task, "正在查询分块审校进度。"));
+
+    if (task.status === "succeeded" || task.status === "partial_succeeded") {
+      return task;
+    }
+
+    if (task.status === "failed" || task.status === "cancelled") {
+      if (task.status === "failed") {
+        return task;
+      }
+      throw createAbortError();
+    }
+
+    await delay(1000, signal);
+  }
+}
+
+async function pollDocxProofreadTask(
+  taskId: string,
+  onStatus: (status: ProofreadStatusEvent) => void,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  while (true) {
+    const task = await getDocxProofreadTask(taskId, signal);
+    onStatus(docxTaskSnapshotToStatus("polling", task, "正在查询 DOCX 分块审校进度。"));
 
     if (task.status === "succeeded" || task.status === "partial_succeeded") {
       return task;
@@ -484,6 +711,22 @@ export async function getProofreadTask(
   }
 
   return (await response.json()) as ChunkedProofreadResponse;
+}
+
+export async function getDocxProofreadTask(
+  taskId: string,
+  signal: AbortSignal
+): Promise<DocxProofreadResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks/${taskId}`, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as DocxProofreadResponse;
 }
 
 function parseSseEvent(eventText: string): { name: string; data: unknown } | null {
@@ -523,6 +766,10 @@ function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
     elapsed_seconds:
       typeof payload.elapsed_seconds === "number" ? payload.elapsed_seconds : undefined,
     error_message: typeof payload.error_message === "string" ? payload.error_message : undefined,
+    source_filename: typeof payload.source_filename === "string" ? payload.source_filename : undefined,
+    output_filename:
+      typeof payload.output_filename === "string" ? payload.output_filename : undefined,
+    download_url: typeof payload.download_url === "string" ? payload.download_url : undefined,
   };
 }
 

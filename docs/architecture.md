@@ -8,19 +8,20 @@
 Word 插件任务窗格
   -> POST /api/sessions
   -> 小选区 Responses: POST /api/proofread/stream；小选区 Chat: POST /api/proofread
-  -> 长选区/全书: POST /api/proofread/tasks + SSE/轮询
+  -> 长选区: POST /api/proofread/tasks + SSE/轮询
+  -> 全书 DOCX: POST /api/proofread/docx/tasks + SSE/轮询
   -> FastAPI 后端
   -> POST {OPENAI_API_BASE_URL}/responses 或 /chat/completions
   -> AI provider
-  -> FastAPI 后端按 original 计算 start/end 和 locator；分块任务额外计算 global_start/global_end
-  -> Word 插件先展示结果，用户确认后按 locator 分批定位，并分批提交原文片段批注或 Word 修订
+  -> 当前选区: FastAPI 后端按 original 计算 start/end 和 locator；插件确认后写回
+  -> 全书 DOCX: FastAPI 后端按 OOXML 文本映射写入批注/修订，保存新 .docx
 ```
 
 当前实现支持 Responses 和 Chat 两种 OpenAI 兼容 API。两种模式都按单轮审校处理：后端不保存 provider 上下文，不读取或写入上一轮 `response.id`，也不会向 `/v1/responses` 发送 `previous_response_id`。
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
-V2 支持统一范围审校：当前选区不超过 7000 字时使用单段链路；当前选区超过 7000 字或选择“全书正文”时，插件创建后端内存异步任务，后端默认按约 5000 字顺序分块审校。分块优先在段落或句末边界切分，找不到时向后延伸到下一个边界，不硬切自然句。任务状态只存内存，服务重启后不可恢复。
+V2 支持两条范围链路：当前选区不超过 7000 字时使用单段链路，超过 7000 字时创建文本分块任务；“全书正文”上传 `.docx`，后端抽取目录可见文本、正文、表格和常见文本框文字，按章、节、目录小标题和段落/句末规则分块审校，并生成新的 `.docx`。任务状态只存内存，服务重启后不可恢复。
 
 ## Word 插件到后端
 
@@ -188,7 +189,7 @@ X-Accel-Buffering: no
 
 ### 4. 分块审校任务
 
-长选区和全书正文使用异步任务接口。插件先创建任务，再优先连接任务 SSE；如果 Word WebView 或代理不支持进度流，则回退为轮询任务状态。
+长选区使用异步文本分块任务接口。插件先创建任务，再优先连接任务 SSE；如果 Word WebView 或代理不支持进度流，则回退为轮询任务状态。
 
 创建任务：
 
@@ -199,7 +200,7 @@ Content-Type: application/json
 
 ```json
 {
-  "text": "需要审校的长文本或全书正文",
+  "text": "需要审校的长选区文本",
   "book": {
     "title": "书名",
     "introduction": "可选书籍介绍"
@@ -207,7 +208,7 @@ Content-Type: application/json
   "session_id": "session_8d7f...",
   "provider_api": "responses",
   "proofread_mode": "fast",
-  "scope": "document",
+  "scope": "selection",
   "chunk_size": 5000,
   "context": {
     "source": "word-addin",
@@ -259,6 +260,21 @@ Accept: text/event-stream
 ```
 
 事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_retry_requested`、`chunk_retrying`、`chunk_completed`、`chunk_failed`、`retry_queued`、`completed`、`cancelled`、`error`。事件数据包含当前分块进度、累计问题数和失败块数；chunk 相关事件还包含 chunk 范围、长度和 `elapsed_seconds`。前端收到 `chunk_started` 后本地每秒刷新当前块等待时长；长时间运行的 chunk 会周期性发送 `heartbeat`，用于保活和校准进度。当前 chunk 超过前端阈值后，可调用 `POST /api/proofread/tasks/{task_id}/retry-current` 取消当前 AI 调用并重试同一 chunk。失败事件包含 `error_message`，任务窗格会直接显示失败原因。停止任务使用 `DELETE /api/proofread/tasks/{task_id}`；后端标记取消后，会在当前 chunk 完成后停止后续 chunk。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`；任务结束后可调用 `POST /api/proofread/tasks/{task_id}/retry-failed` 只重试失败 chunk。
+
+### 5. 全书 DOCX 文件任务
+
+全书正文不再通过 Office.js 读取 `document.body.text`。插件选择 `.docx` 文件后，把原始二进制作为请求体上传，书名、API 模式、审校模式和应用方式通过 query 参数传给后端。
+
+```http
+POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&application_mode=comment
+Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+```
+
+后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端先在 chunk 文本中按 `original` 定位，再映射回 OOXML 节点写入批注或修订，因此全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
+
+DOCX 分块优先按“章”拆分，再按“节”拆分；如果可识别目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区分块规则。任务 SSE、停止、重试当前分块和重试失败分块与文本分块任务同形，接口路径前缀为 `/api/proofread/docx/tasks`。终态成功或部分成功时，任务快照包含 `output_filename` 和 `download_url`，插件展示“下载审校后 Word”。
+
+批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记。修订模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
 
 ## 后端到 AI Provider
 
@@ -392,7 +408,7 @@ provider response.failed         -> backend event: error
 
 ## SSE 使用位置
 
-当前 SSE 只用于 Responses 模式，有两段：
+当前 SSE 用于 Responses 流式审校和后端分块任务进度。Responses 模式有两段：
 
 ```text
 Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
@@ -414,7 +430,7 @@ Word 插件 <-SSE- FastAPI 后端 <-SSE- AI provider
 
 ## 批注与修订应用规则
 
-插件拿到最终 `issues` 后先渲染结果，不立即写入 Word。任务窗格会默认选中全部问题，并支持按严重程度、类别、定位状态和是否有 `replacement` 筛选；用户可以逐条勾选、批量选择，并点击单条“定位”在 Word 中选中对应原文。用户点击“应用 N 条到 Word”后才按当前应用方式写回已勾选问题：
+当前选区模式下，插件拿到最终 `issues` 后先渲染结果，不立即写入 Word。任务窗格会默认选中全部问题，并支持按严重程度、类别、定位状态和是否有 `replacement` 筛选；用户可以逐条勾选、批量选择，并点击单条“定位”在 Word 中选中对应原文。用户点击“应用 N 条到 Word”后才按当前应用方式写回已勾选问题：
 
 ```text
 已勾选 + 批注模式 + locator 可用 -> 按 locator.key 分批搜索，在 original 对应原文片段插入逐条批注
@@ -426,9 +442,11 @@ issues.length = 0 -> 只显示“未发现明显问题”，不插入批注
 请求失败或用户停止 -> 不插入批注
 ```
 
-分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索；全书分块在 `document.body` 中搜索。插件用 `locator.key` 去重并按 16 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则固定到当前应用范围首字符附近，并默认最多写入 10 条。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
+文本分块结果会把 `global_start/global_end` 转换成前端应用时使用的 `start/end`，并把 `locator.key_start/key_end` 平移到全文坐标；`key_occurrence_index` 保持不变。当前选区分块优先在当前选区范围内搜索。插件用 `locator.key` 去重并按 16 个 key 一批执行 Word search；context locator 找到 key range 后，只在小范围内搜索 `original`。应用过程持续显示批次进度，不限制用户一次应用的总条数。汇总批注优先锚定在本次第一个成功定位 range，若没有成功定位则固定到当前应用范围首字符附近，并默认最多写入 10 条。历史记录恢复时不保存完整正文，直接用 `locator.key_occurrence_index` 在当前 Word 正文中搜索。
 
-修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。全书修订按全局位置倒序应用，减少前面的替换影响后面范围。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
+当前选区修订模式会读取运行前的 `document.changeTrackingMode`，将其临时设为 `Word.ChangeTrackingMode.trackAll`，替换完成后恢复原设置。用户随后可以在 Word 审阅面板中接受或拒绝这些修订。
+
+全书 DOCX 模式下，插件不执行 Office.js 写回。后端按文档位置倒序写入批注或 `w:del/w:ins` 修订，保存新文件并把 `output_filename/download_url` 返回给插件。历史记录保存源文件名、输出文件名、应用方式、分块状态和问题数，不保存原文件或全文。
 
 批注内容以 `replacement`、`suggestion` 为核心，并带上 `category` 和 `severity`。插件历史记录会保存本次 API 类型、审校模式、应用方式、问题数、定位成功数、修订数、未定位数、是否已应用、`selectedIssueIds` 和 `skippedIssueCount`。开发阶段历史记录使用新 schema，不兼容旧历史数据。
 

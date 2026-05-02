@@ -41,6 +41,20 @@ export interface ChunkedProofreadResponse {
   error_message?: string | null;
 }
 
+export interface DocxProofreadResponse {
+  task_id: string;
+  status: TaskState;
+  total_chunks: number;
+  completed_chunks: number;
+  failed_chunks: number;
+  issue_count: number;
+  source_filename: string;
+  application_mode: ApplicationMode;
+  output_filename?: string | null;
+  download_url?: string | null;
+  error_message?: string | null;
+}
+
 export interface ProofreadStatusEvent {
   stage: string;
   message: string;
@@ -51,6 +65,9 @@ export interface ProofreadStatusEvent {
   completed_chunks?: number;
   failed_chunks?: number;
   issue_count?: number;
+  source_filename?: string;
+  output_filename?: string | null;
+  download_url?: string | null;
   chunk_index?: number;
   chunk_start?: number;
   chunk_end?: number;
@@ -113,6 +130,9 @@ export interface ProofreadHistoryEntry {
   appliedToWord: boolean;
   replayable?: boolean;
   errorMessage?: string;
+  sourceFilename?: string | null;
+  outputFilename?: string | null;
+  downloadUrl?: string | null;
 }
 
 export interface IssueApplicationSummary {
@@ -147,6 +167,10 @@ export interface PendingProofreadResult {
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
   issues: ProofreadIssue[];
+  issueCount?: number;
+  sourceFilename?: string | null;
+  outputFilename?: string | null;
+  downloadUrl?: string | null;
 }
 
 export interface ControlsState {

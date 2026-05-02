@@ -122,7 +122,6 @@ def settings():
         OPENAI_API_BASE_URL="https://example.test/v1",
         OPENAI_MODEL="test-model",
         AI_REQUEST_TIMEOUT_SECONDS=12,
-        AI_MAX_TOKENS=345,
     )
 
 

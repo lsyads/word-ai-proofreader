@@ -22,7 +22,13 @@ def setup_function():
     docx_task_service.clear_tasks_for_tests()
 
 
-def make_docx(paragraphs: list[ParagraphSpec], table_text: str = "", textbox_text: str = "") -> bytes:
+def make_docx(
+    paragraphs: list[ParagraphSpec],
+    table_text: str = "",
+    textbox_text: str = "",
+    extra_document_namespaces: str = "",
+    extra_document_attributes: str = "",
+) -> bytes:
     body_parts = []
     for paragraph in paragraphs:
         if isinstance(paragraph, tuple):
@@ -67,7 +73,9 @@ def make_docx(paragraphs: list[ParagraphSpec], table_text: str = "", textbox_tex
 
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+      {extra_document_namespaces}
+      {extra_document_attributes}>
       <w:body>
         {''.join(body_parts)}
         <w:sectPr/>
@@ -227,6 +235,50 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     assert "<w:del" in document_xml
     assert "<w:ins" in document_xml
     assert "正字" in document_xml
+
+
+def test_write_docx_result_preserves_ignorable_namespace_declarations(tmp_path: Path):
+    source = make_docx(
+        ["这里有错字。"],
+        extra_document_namespaces='xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"',
+        extra_document_attributes='mc:Ignorable="w14 wp14"',
+    )
+    document = docx_service.parse_docx(source)
+    start = document.text.index("错字")
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="错字",
+        suggestion="修正错字。",
+    )
+    chunked_issue = docx_service.ChunkedProofreadIssue(
+        **issue.model_dump(),
+        chunk_index=0,
+        global_start=start,
+        global_end=start + 2,
+    )
+    output = tmp_path / "out.docx"
+
+    docx_service.write_docx_result(source, [chunked_issue], "comment", output)
+
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+    assert 'mc:Ignorable="w14 wp14"' in document_xml
+    assert 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"' in document_xml
+    assert 'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"' in document_xml
+
+
+def test_build_output_filename_uses_utc_plus_8_timestamp(monkeypatch):
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is docx_service.OUTPUT_FILENAME_TIMEZONE
+            return datetime(2026, 5, 2, 9, 2, 3, tzinfo=tz)
+
+    monkeypatch.setattr(docx_service, "datetime", FixedDatetime)
+
+    assert docx_service.build_output_filename("书稿.docx", "comment") == "书稿-AI审校-批注-20260502090203.docx"
 
 
 def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Path):

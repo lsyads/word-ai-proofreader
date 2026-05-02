@@ -4,11 +4,12 @@ import copy
 import re
 import zipfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Literal
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 from app.schemas import ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue
 from app.services import chunking
@@ -29,6 +30,7 @@ XML_NS = "http://www.w3.org/XML/1998/namespace"
 COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+OUTPUT_FILENAME_TIMEZONE = timezone(timedelta(hours=8))
 
 CHAPTER_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[章篇部卷]\b")
 SECTION_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[节回]\b")
@@ -66,6 +68,7 @@ class DocxBlock:
 class DocxDocument:
     entries: dict[str, bytes]
     document_root: ET.Element
+    document_namespaces: list[tuple[str, str]]
     text: str
     blocks: list[DocxBlock]
     spans: list[TextSpan]
@@ -93,6 +96,8 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
     if WORD_DOCUMENT_PATH not in entries:
         raise DocxError("上传文件缺少 word/document.xml，无法作为 .docx 审校。")
 
+    document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
+    _register_namespaces(document_namespaces)
     document_root = ET.fromstring(entries[WORD_DOCUMENT_PATH])
     parent_map = _build_parent_map(document_root)
     body = document_root.find(f".//{_w('body')}")
@@ -154,7 +159,14 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
     if not text.strip():
         raise DocxError("DOCX 未提取到可审校文字。")
 
-    return DocxDocument(entries=entries, document_root=document_root, text=text, blocks=blocks, spans=spans)
+    return DocxDocument(
+        entries=entries,
+        document_root=document_root,
+        document_namespaces=document_namespaces,
+        text=text,
+        blocks=blocks,
+        spans=spans,
+    )
 
 
 def split_docx_into_chunks(document: DocxDocument, chunk_size: int = chunking.DEFAULT_CHUNK_SIZE) -> list[ProofreadChunk]:
@@ -225,7 +237,7 @@ def write_docx_result(
 def build_output_filename(source_filename: str, application_mode: ApplicationMode) -> str:
     stem = Path(source_filename).stem.strip() or "审校文件"
     suffix = "修订" if application_mode == "revision" else "批注"
-    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(OUTPUT_FILENAME_TIMEZONE).strftime("%Y%m%d%H%M%S")
     safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", stem)
     return f"{safe_stem}-AI审校-{suffix}-{timestamp}.docx"
 
@@ -575,10 +587,62 @@ def _r(local: str) -> str:
     return f"{{{R_NS}}}{local}"
 
 
+def _collect_namespaces(xml_bytes: bytes) -> list[tuple[str, str]]:
+    namespaces: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for _, namespace in ET.iterparse(BytesIO(xml_bytes), events=("start-ns",)):
+        prefix, uri = namespace
+        key = (prefix or "", uri)
+        if key in seen:
+            continue
+        seen.add(key)
+        namespaces.append(key)
+
+    return namespaces
+
+
+def _register_namespaces(namespaces: list[tuple[str, str]]) -> None:
+    for prefix, uri in namespaces:
+        if not prefix or prefix.lower().startswith("xml") or re.match(r"^ns\d+$", prefix):
+            continue
+        try:
+            ET.register_namespace(prefix, uri)
+        except ValueError:
+            continue
+
+
+def _restore_root_namespace_declarations(xml_bytes: bytes, namespaces: list[tuple[str, str]]) -> bytes:
+    xml = xml_bytes.decode("utf-8")
+    root_start = xml.find("<", xml.find("?>") + 2 if "?>" in xml[:120] else 0)
+    if root_start == -1:
+        return xml_bytes
+
+    root_end = xml.find(">", root_start)
+    if root_end == -1:
+        return xml_bytes
+
+    root_tag = xml[root_start:root_end]
+    declarations: list[str] = []
+    for prefix, uri in namespaces:
+        if not prefix or prefix.lower().startswith("xml"):
+            continue
+        if f"xmlns:{prefix}=" in root_tag:
+            continue
+        declarations.append(f" xmlns:{prefix}={quoteattr(uri)}")
+
+    if not declarations:
+        return xml_bytes
+
+    return f"{xml[:root_end]}{''.join(declarations)}{xml[root_end:]}".encode("utf-8")
+
+
 class _DocxPackage:
     def __init__(self, entries: dict[str, bytes], document_root: ET.Element) -> None:
         self.entries = dict(entries)
         self.document_root = document_root
+        self.document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
+        _register_namespaces(self.document_namespaces)
         self.comments_root = self._ensure_comments_root()
         self._ensure_comments_relationship()
         self._ensure_comments_content_type()
@@ -643,6 +707,10 @@ class _DocxPackage:
             self.document_root,
             encoding="utf-8",
             xml_declaration=True,
+        )
+        self.entries[WORD_DOCUMENT_PATH] = _restore_root_namespace_declarations(
+            self.entries[WORD_DOCUMENT_PATH],
+            self.document_namespaces,
         )
         self.entries[COMMENTS_PATH] = ET.tostring(
             self.comments_root,

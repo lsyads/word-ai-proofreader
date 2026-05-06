@@ -6,7 +6,13 @@ from collections.abc import AsyncIterator
 from typing import Literal
 
 from app.schemas import BookInfo, ProofreadIssue, ProofreadLocator
-from app.services.ai_client import AIClientError, AIStreamEvent, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import (
+    AIClientError,
+    AIStreamEvent,
+    DEFAULT_TEMPERATURE,
+    proofread_with_ai,
+    stream_proofread_with_ai,
+)
 from app.services.ai_profiles import resolve_ai_profile
 from app.services.ai_profiles import resolve_provider_api as resolve_profile_provider_api
 from app.settings import get_settings
@@ -27,28 +33,31 @@ async def proofread_text(
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> list[ProofreadIssue]:
     settings = get_settings()
     profile = resolve_ai_profile(settings, ai_profile_id)
     provider_api = resolve_profile_provider_api(profile, provider_api)
     logger.info(
-        "proofread service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
+        "proofread service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s has_api_key=%s session_id=%s",
         len(text),
         profile.id,
         provider_api,
         proofread_mode,
         reasoning_enabled,
+        temperature,
         bool(profile.api_key),
         _mask_session_id(session_id),
     )
 
     if profile.api_key:
         logger.info(
-            "proofread service calling AI provider ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+            "proofread service calling AI provider ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s",
             profile.id,
             provider_api,
             proofread_mode,
             reasoning_enabled,
+            temperature,
         )
         ai_kwargs = {
             "provider_api": provider_api,
@@ -58,6 +67,8 @@ async def proofread_text(
             ai_kwargs["ai_profile_id"] = profile.id
         if reasoning_enabled:
             ai_kwargs["reasoning_enabled"] = True
+        if temperature != DEFAULT_TEMPERATURE:
+            ai_kwargs["temperature"] = temperature
 
         result = await proofread_with_ai(text, book, **ai_kwargs)
         return locate_issues(text, result.issues)
@@ -74,17 +85,19 @@ async def stream_proofread_text(
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = get_settings()
     profile = resolve_ai_profile(settings, ai_profile_id)
     provider_api = resolve_profile_provider_api(profile, provider_api)
     logger.info(
-        "proofread stream service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s has_api_key=%s session_id=%s",
+        "proofread stream service started text_len=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s has_api_key=%s session_id=%s",
         len(text),
         profile.id,
         provider_api,
         proofread_mode,
         reasoning_enabled,
+        temperature,
         bool(profile.api_key),
         _mask_session_id(session_id),
     )
@@ -112,6 +125,8 @@ async def stream_proofread_text(
         ai_kwargs["ai_profile_id"] = profile.id
     if reasoning_enabled:
         ai_kwargs["reasoning_enabled"] = True
+    if temperature != DEFAULT_TEMPERATURE:
+        ai_kwargs["temperature"] = temperature
 
     async for event in stream_proofread_with_ai(text, book, **ai_kwargs):
         if event.event == "result":

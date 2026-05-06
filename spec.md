@@ -170,6 +170,7 @@ Request:
   "provider_api": "responses",
   "proofread_mode": "fast",
   "reasoning_enabled": false,
+  "temperature": 0.2,
   "context": {
     "source": "word-addin"
   }
@@ -184,7 +185,8 @@ Request:
 - `ai_profile_id` 可选；缺省使用后端 profile 列表第一项。旧 `.env` 配置会生成 `default` profile。
 - `provider_api` 可选，支持 `responses`、`chat`；缺省使用所选 profile 的 `default_api`。
 - `proofread_mode` 可选，支持 `fast`、`thinking`；默认 `fast`。
-- `reasoning_enabled` 可选，默认 `false`；Chat 模式下写入请求体 `reasoning.enabled`。
+- `reasoning_enabled` 可选，默认 `false`；默认 Chat 供应商写入请求体 `reasoning.enabled`；Xiaomi MiMo profile 写入 `thinking.type`。
+- `temperature` 可选，默认 `0.2`，范围 `0` 到 `1.5`；写入 Responses 和 Chat provider 请求体。
 - `context` 可选，用于调用来源等调试信息。
 
 Response:
@@ -334,7 +336,7 @@ error
 创建全书 DOCX 文件审校任务。请求体是原始 `.docx` 二进制；元数据走 query 参数，避免 Word WebView 对 multipart 的兼容差异。
 
 ```http
-POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&provider_api=responses&proofread_mode=fast&reasoning_enabled=false&application_mode=comment
+POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&provider_api=responses&proofread_mode=fast&reasoning_enabled=false&temperature=0.2&application_mode=comment&fallback_summary_truncate_enabled=true
 Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
 ```
 
@@ -342,8 +344,9 @@ Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 
 - `filename` 必填，必须以 `.docx` 结尾；`.doc` 返回 400。
 - `book` 必填，是 URL 编码后的 `BookInfo` JSON。
-- `provider_api`、`proofread_mode`、`reasoning_enabled` 与普通审校一致。
+- `provider_api`、`proofread_mode`、`reasoning_enabled`、`temperature` 与普通审校一致。
 - `application_mode` 支持 `comment`、`revision`；`comment` 生成批注版 Word，`revision` 生成修订+批注版 Word。
+- `fallback_summary_truncate_enabled` 可选，默认 `true`；为 `false` 时未定位汇总批注不限制总条数，长内容按 1500 字预算拆成多条。
 
 Response:
 
@@ -396,7 +399,7 @@ Response:
 - 已勾选 + 批注模式 + 可定位：在 `original` 对应片段插入逐条批注。
 - 已勾选 + 修订+批注 + 可定位 + `replacement` 非空：临时开启 `TrackAll`，用 `replacement` 替换 `original`，生成 Word 原生修订，再把原因批注锚定到插入后的 `replacement` 文本。
 - 已勾选 + 修订+批注 + 可定位 + 无 `replacement`：回退为原位批注。
-- 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条按约 1200 字预算。
+- 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条 1500 字以内；关闭默认截断后不限制总条数，单条超 1500 字继续拆分。
 - 未勾选问题不写回。
 - 已成功提交的批注或修订不回滚；某批失败时换 fresh `Word.run` 重试或降级汇总。
 - 全书 DOCX：后端按 `application_mode` 直接生成新 Word 文件，插件不做逐条勾选和 Office.js 写回。
@@ -405,6 +408,7 @@ Response:
 
 ```text
 AI_API_KEY=local-omlx-dev-key
+MIMO_API_KEY=...
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
@@ -421,9 +425,10 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 
 - `AI_API_KEY` 为空时走 mock fallback。
 - 不配置 `AI_PROFILES_JSON` 时，后端根据 `AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL` 生成 `default` profile。
-- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。
+- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。Xiaomi MiMo 示例：`{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
 - `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
+- `temperature` 是请求级参数，插件默认 `0.2`，不需要环境变量。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
 
 ## 验收标准
@@ -432,6 +437,8 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 空文本、缺少 `book` 或空 `book.title` 返回 422。
 - 未配置 `AI_API_KEY` 时返回 mock `issues[]`。
 - 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
+- `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
+- 普通审校、流式审校、分块任务和 DOCX 全书任务都接受 `temperature`；越界返回 422，合法值会传给 AI provider。
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。

@@ -31,6 +31,9 @@ COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relat
 COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 OUTPUT_FILENAME_TIMEZONE = timezone(timedelta(hours=8))
+SUMMARY_COMMENT_MAX_LENGTH = 1500
+SUMMARY_COMMENT_MAX_CHUNKS = 10
+SUMMARY_COMMENT_HEADER_RESERVE = 220
 
 CHAPTER_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[章篇部卷]\b")
 SECTION_RE = re.compile(r"^\s*第[一二三四五六七八九十百千万零〇\d]+[节回]\b")
@@ -196,6 +199,7 @@ def write_docx_result(
     issues: list[ChunkedProofreadIssue],
     application_mode: ApplicationMode,
     output_path: Path,
+    fallback_summary_truncate_enabled: bool = True,
 ) -> WritebackSummary:
     document = parse_docx(source_bytes)
     package = _DocxPackage(document.entries, document.document_root)
@@ -230,8 +234,14 @@ def write_docx_result(
         fallback_issues.append(issue)
 
     if fallback_issues:
-        if _insert_summary_comment(document, fallback_issues, package):
-            summary.fallback_count = len(fallback_issues)
+        inserted_fallback_count = _insert_summary_comments(
+            document,
+            fallback_issues,
+            package,
+            fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+        )
+        if inserted_fallback_count > 0:
+            summary.fallback_count = inserted_fallback_count
         else:
             summary.failed_count = len(fallback_issues)
 
@@ -487,15 +497,32 @@ def _try_insert_revision_with_comment(
     return True
 
 
-def _insert_summary_comment(
+def _insert_summary_comments(
     document: DocxDocument,
     issues: list[ChunkedProofreadIssue],
+    package: "_DocxPackage",
+    fallback_summary_truncate_enabled: bool,
+) -> int:
+    comments, inserted_issue_count = _build_summary_comments(issues, fallback_summary_truncate_enabled)
+    if not comments:
+        return 0
+
+    for comment in comments:
+        if not _insert_summary_comment(document, comment, package):
+            return 0
+
+    return inserted_issue_count
+
+
+def _insert_summary_comment(
+    document: DocxDocument,
+    comment: str,
     package: "_DocxPackage",
 ) -> bool:
     if not document.blocks:
         return False
 
-    comment_id = package.add_comment(_format_summary_comment(issues))
+    comment_id = package.add_comment(comment)
     paragraph = document.blocks[0].paragraph
     children = list(paragraph)
     first_run = next((child for child in children if child.tag == _w("r")), None)
@@ -573,19 +600,91 @@ def _format_issue_comment(issue: ProofreadIssue, prefix: str | None = None) -> s
     return "\n".join(lines)
 
 
-def _format_summary_comment(issues: list[ChunkedProofreadIssue]) -> str:
-    lines = ["AI 审校未能精准定位的问题："]
-    for index, issue in enumerate(issues[:20], start=1):
-        lines.append("")
-        lines.append(f"{index}. [{issue.severity}] {issue.category}")
-        lines.append(f"原文：{issue.original or '未提供'}")
-        if issue.replacement:
-            lines.append(f"替换为：{issue.replacement}")
-        lines.append(f"建议：{issue.suggestion}")
-    if len(issues) > 20:
-        lines.append("")
-        lines.append(f"另有 {len(issues) - 20} 条未定位问题，请在任务结果中查看。")
+def _build_summary_comments(
+    issues: list[ChunkedProofreadIssue],
+    fallback_summary_truncate_enabled: bool,
+) -> tuple[list[str], int]:
+    budget = SUMMARY_COMMENT_MAX_LENGTH - SUMMARY_COMMENT_HEADER_RESERVE
+    entries = [
+        entry
+        for index, issue in enumerate(issues, start=1)
+        for entry in _build_summary_issue_entries(issue, index, budget)
+    ]
+    groups: list[list[tuple[ChunkedProofreadIssue, str]]] = []
+    current_group: list[tuple[ChunkedProofreadIssue, str]] = []
+    current_length = 0
+
+    for issue, entry in entries:
+        separator_length = 2 if current_group else 0
+        next_length = current_length + separator_length + len(entry)
+        if current_group and next_length > budget:
+            groups.append(current_group)
+            current_group = []
+            current_length = 0
+
+        current_group.append((issue, entry))
+        current_length += (2 if len(current_group) > 1 else 0) + len(entry)
+
+    if current_group:
+        groups.append(current_group)
+
+    visible_groups = groups[:SUMMARY_COMMENT_MAX_CHUNKS] if fallback_summary_truncate_enabled else groups
+    hidden_issue_ids = {
+        issue.id for group in groups[SUMMARY_COMMENT_MAX_CHUNKS:] for issue, _ in group
+    } if fallback_summary_truncate_enabled else set()
+
+    comments: list[str] = []
+    for index, group in enumerate(visible_groups, start=1):
+        issue_text = "\n\n".join(entry for _, entry in group)
+        issue_count = len({issue.id for issue, _ in group})
+        truncation_notice = (
+            f"\n\n另有 {len(hidden_issue_ids)} 条未定位问题未写入汇总批注，请在任务结果中查看。"
+            if hidden_issue_ids and index == len(visible_groups)
+            else ""
+        )
+        comments.append(
+            _limit_text(
+                f"AI 审校汇总批注 {index}/{len(visible_groups)}\n"
+                f"以下 {issue_count} 条建议未能精准写回：\n\n"
+                f"{issue_text}{truncation_notice}",
+                SUMMARY_COMMENT_MAX_LENGTH,
+                "\n\n（本条汇总批注过长，已截断；完整建议请在任务结果中查看。）",
+            )
+        )
+
+    inserted_issue_ids = {issue.id for group in visible_groups for issue, _ in group}
+    return comments, len(inserted_issue_ids)
+
+
+def _build_summary_issue_entries(
+    issue: ChunkedProofreadIssue,
+    display_index: int,
+    max_entry_length: int,
+) -> list[tuple[ChunkedProofreadIssue, str]]:
+    return [(issue, text) for text in _split_text(_format_summary_issue_entry(issue, display_index), max_entry_length)]
+
+
+def _format_summary_issue_entry(issue: ChunkedProofreadIssue, display_index: int) -> str:
+    lines = [
+        f"{display_index}. [{issue.severity}] {issue.category}",
+        f"原文：{issue.original or '未提供'}",
+    ]
+    if issue.replacement:
+        lines.append(f"替换为：{issue.replacement}")
+    lines.append(f"建议：{issue.suggestion}")
     return "\n".join(lines)
+
+
+def _split_text(text: str, max_length: int) -> list[str]:
+    if len(text) <= max_length:
+        return [text]
+    return [text[start : start + max_length] for start in range(0, len(text), max_length)]
+
+
+def _limit_text(text: str, max_length: int, suffix: str) -> str:
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max(0, max_length - len(suffix))]}{suffix}"
 
 
 def _replace_child(parent: ET.Element, old_child: ET.Element, new_children: list[ET.Element]) -> None:

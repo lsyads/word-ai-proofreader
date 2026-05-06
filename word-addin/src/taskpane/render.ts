@@ -680,8 +680,9 @@ function formatHistoryMeta(entry: ProofreadHistoryEntry): string {
       : `已应用批注 ${entry.locatedIssueCount} / 未定位 ${entry.fallbackCount}${failedText}${skippedText}`
     : `未应用 / 未定位 ${entry.fallbackCount}${failedText}${skippedText}`;
   const reasoningText = entry.reasoningEnabled ? "深度思考开" : "深度思考关";
+  const temperatureText = `温度 ${entry.temperature}`;
   const profileText = entry.aiProfileId ? ` / ${entry.aiProfileId}` : "";
-  const modeText = `${formatProofreadScope(entry.scope)} / ${formatProofreadMode(entry.proofreadMode)} / ${reasoningText}${profileText} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
+  const modeText = `${formatProofreadScope(entry.scope)} / ${formatProofreadMode(entry.proofreadMode)} / ${reasoningText} / ${temperatureText}${profileText} / ${formatProviderApi(entry.providerApi)} / ${formatApplicationMode(entry.applicationMode)}`;
   const chunkText =
     entry.totalChunks > 1
       ? `分块 ${entry.completedChunks}/${entry.totalChunks}，失败 ${entry.failedChunks}`

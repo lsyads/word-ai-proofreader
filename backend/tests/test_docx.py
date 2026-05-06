@@ -309,6 +309,97 @@ def test_write_docx_result_preserves_ignorable_namespace_declarations(tmp_path: 
     assert 'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"' in document_xml
 
 
+def test_write_docx_result_truncates_summary_comments_by_default(tmp_path: Path):
+    source = make_docx(["第一章 开始", "正文。"])
+    issues = [
+        docx_service.ChunkedProofreadIssue(
+            id=f"issue-{index}",
+            category="typo",
+            severity="high",
+            original=f"未定位 {index}",
+            suggestion=f"marker-{index} " + ("长" * 1180),
+            chunk_index=0,
+            global_start=None,
+            global_end=None,
+        )
+        for index in range(1, 12)
+    ]
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, issues, "comment", output)
+
+    assert summary.fallback_count == 10
+    with zipfile.ZipFile(output) as archive:
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert comments_xml.count("<w:comment ") == 10
+    assert "marker-10" in comments_xml
+    assert "marker-11" not in comments_xml
+    assert "另有 1 条未定位问题未写入汇总批注" in comments_xml
+
+
+def test_write_docx_result_unlimited_summary_comments_when_truncate_disabled(tmp_path: Path):
+    source = make_docx(["第一章 开始", "正文。"])
+    issues = [
+        docx_service.ChunkedProofreadIssue(
+            id=f"issue-{index}",
+            category="typo",
+            severity="high",
+            original=f"未定位 {index}",
+            suggestion=f"marker-{index} " + ("长" * 1180),
+            chunk_index=0,
+            global_start=None,
+            global_end=None,
+        )
+        for index in range(1, 12)
+    ]
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(
+        source,
+        issues,
+        "comment",
+        output,
+        fallback_summary_truncate_enabled=False,
+    )
+
+    assert summary.fallback_count == 11
+    with zipfile.ZipFile(output) as archive:
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert comments_xml.count("<w:comment ") == 11
+    assert "marker-11" in comments_xml
+    assert "未写入汇总批注" not in comments_xml
+
+
+def test_write_docx_result_splits_single_long_summary_issue_without_truncating(tmp_path: Path):
+    source = make_docx(["第一章 开始", "正文。"])
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-long",
+        category="typo",
+        severity="high",
+        original="未定位长问题",
+        suggestion=("长建议" * 900) + "tail-marker",
+        chunk_index=0,
+        global_start=None,
+        global_end=None,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(
+        source,
+        [issue],
+        "comment",
+        output,
+        fallback_summary_truncate_enabled=False,
+    )
+
+    assert summary.fallback_count == 1
+    with zipfile.ZipFile(output) as archive:
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert comments_xml.count("<w:comment ") > 1
+    assert "tail-marker" in comments_xml
+    assert "已截断" not in comments_xml
+
+
 def test_build_output_filename_uses_utc_plus_8_timestamp(monkeypatch):
     class FixedDatetime:
         @classmethod
@@ -330,8 +421,10 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Pa
         provider_api=None,
         proofread_mode="fast",
         reasoning_enabled=False,
+        temperature=0.2,
     ):
         assert "错字" in text
+        assert temperature == 0.8
         return [
             ProofreadIssue(
                 id="issue-1",
@@ -352,6 +445,7 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Pa
             "filename": "书稿.docx",
             "book": json.dumps(BOOK, ensure_ascii=False),
             "application_mode": "revision",
+            "temperature": 0.8,
         },
         content=source,
         headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
@@ -377,6 +471,59 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Pa
     assert download.status_code == 200
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert "word/document.xml" in archive.namelist()
+
+
+def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Path):
+    async def fake_proofread_text(
+        text,
+        book,
+        session_id=None,
+        provider_api=None,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+        temperature=0.2,
+    ):
+        return []
+
+    captured: dict[str, bool] = {}
+    original_write_docx_result = docx_service.write_docx_result
+
+    def spy_write_docx_result(
+        source_bytes,
+        issues,
+        application_mode,
+        output_path,
+        fallback_summary_truncate_enabled=True,
+    ):
+        captured["fallback_summary_truncate_enabled"] = fallback_summary_truncate_enabled
+        return original_write_docx_result(
+            source_bytes,
+            issues,
+            application_mode,
+            output_path,
+            fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+        )
+
+    monkeypatch.setattr(docx_task_service, "proofread_text", fake_proofread_text)
+    monkeypatch.setattr(docx_task_service.docx_service, "write_docx_result", spy_write_docx_result)
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
+    response = client.post(
+        "/api/proofread/docx/tasks",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "application_mode": "comment",
+            "fallback_summary_truncate_enabled": "false",
+        },
+        content=make_docx(["第一章 开始", "没有问题。"]),
+        headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    )
+
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+    with client.stream("GET", f"/api/proofread/docx/tasks/{task_id}/events") as stream:
+        assert "completed" in stream.read().decode()
+    assert captured == {"fallback_summary_truncate_enabled": False}
 
 
 def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Path):

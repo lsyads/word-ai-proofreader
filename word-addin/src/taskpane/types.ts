@@ -130,6 +130,7 @@ export interface ProofreadHistoryEntry {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
+  temperature: number;
   applicationMode: ApplicationMode;
   scope: ProofreadScope;
   taskId?: string | null;
@@ -183,6 +184,7 @@ export interface PendingProofreadResult {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
+  temperature: number;
   issues: ProofreadIssue[];
   issueCount?: number;
   sourceFilename?: string | null;
@@ -197,6 +199,7 @@ export interface ControlsState {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
+  temperature: number;
   applicationMode: ApplicationMode;
   fallbackSummaryTruncateEnabled: boolean;
   scope: ProofreadScope;
@@ -220,3 +223,4 @@ export interface IssueReviewState {
 
 export const SELECTION_CHUNK_THRESHOLD = 7000;
 export const DEFAULT_CHUNK_SIZE = 5000;
+export const DEFAULT_TEMPERATURE = 0.2;

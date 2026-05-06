@@ -14,7 +14,7 @@ from typing import Any
 from app.schemas import BookInfo, ChunkedProofreadIssue, ChunkedTaskStatus, DocxProofreadResult
 from app.services import docx as docx_service
 from app.services import docx_store
-from app.services.ai_client import AIClientError, AIStreamEvent
+from app.services.ai_client import AIClientError, AIStreamEvent, DEFAULT_TEMPERATURE
 from app.services.proofread import ProofreadMode, ProviderAPI, proofread_text
 
 MAX_TASKS = 30
@@ -40,7 +40,9 @@ class DocxProofreadRequestData:
     provider_api: ProviderAPI | None = None
     proofread_mode: ProofreadMode = "fast"
     reasoning_enabled: bool = False
+    temperature: float = DEFAULT_TEMPERATURE
     application_mode: docx_service.ApplicationMode = "comment"
+    fallback_summary_truncate_enabled: bool = True
 
 
 @dataclass
@@ -391,6 +393,8 @@ async def _proofread_chunk(task: DocxProofreadTask, chunk: Any) -> list[Any]:
         kwargs["ai_profile_id"] = task.request.ai_profile_id
     if task.request.reasoning_enabled:
         kwargs["reasoning_enabled"] = True
+    if task.request.temperature != DEFAULT_TEMPERATURE:
+        kwargs["temperature"] = task.request.temperature
     return await proofread_text(chunk.text, task.request.book, **kwargs)
 
 
@@ -419,6 +423,7 @@ def _save_output_file(task: DocxProofreadTask) -> None:
         task.issues,
         task.request.application_mode,
         output_path,
+        fallback_summary_truncate_enabled=task.request.fallback_summary_truncate_enabled,
     )
     task.output_filename = output_filename
     task.output_path = output_path

@@ -421,11 +421,13 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
         book,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
         assert text == "这是一段需要真实审校的文本。"
         assert book.title == "测试书名"
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
+        assert temperature == 0.7
         return AIProofreadResult(
             response_id="resp-1",
             issues=[
@@ -446,7 +448,11 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
 
     response = client.post(
         "/api/proofread",
-        json=proofread_payload("这是一段需要真实审校的文本。", proofread_mode="thinking"),
+        json=proofread_payload(
+            "这是一段需要真实审校的文本。",
+            proofread_mode="thinking",
+            temperature=0.7,
+        ),
     )
 
     assert response.status_code == 200
@@ -523,6 +529,15 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
         {"provider_api": "chat", "proofread_mode": "thinking", "reasoning_enabled": True},
         {"provider_api": "chat", "proofread_mode": "fast", "reasoning_enabled": False},
     ]
+
+
+def test_proofread_rejects_temperature_out_of_range():
+    response = client.post(
+        "/api/proofread",
+        json=proofread_payload("这是一段文本。", temperature=1.6),
+    )
+
+    assert response.status_code == 422
 
 
 def test_proofread_converts_ai_client_error_to_502(monkeypatch):
@@ -701,7 +716,9 @@ def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
+        assert temperature == 0.6
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -722,6 +739,7 @@ def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
             ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
+            temperature=0.6,
         ),
     )
 
@@ -743,7 +761,9 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
+        assert temperature == 0.6
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -764,6 +784,7 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
             ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
+            temperature=0.6,
         ),
     )
 

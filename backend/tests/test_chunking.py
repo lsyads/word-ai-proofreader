@@ -95,7 +95,10 @@ def test_globalize_issues_adds_chunk_offsets():
 
 
 def test_proofread_chunked_aggregates_issues():
-    async def fake_proofread_chunk(text, book, session_id, provider_api, proofread_mode):
+    async def fake_proofread_chunk(text, book, **kwargs):
+        assert kwargs["session_id"] is None
+        assert kwargs["provider_api"] is None
+        assert kwargs["proofread_mode"] == "fast"
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -122,3 +125,23 @@ def test_proofread_chunked_aggregates_issues():
     assert failed_chunks == 0
     assert [issue.chunk_index for issue in issues] == [0, 1]
     assert [issue.global_start for issue in issues] == [0, 5000]
+
+
+def test_proofread_chunked_passes_temperature():
+    calls = []
+
+    async def fake_proofread_chunk(text, book, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    request = ChunkedProofreadRequest(
+        text=("甲" * 4999) + "。" + ("乙" * 4999) + "。",
+        book=BOOK,
+        scope="document",
+        temperature=0.8,
+    )
+
+    asyncio.run(chunking.proofread_chunks(request, fake_proofread_chunk))
+
+    assert calls
+    assert all(call["temperature"] == 0.8 for call in calls)

@@ -103,44 +103,19 @@ async def proofread_chunks(
 
     for chunk in chunks:
         try:
+            proofread_kwargs = {
+                "session_id": request.session_id,
+                "provider_api": request.provider_api,
+                "proofread_mode": request.proofread_mode,
+            }
+            if request.ai_profile_id is not None:
+                proofread_kwargs["ai_profile_id"] = request.ai_profile_id
             if request.reasoning_enabled:
-                if request.ai_profile_id is not None:
-                    chunk_issues = await proofread_chunk(
-                        chunk.text,
-                        request.book,
-                        request.session_id,
-                        request.ai_profile_id,
-                        request.provider_api,
-                        request.proofread_mode,
-                        True,
-                    )
-                else:
-                    chunk_issues = await proofread_chunk(
-                        chunk.text,
-                        request.book,
-                        request.session_id,
-                        request.provider_api,
-                        request.proofread_mode,
-                        True,
-                    )
-            else:
-                if request.ai_profile_id is not None:
-                    chunk_issues = await proofread_chunk(
-                        chunk.text,
-                        request.book,
-                        request.session_id,
-                        request.ai_profile_id,
-                        request.provider_api,
-                        request.proofread_mode,
-                    )
-                else:
-                    chunk_issues = await proofread_chunk(
-                        chunk.text,
-                        request.book,
-                        request.session_id,
-                        request.provider_api,
-                        request.proofread_mode,
-                    )
+                proofread_kwargs["reasoning_enabled"] = True
+            if request.temperature != proofread_service.DEFAULT_TEMPERATURE:
+                proofread_kwargs["temperature"] = request.temperature
+
+            chunk_issues = await proofread_chunk(chunk.text, request.book, **proofread_kwargs)
         except Exception:
             failed_chunks += 1
             logger.exception("chunk proofread failed chunk_index=%s", chunk.index)

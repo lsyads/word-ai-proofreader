@@ -122,10 +122,9 @@ const COMMENT_INSERT_BATCH_SIZE = 16;
 const REVISION_RUN_BATCH_SIZE = 64;
 const REVISION_INSERT_BATCH_SIZE = 16;
 const MAX_COMMENT_LENGTH = 1500;
-const FALLBACK_COMMENT_MAX_LENGTH = 1200;
+const FALLBACK_COMMENT_MAX_LENGTH = MAX_COMMENT_LENGTH;
 const FALLBACK_COMMENT_MAX_CHUNKS = 10;
-const FALLBACK_COMMENT_HEADER_RESERVE = 120;
-const FALLBACK_ISSUE_MAX_LENGTH = 900;
+const FALLBACK_COMMENT_HEADER_RESERVE = 220;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
 const CONTEXT_LOCATOR_WINDOWS = [16, 32, 64];
@@ -501,6 +500,10 @@ async function insertFallbackCommentChunksInFreshContexts(
   options: ApplyIssuesOptions
 ): Promise<FallbackWriteResult> {
   const { chunks, truncatedFallbackCount } = buildFallbackCommentChunks(issues, options);
+  const writableIssueIds = new Set(
+    chunks.flatMap((chunk) => chunk.issues.map((issue) => issue.id))
+  );
+  const completedIssueIds = new Set<string>();
   let fallbackCount = 0;
   let fallbackCommentCount = 0;
   let failedCount = 0;
@@ -537,9 +540,13 @@ async function insertFallbackCommentChunksInFreshContexts(
         // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional per-chunk commit so long summaries cannot roll back prior chunks.
         await context.sync();
 
-        fallbackCount += chunk.issues.length;
+        const newlyCompletedIssues = chunk.issues.filter(
+          (issue) => !completedIssueIds.has(issue.id)
+        );
+        newlyCompletedIssues.forEach((issue) => completedIssueIds.add(issue.id));
+        fallbackCount += newlyCompletedIssues.length;
         fallbackCommentCount += 1;
-        completedIssues += chunk.issues.length;
+        completedIssues += newlyCompletedIssues.length;
         appendDebugLog("info", "汇总批注分片写入成功", {
           chunkIndex: chunkIndex + 1,
           totalChunks: chunks.length,
@@ -559,7 +566,9 @@ async function insertFallbackCommentChunksInFreshContexts(
       }
     });
   } catch (error) {
-    const remainingIssueCount = Math.max(issues.length - truncatedFallbackCount - fallbackCount, 0);
+    const remainingIssueCount = [...writableIssueIds].filter(
+      (issueId) => !completedIssueIds.has(issueId)
+    ).length;
     failedCount += remainingIssueCount;
     logWordOperationFailure("fallback", error, {
       issueCount: remainingIssueCount,
@@ -1584,11 +1593,10 @@ function buildFallbackCommentChunks(
   issues: ProofreadIssue[],
   options: ApplyIssuesOptions
 ): { chunks: FallbackCommentChunk[]; truncatedFallbackCount: number } {
-  const entries = issues.map((issue, index) => ({
-    issue,
-    entry: formatFallbackIssueEntry(issue, index + 1),
-  }));
   const budget = FALLBACK_COMMENT_MAX_LENGTH - FALLBACK_COMMENT_HEADER_RESERVE;
+  const entries = issues.flatMap((issue, index) =>
+    buildFallbackIssueEntries(issue, index + 1, budget)
+  );
   const groups: Array<Array<{ issue: ProofreadIssue; entry: string }>> = [];
   let currentGroup: Array<{ issue: ProofreadIssue; entry: string }> = [];
   let currentLength = 0;
@@ -1614,7 +1622,11 @@ function buildFallbackCommentChunks(
   const truncateEnabled = options.fallbackSummaryTruncateEnabled !== false;
   const visibleGroups = truncateEnabled ? groups.slice(0, FALLBACK_COMMENT_MAX_CHUNKS) : groups;
   const truncatedFallbackCount = truncateEnabled
-    ? groups.slice(FALLBACK_COMMENT_MAX_CHUNKS).reduce((count, group) => count + group.length, 0)
+    ? new Set(
+        groups
+          .slice(FALLBACK_COMMENT_MAX_CHUNKS)
+          .flatMap((group) => group.map(({ issue }) => issue.id))
+      ).size
     : 0;
 
   const chunks = visibleGroups.map((group, index) => {
@@ -1626,7 +1638,9 @@ function buildFallbackCommentChunks(
         : "";
     const comment = limitText(
       sanitizeCommentText(
-        `${title}\n以下 ${group.length} 条建议未能精准写回：\n\n${issueText}${truncationNotice}`
+        `${title}\n以下 ${
+          new Set(group.map(({ issue }) => issue.id)).size
+        } 条建议未能精准写回：\n\n${issueText}${truncationNotice}`
       ),
       FALLBACK_COMMENT_MAX_LENGTH,
       "\n\n（本条汇总批注过长，已截断；完整建议请在任务窗格中查看。）"
@@ -1641,6 +1655,19 @@ function buildFallbackCommentChunks(
   return { chunks, truncatedFallbackCount };
 }
 
+function buildFallbackIssueEntries(
+  issue: ProofreadIssue,
+  displayIndex: number,
+  maxEntryLength: number
+): Array<{ issue: ProofreadIssue; entry: string }> {
+  return splitTextIntoChunks(formatFallbackIssueEntry(issue, displayIndex), maxEntryLength).map(
+    (entry) => ({
+      issue,
+      entry,
+    })
+  );
+}
+
 function formatFallbackIssueEntry(issue: ProofreadIssue, displayIndex: number): string {
   const lines = [
     `${displayIndex}. [${issue.severity}] ${issue.category}`,
@@ -1649,11 +1676,19 @@ function formatFallbackIssueEntry(issue: ProofreadIssue, displayIndex: number): 
     `建议：${issue.suggestion || "未提供"}`,
   ];
 
-  return limitText(
-    sanitizeCommentText(lines.filter(Boolean).join("\n")),
-    FALLBACK_ISSUE_MAX_LENGTH,
-    "\n（单条建议过长，已截断；完整建议请在任务窗格中查看。）"
-  );
+  return sanitizeCommentText(lines.filter(Boolean).join("\n"));
+}
+
+function splitTextIntoChunks(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  for (let start = 0; start < text.length; start += maxLength) {
+    chunks.push(text.slice(start, start + maxLength));
+  }
+  return chunks;
 }
 
 function sanitizeCommentText(text: string): string {

@@ -6,6 +6,7 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import ValidationError
@@ -21,6 +22,8 @@ from app.settings import Settings, get_settings
 
 ProviderAPI = Literal["responses", "chat"]
 ProofreadMode = Literal["fast", "thinking"]
+ChatDialect = Literal["default", "xiaomimimo"]
+DEFAULT_TEMPERATURE = 0.2
 logger = logging.getLogger(__name__)
 
 
@@ -41,14 +44,27 @@ class AIStreamEvent:
 
 
 BASE_SYSTEM_PROMPT = """
-你是出版社责任编辑的中文审校助手。请审校用户提供的 Word 选区文本，并返回可供程序自动插入批注的结构化结果。
+你是出版社责任编辑的中文审校助手。请审校用户提供的 Word 选区文本，并返回结构化JSON结果。
+
+返回格式：
+{
+  "issues": [
+    {
+      "id": "issue-1",
+      "category": "typo",
+      "severity": "low",
+      "original": "原文片段",
+      "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
+      "suggestion": "给责任编辑看的修改建议"
+    }
+  ]
+}
 
 基本要求：
 1. 只审校 <text> 标签内文本，不审校 <book> 信息或标签本身。
 2. 只输出能在原文中定位的明确问题，不为凑数量输出低置信度问题。
-3. 忽略可改可不改、纯风格偏好、主观润色、扩写、标题美化建议。
+3. 忽略可改可不改、纯风格偏好、主观润色、扩写、标题美化建议，忽略化学表达式小标问题。
 4. 忽略空格、制表符等空白字符问题。
-5. 缺少上下文、需要外部资料或人工判断时，suggestion 写明“需人工核查”，replacement 必须为 null。
 
 输出要求：
 1. 只返回紧凑 JSON，不要 Markdown、解释、代码块或多余文本。
@@ -71,19 +87,6 @@ category 只能使用：
 - style：出版物体例硬伤
 - other：其他
 
-返回格式：
-{
-  "issues": [
-    {
-      "id": "issue-1",
-      "category": "typo",
-      "severity": "low",
-      "original": "原文片段",
-      "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
-      "suggestion": "给责任编辑看的修改建议"
-    }
-  ]
-}
 """.strip()
 
 MODE_PROMPTS: dict[ProofreadMode, str] = {
@@ -128,6 +131,7 @@ async def proofread_with_ai(
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
     try:
@@ -144,6 +148,7 @@ async def proofread_with_ai(
             profile,
             proofread_mode=proofread_mode,
             reasoning_enabled=reasoning_enabled,
+            temperature=temperature,
         )
 
     _ensure_responses_api(profile)
@@ -154,12 +159,14 @@ async def proofread_with_ai(
         settings,
         profile,
         proofread_mode=proofread_mode,
+        temperature=temperature,
     )
     logger.info(
-        "AI responses request started profile_id=%s model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
+        "AI responses request started profile_id=%s model=%s proofread_mode=%s temperature=%s text_len=%s max_output_tokens=%s",
         profile.id,
         profile.model,
         proofread_mode,
+        payload["temperature"],
         len(text),
         payload["max_output_tokens"],
     )
@@ -201,6 +208,7 @@ async def stream_proofread_with_ai(
     provider_api: ProviderAPI | None = None,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> AsyncIterator[AIStreamEvent]:
     settings = settings or get_settings()
     try:
@@ -221,13 +229,15 @@ async def stream_proofread_with_ai(
         profile,
         proofread_mode=proofread_mode,
         stream=True,
+        temperature=temperature,
     )
     output_text = ""
     logger.info(
-        "AI responses stream started profile_id=%s model=%s proofread_mode=%s text_len=%s max_output_tokens=%s",
+        "AI responses stream started profile_id=%s model=%s proofread_mode=%s temperature=%s text_len=%s max_output_tokens=%s",
         profile.id,
         profile.model,
         proofread_mode,
+        payload["temperature"],
         len(text),
         payload["max_output_tokens"],
     )
@@ -310,8 +320,10 @@ async def _proofread_with_chat(
     profile: AIProfile,
     proofread_mode: ProofreadMode,
     reasoning_enabled: bool,
+    temperature: float,
 ) -> AIProofreadResult:
     _ensure_api_key(profile)
+    dialect = _chat_dialect(profile)
     payload = _build_chat_payload(
         text,
         book,
@@ -319,15 +331,19 @@ async def _proofread_with_chat(
         profile,
         proofread_mode=proofread_mode,
         reasoning_enabled=reasoning_enabled,
+        temperature=temperature,
+        dialect=dialect,
     )
     logger.info(
-        "AI chat request started profile_id=%s model=%s proofread_mode=%s reasoning_enabled=%s text_len=%s max_tokens=%s",
+        "AI chat request started profile_id=%s model=%s dialect=%s proofread_mode=%s reasoning_enabled=%s temperature=%s text_len=%s output_token_limit=%s",
         profile.id,
         profile.model,
+        dialect,
         proofread_mode,
         reasoning_enabled,
+        payload["temperature"],
         len(text),
-        payload["max_tokens"],
+        _chat_output_token_limit(payload),
     )
 
     _debug_log_json("AI chat request payload", payload)
@@ -366,11 +382,12 @@ def _build_responses_payload(
     profile: AIProfile,
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": profile.model,
         "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
-        "temperature": 0.2,
+        "temperature": temperature,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
     }
@@ -388,18 +405,41 @@ def _build_chat_payload(
     profile: AIProfile,
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+    dialect: ChatDialect | None = None,
 ) -> dict[str, Any]:
-    return {
+    resolved_dialect = dialect or _chat_dialect(profile)
+    payload: dict[str, Any] = {
         "model": profile.model,
         "messages": [
             {"role": "system", "content": _build_system_prompt(proofread_mode)},
             {"role": "user", "content": _build_user_prompt(text, book)},
         ],
-        "temperature": 0.2,
-        "max_tokens": _max_tokens_for_mode(settings, proofread_mode),
-        "reasoning": {"enabled": reasoning_enabled},
-        # "response_format": {"type": "json_object"},
+        "temperature": temperature,
     }
+
+    if resolved_dialect == "xiaomimimo":
+        payload["max_completion_tokens"] = _max_tokens_for_mode(settings, proofread_mode)
+        payload["thinking"] = {"type": "enabled" if reasoning_enabled else "disabled"}
+        payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    payload["max_tokens"] = _max_tokens_for_mode(settings, proofread_mode)
+    payload["reasoning"] = {"enabled": reasoning_enabled}
+    # "response_format": {"type": "json_object"},
+    return payload
+
+
+def _chat_dialect(profile: AIProfile) -> ChatDialect:
+    host = urlparse(profile.api_base_url).hostname or ""
+    if host.lower() == "api.xiaomimimo.com":
+        return "xiaomimimo"
+
+    return "default"
+
+
+def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
+    return payload.get("max_tokens", payload.get("max_completion_tokens"))
 
 
 def _build_system_prompt(proofread_mode: ProofreadMode) -> str:

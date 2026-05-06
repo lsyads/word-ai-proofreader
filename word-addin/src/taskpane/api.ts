@@ -52,6 +52,7 @@ export async function requestProofread(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
@@ -65,6 +66,7 @@ export async function requestProofread(
       providerApi,
       proofreadMode,
       reasoningEnabled,
+      temperature,
       signal
     );
   }
@@ -79,6 +81,7 @@ export async function requestProofread(
       providerApi,
       proofreadMode,
       reasoningEnabled,
+      temperature,
       onStatus,
       signal
     );
@@ -96,6 +99,7 @@ export async function requestProofread(
       providerApi,
       proofreadMode,
       reasoningEnabled,
+      temperature,
       signal
     );
   }
@@ -110,6 +114,7 @@ export async function requestChunkedProofreadTask(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   onStatus: (status: ProofreadStatusEvent) => void,
   onTaskCreated: (taskId: string | null) => void,
   signal: AbortSignal
@@ -131,6 +136,7 @@ export async function requestChunkedProofreadTask(
     providerApi,
     proofreadMode,
     reasoningEnabled,
+    temperature,
     signal
   );
   onTaskCreated(createdTask.task_id || null);
@@ -153,7 +159,9 @@ export async function requestDocxProofreadTask(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   applicationMode: ApplicationMode,
+  fallbackSummaryTruncateEnabled: boolean,
   onStatus: (status: ProofreadStatusEvent) => void,
   onTaskCreated: (taskId: string | null) => void,
   signal: AbortSignal
@@ -167,7 +175,9 @@ export async function requestDocxProofreadTask(
     providerApi,
     proofreadMode,
     reasoningEnabled,
+    temperature,
     applicationMode,
+    fallbackSummaryTruncateEnabled,
     signal
   );
   onTaskCreated(createdTask.task_id || null);
@@ -342,6 +352,7 @@ async function requestProofreadJson(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
   const response = await fetch(`${API_BASE_URL}/api/proofread`, {
@@ -358,6 +369,7 @@ async function requestProofreadJson(
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
+      temperature,
       context: {
         source: "word-addin",
       },
@@ -379,6 +391,7 @@ async function requestProofreadStream(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   onStatus: (status: ProofreadStatusEvent) => void,
   signal: AbortSignal
 ): Promise<ProofreadResponse> {
@@ -397,6 +410,7 @@ async function requestProofreadStream(
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
+      temperature,
       context: {
         source: "word-addin",
       },
@@ -465,6 +479,7 @@ async function createProofreadTask(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   signal: AbortSignal
 ): Promise<ChunkedProofreadResponse> {
   const response = await fetch(`${API_BASE_URL}/api/proofread/tasks`, {
@@ -481,6 +496,7 @@ async function createProofreadTask(
       provider_api: providerApi,
       proofread_mode: proofreadMode,
       reasoning_enabled: reasoningEnabled,
+      temperature,
       scope,
       chunk_size: DEFAULT_CHUNK_SIZE,
       context: {
@@ -505,7 +521,9 @@ async function createDocxProofreadTask(
   providerApi: ProviderAPI,
   proofreadMode: ProofreadMode,
   reasoningEnabled: boolean,
+  temperature: number,
   applicationMode: ApplicationMode,
+  fallbackSummaryTruncateEnabled: boolean,
   signal: AbortSignal
 ): Promise<DocxProofreadResponse> {
   const params = new URLSearchParams({
@@ -516,7 +534,9 @@ async function createDocxProofreadTask(
     provider_api: providerApi,
     proofread_mode: proofreadMode,
     reasoning_enabled: String(reasoningEnabled),
+    temperature: String(temperature),
     application_mode: applicationMode,
+    fallback_summary_truncate_enabled: String(fallbackSummaryTruncateEnabled),
   });
   const response = await fetch(`${API_BASE_URL}/api/proofread/docx/tasks?${params.toString()}`, {
     method: "POST",
@@ -797,13 +817,13 @@ function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
     elapsed_seconds:
       typeof payload.elapsed_seconds === "number" ? payload.elapsed_seconds : undefined,
     error_message: typeof payload.error_message === "string" ? payload.error_message : undefined,
-    source_filename: typeof payload.source_filename === "string" ? payload.source_filename : undefined,
+    source_filename:
+      typeof payload.source_filename === "string" ? payload.source_filename : undefined,
     output_filename:
       typeof payload.output_filename === "string" ? payload.output_filename : undefined,
     download_url: typeof payload.download_url === "string" ? payload.download_url : undefined,
     expires_at: typeof payload.expires_at === "string" ? payload.expires_at : undefined,
-    retention_days:
-      typeof payload.retention_days === "number" ? payload.retention_days : undefined,
+    retention_days: typeof payload.retention_days === "number" ? payload.retention_days : undefined,
   };
 }
 

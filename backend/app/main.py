@@ -100,13 +100,14 @@ async def get_ai_profiles() -> list[AIProfileResponse]:
 @app.post("/api/proofread", response_model=ProofreadResponse)
 async def proofread(request: ProofreadRequest) -> ProofreadResponse:
     logger.info(
-        "proofread request received text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread request received text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s",
         len(request.text),
         _mask_session_id(request.session_id),
         request.ai_profile_id or "default",
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
+        request.temperature,
     )
     _debug_log_json("proofread request body", request.model_dump())
     try:
@@ -118,6 +119,7 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
             provider_api=request.provider_api,
             proofread_mode=request.proofread_mode,
             reasoning_enabled=request.reasoning_enabled,
+            temperature=request.temperature,
         )
     except AIProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -154,13 +156,14 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
         )
 
     logger.info(
-        "proofread stream accepted text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread stream accepted text_len=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s",
         len(request.text),
         _mask_session_id(request.session_id),
         request.ai_profile_id or "default",
         provider_api,
         request.proofread_mode,
         request.reasoning_enabled,
+        request.temperature,
     )
     _debug_log_json("proofread stream request body", request.model_dump())
     return StreamingResponse(
@@ -177,7 +180,7 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
 @app.post("/api/proofread/chunked", response_model=ChunkedProofreadResult)
 async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "chunked proofread request received text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
@@ -186,6 +189,7 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
+        request.temperature,
     )
     _debug_log_json("chunked proofread request body", request.model_dump())
     try:
@@ -207,7 +211,7 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
 @app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
 async def create_proofread_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     logger.info(
-        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s",
+        "proofread task create requested text_len=%s scope=%s chunk_size=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s",
         len(request.text),
         request.scope,
         request.chunk_size,
@@ -216,6 +220,7 @@ async def create_proofread_task(request: ChunkedProofreadRequest) -> ChunkedProo
         request.provider_api or "default",
         request.proofread_mode,
         request.reasoning_enabled,
+        request.temperature,
     )
     _debug_log_json("proofread task request body", request.model_dump())
     try:
@@ -289,7 +294,9 @@ async def create_docx_proofread_task(
     provider_api: proofread_service.ProviderAPI | None = Query(default=None),
     proofread_mode: proofread_service.ProofreadMode = Query(default="fast"),
     reasoning_enabled: bool = Query(default=False),
+    temperature: float = Query(default=0.2, ge=0, le=1.5),
     application_mode: ApplicationMode = Query(default="comment"),
+    fallback_summary_truncate_enabled: bool = Query(default=True),
 ) -> DocxProofreadResult:
     if Path(filename).suffix.lower() == ".doc":
         raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
@@ -306,7 +313,7 @@ async def create_docx_proofread_task(
         raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
 
     logger.info(
-        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s application_mode=%s",
+        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s application_mode=%s fallback_summary_truncate_enabled=%s",
         filename,
         len(content),
         _mask_session_id(session_id),
@@ -314,7 +321,9 @@ async def create_docx_proofread_task(
         provider_api or "default",
         proofread_mode,
         reasoning_enabled,
+        temperature,
         application_mode,
+        fallback_summary_truncate_enabled,
     )
 
     try:
@@ -329,7 +338,9 @@ async def create_docx_proofread_task(
                 provider_api=provider_api,
                 proofread_mode=proofread_mode,
                 reasoning_enabled=reasoning_enabled,
+                temperature=temperature,
                 application_mode=application_mode,
+                fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
             )
         )
     except docx_service.DocxError as exc:
@@ -417,6 +428,8 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
             stream_kwargs["ai_profile_id"] = request.ai_profile_id
         if request.reasoning_enabled:
             stream_kwargs["reasoning_enabled"] = True
+        if request.temperature != 0.2:
+            stream_kwargs["temperature"] = request.temperature
 
         async for event in proofread_service.stream_proofread_text(
             request.text,

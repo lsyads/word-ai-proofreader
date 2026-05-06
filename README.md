@@ -18,7 +18,7 @@
 
 - 审校范围：当前选区或全书正文。当前选区由插件读取并回写；全书正文上传 `.docx`，后端处理目录可见文本、正文、表格和常见文本框文字。本版不支持 `.doc`，请先另存为 `.docx`。
 - 分块规则：当前选区 `> 7000` 字时走后端内存异步任务；全书 `.docx` 先按章拆分，再按节拆分；仍超过 7000 字时再用可提取的目录小标题辅助拆分，最后按现有段落/句末规则切分。
-- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions；未配置 `AI_API_KEY` 时返回 mock 结果，方便本地联调。
+- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions；插件可调整 temperature，默认 `0.2`；未配置 `AI_API_KEY` 时返回 mock 结果，方便本地联调。
 - 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息作为 prompt 背景，但只审校传入正文。
 - 结果处理：后端把 AI 输出转换为结构化 `issues[]`，过滤纯空白差异，并按 `original` 计算 `start/end/locator`。
 - Word 写回：当前选区审校完成后先展示结果，编辑筛选、勾选并确认后由插件写回批注或修订+批注；全书 `.docx` 由后端直接生成带批注或修订+批注的新文件，插件展示新文件名、保留期限和下载入口。
@@ -39,6 +39,7 @@ cp .env.example .env
 
 ```text
 AI_API_KEY=local-omlx-dev-key
+MIMO_API_KEY=...
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
@@ -62,10 +63,11 @@ API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest
 ```text
 OPENROUTER_API_KEY=...
 LOCAL_OMLX_API_KEY=local-omlx-dev-key
-AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_url":"https://openrouter.ai/api/v1","api_key_env":"OPENROUTER_API_KEY","model":"qwen/xxx","default_api":"chat","supported_apis":["chat"]},{"id":"local-omlx","label":"本地 oMLX","api_base_url":"http://127.0.0.1:8001/v1","api_key_env":"LOCAL_OMLX_API_KEY","model":"Qwen3.6-35B-A3B-4.4bit-msq","default_api":"responses","supported_apis":["responses","chat"]}]
+MIMO_API_KEY=...
+AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_url":"https://openrouter.ai/api/v1","api_key_env":"OPENROUTER_API_KEY","model":"qwen/xxx","default_api":"chat","supported_apis":["chat"]},{"id":"local-omlx","label":"本地 oMLX","api_base_url":"http://127.0.0.1:8001/v1","api_key_env":"LOCAL_OMLX_API_KEY","model":"Qwen3.6-35B-A3B-4.4bit-msq","default_api":"responses","supported_apis":["responses","chat"]},{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}]
 ```
 
-后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。
+后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。Xiaomi MiMo 当前按官方 OpenAI-compatible Chat Completions 接入，profile 只声明 `supported_apis=["chat"]`，不启用 Responses。
 
 ## 启动 oMLX 本地 AI 服务
 
@@ -136,7 +138,7 @@ npm run start
 3. 启动 `word-addin` dev server。
 4. 运行 `npm run start` 旁加载插件到 Word。
 5. 当前选区审校：在 Word 文档中选中正文；全书审校：准备一个 `.docx` 文件。
-6. 打开任务窗格，填写书名，按需选择审校范围、审校模式、API 模式和应用方式；全书模式需选择 `.docx` 文件。
+6. 打开任务窗格，填写书名，按需选择审校范围、审校模式、temperature、API 模式和应用方式；全书模式需选择 `.docx` 文件。
 7. 点击“AI 审校”。当前选区会先展示问题；全书 `.docx` 会展示分块进度并在完成后显示新文件名。
 8. 当前选区可筛选、勾选、定位并点击“应用 N 条到 Word”；全书 `.docx` 点击“下载审校后 Word”获取后端生成的新文件，默认至少 7 天内可从历史记录再次下载。
 9. 验证停止审校、重试当前分块、重试失败分块、历史导出和历史导入等常用流程。

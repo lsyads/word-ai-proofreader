@@ -30,7 +30,7 @@ backend/
 - 提供 `GET /health`、审校接口、本地 session 接口、同步分块调试接口、异步分块任务接口和 DOCX 全书审校任务接口。
 - 校验请求：`text` 非空，`book.title` 必填且非空。
 - 在未配置 `AI_API_KEY` 时返回 mock issue，保证本地可联调。
-- 在配置 `AI_API_KEY` 时按 `provider_api` 调用 OpenAI 兼容 Responses API 或 Chat Completions。
+- 在配置 `AI_API_KEY` 时按 `provider_api` 调用 OpenAI 兼容 Responses API 或 Chat Completions，并透传请求级 `temperature`，默认 `0.2`。
 - 把 AI 精简输出转换为结构化 `issues[]`，过滤纯空白差异，计算 `start/end/locator`。
 - 当前选区 `> 7000` 字时按默认 `chunk_size=5000` 分块；分块结果额外返回 `global_start/global_end`。
 - 全书 `.docx` 任务仅支持 `.docx`，不支持旧二进制 `.doc`；后端抽取目录可见文本、正文、表格和常见文本框文字，先按章、节拆分，仍超过 7000 字时再按可提取的目录小标题辅助拆分，最后生成新的 `.docx` 结果文件。
@@ -71,6 +71,7 @@ curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 
 ```text
 AI_API_KEY=local-omlx-dev-key
+MIMO_API_KEY=...
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
@@ -87,7 +88,9 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 - `AI_API_KEY` 为空时使用 mock fallback。
 - 不配置 `AI_PROFILES_JSON` 时，后端根据旧变量生成 `Default AI (.env)`。
 - `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；插件通过 `/api/ai-profiles` 加载下拉选项，后端不会返回 API Key。
+- Xiaomi MiMo profile 可配置为 `{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`；后端会按 MiMo Chat Completions 字段适配，不启用 Responses。
 - `AI_PROVIDER_API` 支持 `responses`、`chat`，作为默认 profile 的 `default_api`，也可由请求体临时覆盖。
+- `temperature` 是请求级参数，范围 `0` 到 `1.5`，无需环境变量。
 - `local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。
 - 真实 API Key 不要提交到 Git，不要写入前端源码或文档。
 

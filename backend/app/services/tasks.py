@@ -17,7 +17,7 @@ from app.schemas import (
     ChunkedTaskStatus,
 )
 from app.services import chunking
-from app.services.ai_client import AIClientError, AIStreamEvent
+from app.services.ai_client import AIClientError, AIStreamEvent, DEFAULT_TEMPERATURE
 from app.services.proofread import proofread_text
 
 MAX_TASKS = 50
@@ -403,6 +403,8 @@ async def _proofread_chunk(
         proofread_kwargs["ai_profile_id"] = task.request.ai_profile_id
     if task.request.reasoning_enabled:
         proofread_kwargs["reasoning_enabled"] = True
+    if task.request.temperature != DEFAULT_TEMPERATURE:
+        proofread_kwargs["temperature"] = task.request.temperature
 
     return await proofread_text(chunk.text, task.request.book, **proofread_kwargs)
 

@@ -48,6 +48,9 @@
                 <span>启用模型深度思考</span>
             </label>
 
+            <label class="field-label" for="temperature">Temperature</label>
+            <input id="temperature" class="control-input" type="number" min="0" max="1.5" step="0.1" value="0.2" />
+
             <label class="field-label" for="ai-profile">AI 配置</label>
             <select id="ai-profile" class="control-select">
                 <option value="default">Default AI (.env)</option>
@@ -68,7 +71,7 @@
             <label class="field-label" for="fallback-summary-truncate-enabled">汇总批注</label>
             <label class="checkbox-field">
                 <input id="fallback-summary-truncate-enabled" type="checkbox" />
-                <span>默认截断汇总批注，最多 10 条，每条 1200 字以内</span>
+                <span>默认截断汇总批注，最多 10 条，每条 1500 字以内</span>
             </label>
 
             <label class="field-label" for="proofread-scope">审校范围</label>

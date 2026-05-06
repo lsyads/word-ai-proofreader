@@ -1,4 +1,4 @@
-/* global AbortController, Blob, Office, URL, clearInterval, clearTimeout, document, fetch, localStorage, setInterval, setTimeout */
+/* global AbortController, Blob, File, Office, Response, URL, clearInterval, clearTimeout, document, fetch, localStorage, setInterval, setTimeout */
 
 import {
   cancelDocxProofreadTask,
@@ -53,6 +53,7 @@ import {
   AIProfile,
   BookInfo,
   ControlsState,
+  DEFAULT_TEMPERATURE,
   IssueApplicationSummary,
   IssueFilterState,
   IssueApplicationProgress,
@@ -79,6 +80,7 @@ const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
 const AI_PROFILE_STORAGE_KEY = "word-ai-proofreader-ai-profile-v1";
 const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v2";
 const REASONING_ENABLED_STORAGE_KEY = "word-ai-proofreader-reasoning-enabled-v2";
+const TEMPERATURE_STORAGE_KEY = "word-ai-proofreader-temperature-v1";
 const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v2";
 const FALLBACK_SUMMARY_TRUNCATE_STORAGE_KEY =
   "word-ai-proofreader-fallback-summary-truncate-enabled-v2";
@@ -126,6 +128,7 @@ Office.onReady((info) => {
     getSelect("provider-api").onchange = persistControls;
     getSelect("proofread-mode").onchange = persistControls;
     getInput("reasoning-enabled").onchange = persistControls;
+    getInput("temperature").onchange = persistControls;
     getSelect("application-mode").onchange = persistControls;
     getInput("fallback-summary-truncate-enabled").onchange = persistControls;
     getSelect("proofread-scope").onchange = persistControls;
@@ -252,6 +255,7 @@ export async function proofreadSelection() {
         controls.providerApi,
         controls.proofreadMode,
         controls.reasoningEnabled,
+        controls.temperature,
         renderChunkedProgress,
         (createdTaskId) => {
           currentTaskId = createdTaskId;
@@ -273,6 +277,7 @@ export async function proofreadSelection() {
         controls.providerApi,
         controls.proofreadMode,
         controls.reasoningEnabled,
+        controls.temperature,
         (progress) => {
           showMessage(progress.message, "default");
           appendProgressStatus(progress);
@@ -296,6 +301,7 @@ export async function proofreadSelection() {
       aiProfileId: controls.aiProfileId,
       proofreadMode: controls.proofreadMode,
       reasoningEnabled: controls.reasoningEnabled,
+      temperature: controls.temperature,
       issues,
     };
     issueReviewState = {
@@ -399,7 +405,9 @@ async function proofreadDocxFile(
     controls.providerApi,
     controls.proofreadMode,
     controls.reasoningEnabled,
+    controls.temperature,
     controls.applicationMode,
+    controls.fallbackSummaryTruncateEnabled,
     renderChunkedProgress,
     (createdTaskId) => {
       currentTaskId = createdTaskId;
@@ -423,6 +431,7 @@ async function proofreadDocxFile(
     aiProfileId: controls.aiProfileId,
     proofreadMode: controls.proofreadMode,
     reasoningEnabled: controls.reasoningEnabled,
+    temperature: controls.temperature,
     issues: [],
     issueCount: docxResult.issue_count,
     sourceFilename: docxResult.source_filename,
@@ -855,8 +864,7 @@ function cancelCurrentProofread() {
   }
 
   if (currentTaskId) {
-    const cancelTask =
-      currentTaskKind === "docx" ? cancelDocxProofreadTask : cancelProofreadTask;
+    const cancelTask = currentTaskKind === "docx" ? cancelDocxProofreadTask : cancelProofreadTask;
     cancelTask(currentTaskId).catch(() => {
       // The local abort is enough for UI state; task cancellation is best effort.
     });
@@ -967,6 +975,7 @@ function saveStoppedOrFailedHistory(input: {
     aiProfileId: input.controls.aiProfileId,
     proofreadMode: input.controls.proofreadMode,
     reasoningEnabled: input.controls.reasoningEnabled,
+    temperature: input.controls.temperature,
     applicationMode: input.controls.applicationMode,
     sessionId: currentSessionId || "",
     selectedIssueIds: [],
@@ -1006,6 +1015,7 @@ async function preserveCurrentTaskSnapshotAfterStop(input: {
       aiProfileId: input.controls.aiProfileId,
       proofreadMode: input.controls.proofreadMode,
       reasoningEnabled: input.controls.reasoningEnabled,
+      temperature: input.controls.temperature,
       issues,
     };
     issueReviewState = {
@@ -1055,6 +1065,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       aiProfileId: entry.aiProfileId || "default",
       proofreadMode: entry.proofreadMode,
       reasoningEnabled: entry.reasoningEnabled,
+      temperature: entry.temperature,
       issues: [],
       issueCount: entry.issueCount,
       sourceFilename: entry.sourceFilename,
@@ -1092,6 +1103,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       aiProfileId: entry.aiProfileId || "default",
       proofreadMode: entry.proofreadMode,
       reasoningEnabled: entry.reasoningEnabled,
+      temperature: entry.temperature,
       issues: entry.issues,
     };
     taskState = entry.status;
@@ -1128,6 +1140,7 @@ function initializeControls() {
   getSelect("provider-api").value = readStoredProviderApi();
   getSelect("proofread-mode").value = readStoredProofreadMode();
   getInput("reasoning-enabled").checked = readStoredReasoningEnabled();
+  getInput("temperature").value = formatTemperature(readStoredTemperature());
   getSelect("application-mode").value = readStoredApplicationMode();
   getInput("fallback-summary-truncate-enabled").checked =
     readStoredFallbackSummaryTruncateEnabled();
@@ -1176,6 +1189,7 @@ function persistControls() {
   localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
   localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
   localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
+  localStorage.setItem(TEMPERATURE_STORAGE_KEY, String(getTemperature()));
   localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
   localStorage.setItem(
     FALLBACK_SUMMARY_TRUNCATE_STORAGE_KEY,
@@ -1247,7 +1261,9 @@ async function downloadCurrentDocxResult() {
   showMessage(`正在准备下载：${pendingResult.outputFilename}`, "default");
 
   try {
-    const response = await fetch(pendingResult.downloadUrl || getDocxDownloadUrl(pendingResult.taskId));
+    const response = await fetch(
+      pendingResult.downloadUrl || getDocxDownloadUrl(pendingResult.taskId)
+    );
     if (!response.ok) {
       throw new Error(await getDocxDownloadErrorMessage(response));
     }
@@ -1335,6 +1351,7 @@ function getControlsState(): ControlsState {
     providerApi: getProviderApi(),
     proofreadMode: getProofreadMode(),
     reasoningEnabled: getReasoningEnabled(),
+    temperature: getTemperature(),
     applicationMode: getApplicationMode(),
     fallbackSummaryTruncateEnabled: getFallbackSummaryTruncateEnabled(),
     scope: getProofreadScope(),
@@ -1357,6 +1374,19 @@ function getProofreadMode(): ProofreadMode {
 
 function getReasoningEnabled(): boolean {
   return getInput("reasoning-enabled").checked;
+}
+
+function getTemperature(): number {
+  const input = getInput("temperature");
+  const rawValue = input.value.trim();
+  const temperature = normalizeTemperature(rawValue);
+  const wasInvalid =
+    !rawValue || Number.isNaN(Number(rawValue)) || Number(rawValue) < 0 || Number(rawValue) > 1.5;
+  input.value = formatTemperature(temperature);
+  if (wasInvalid) {
+    showMessage("Temperature 已恢复默认值 0.2。", "default");
+  }
+  return temperature;
 }
 
 function getApplicationMode(): ApplicationMode {
@@ -1391,6 +1421,10 @@ function readStoredReasoningEnabled(): boolean {
   return localStorage.getItem(REASONING_ENABLED_STORAGE_KEY) === "true";
 }
 
+function readStoredTemperature(): number {
+  return normalizeTemperature(localStorage.getItem(TEMPERATURE_STORAGE_KEY));
+}
+
 function readStoredApplicationMode(): ApplicationMode {
   const value = localStorage.getItem(APPLICATION_MODE_STORAGE_KEY);
   return isApplicationMode(value) ? value : "comment";
@@ -1408,6 +1442,21 @@ function readStoredProofreadScope(): ProofreadScope {
 
 function isProviderApi(value: unknown): value is ProviderAPI {
   return value === "responses" || value === "chat";
+}
+
+function normalizeTemperature(value: string | null): number {
+  const rawValue = value === null ? "" : value.trim();
+  const parsed = Number(rawValue);
+
+  if (!rawValue || Number.isNaN(parsed) || parsed < 0 || parsed > 1.5) {
+    return DEFAULT_TEMPERATURE;
+  }
+
+  return Math.round(parsed * 100) / 100;
+}
+
+function formatTemperature(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(value);
 }
 
 function syncProviderApiOptionsForProfile() {
@@ -1529,6 +1578,7 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
   getSelect("provider-api").disabled = isBusy;
   getSelect("proofread-mode").disabled = isBusy;
   getInput("reasoning-enabled").disabled = isBusy;
+  getInput("temperature").disabled = isBusy;
   getSelect("application-mode").disabled = isBusy;
   getSelect("proofread-scope").disabled = isBusy;
   getInput("docx-file").disabled = isBusy;
@@ -1537,7 +1587,9 @@ function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
 function updateActionButtons() {
   const selectedCount = getSelectedIssues().length;
   const isDocxResult = Boolean(pendingResult?.sourceFilename);
-  const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord && !isDocxResult);
+  const canApply = Boolean(
+    pendingResult && selectedCount > 0 && !isApplyingToWord && !isDocxResult
+  );
   const applyButton = getButton("apply-to-word");
   const downloadButton = getButton("download-docx");
   const retryCurrentButton = getButton("retry-current-chunk");

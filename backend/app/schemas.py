@@ -35,6 +35,7 @@ class ProofreadRequest(BaseModel):
     provider_api: Literal["responses", "chat"] | None = None
     proofread_mode: Literal["fast", "thinking"] = "fast"
     reasoning_enabled: bool = False
+    temperature: float = Field(default=0.2, ge=0, le=1.5)
     context: dict[str, Any] | None = None
 
     @field_validator("text")

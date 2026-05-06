@@ -3,6 +3,7 @@
 import {
   ApplicationMode,
   BookInfo,
+  DEFAULT_TEMPERATURE,
   IssueApplicationSummary,
   PendingProofreadResult,
   ProofreadHistoryEntry,
@@ -15,7 +16,7 @@ import {
 } from "./types";
 
 const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v2";
-const HISTORY_SCHEMA_VERSION = 5;
+const HISTORY_SCHEMA_VERSION = 6;
 const MAX_HISTORY_ENTRIES = 20;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
@@ -42,6 +43,7 @@ export function saveHistoryEntry(input: {
   providerApi: ProviderAPI;
   proofreadMode: ProofreadMode;
   reasoningEnabled: boolean;
+  temperature: number;
   applicationMode: ApplicationMode;
   selectedIssueIds: string[];
   skippedIssueCount: number;
@@ -77,6 +79,7 @@ export function saveHistoryEntry(input: {
     providerApi: input.providerApi,
     proofreadMode: input.proofreadMode,
     reasoningEnabled: input.reasoningEnabled,
+    temperature: input.temperature,
     applicationMode: input.applicationMode,
     scope: input.scope,
     taskId: input.taskId,
@@ -139,6 +142,7 @@ export function savePendingResultHistory(input: {
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
     reasoningEnabled: input.result.reasoningEnabled,
+    temperature: input.result.temperature,
     applicationMode: input.applicationMode,
     selectedIssueIds,
     skippedIssueCount: input.result.issues.length - selectedIssueIds.length,
@@ -186,6 +190,7 @@ export function saveAppliedResultHistory(input: {
     providerApi: input.result.providerApi,
     proofreadMode: input.result.proofreadMode,
     reasoningEnabled: input.result.reasoningEnabled,
+    temperature: input.result.temperature,
     applicationMode: input.applicationMode,
     selectedIssueIds,
     skippedIssueCount: input.result.issues.length - selectedIssues.length,
@@ -202,7 +207,7 @@ export function getHistoryEntries(): ProofreadHistoryEntry[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || "[]");
     return Array.isArray(parsed) && parsed.every(isHistoryEntry)
-      ? (parsed as ProofreadHistoryEntry[])
+      ? (parsed as ProofreadHistoryEntry[]).map(normalizeHistoryEntry)
       : [];
   } catch {
     return [];
@@ -247,7 +252,9 @@ function createLocalId(): string {
 }
 
 function getHistoryText(result: PendingProofreadResult): string {
-  return result.sourceText || result.sourceFilename || result.historyTextPreview || result.book.title;
+  return (
+    result.sourceText || result.sourceFilename || result.historyTextPreview || result.book.title
+  );
 }
 
 function normalizeIssuesForHistory(text: string, issues: ProofreadIssue[]): ProofreadIssue[] {
@@ -426,6 +433,7 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     isProviderApi(value.providerApi) &&
     isProofreadMode(value.proofreadMode) &&
     typeof value.reasoningEnabled === "boolean" &&
+    (typeof value.temperature === "undefined" || typeof value.temperature === "number") &&
     isApplicationMode(value.applicationMode) &&
     isProofreadScope(value.scope) &&
     typeof value.totalChunks === "number" &&
@@ -457,6 +465,21 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
       value.retentionDays === null ||
       typeof value.retentionDays === "number")
   );
+}
+
+function normalizeHistoryEntry(entry: ProofreadHistoryEntry): ProofreadHistoryEntry {
+  return {
+    ...entry,
+    temperature: normalizeTemperature(entry.temperature),
+  };
+}
+
+function normalizeTemperature(value: unknown): number {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0 || value > 1.5) {
+    return DEFAULT_TEMPERATURE;
+  }
+
+  return value;
 }
 
 function isProofreadIssue(value: unknown): value is ProofreadIssue {

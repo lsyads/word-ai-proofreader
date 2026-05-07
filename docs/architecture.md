@@ -271,13 +271,13 @@ POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&application_mode=
 Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
 ```
 
-后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端先在 chunk 文本中按 `original` 定位，再映射回 OOXML 节点写入批注或修订+批注，因此全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
+后端解析 `word/document.xml`，抽取目录可见文本、正文段落、表格单元格文字和常见文本框文字，并在抽取时记录全局字符范围到 `w:t` 文本节点的映射。AI 返回精简 issue 后，后端把 issue 绑定到来源 chunk，优先使用 chunk 内定位结果；写回前如果全局坐标缺失或失效，会在该 chunk 内按 `original` 二次精确搜索，再映射回 OOXML 节点写入批注或修订+批注。全书模式不需要把 `locator` 返回给插件，也不需要 Office.js 做全文搜索。
 
 DOCX 分块优先级是严格流水线：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可识别目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区分块规则。目录小标题不会提前打断章/节结构。任务 SSE、停止、重试当前分块和重试失败分块与文本分块任务同形，接口路径前缀为 `/api/proofread/docx/tasks`。终态成功或部分成功时，任务快照包含 `output_filename`、`download_url`、`expires_at` 和 `retention_days`，插件展示“下载审校后 Word”。
 
 结果文件保存到 `DOCX_OUTPUT_DIR`，默认 `backend/var/docx-results`；`DOCX_RETENTION_DAYS` 默认并强制最少为 7。后端用 SQLite 索引记录 task ID、源文件名、输出文件名、应用方式、分块统计、问题数和过期时间。启动、创建任务和下载时会清理过期结果；历史记录里的下载入口不保存文件本体，只要后端文件未过期且未被外部清理，就可以继续下载。
 
-批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记。修订+批注模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`，并让批注范围只包住 `w:ins` 插入文本；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
+批注模式会创建 `word/comments.xml`、文档关系和 content type，并在可定位原文范围插入 Word 原生批注标记；同一 XML 文本节点内的多条 issue 会逐条刷新文本节点索引，跨相邻 `w:t` run 的原文范围也可作为一个批注范围写回。修订+批注模式对可定位且有 `replacement` 的问题写入 `w:del/w:ins`，并让批注范围只包住 `w:ins` 插入文本；无替换文本、跨复杂 OOXML 节点或无法安全定位的问题降级为文档开头汇总批注。
 
 ## 后端到 AI Provider
 

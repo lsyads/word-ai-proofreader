@@ -102,6 +102,110 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
     document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
     _register_namespaces(document_namespaces)
     document_root = ET.fromstring(entries[WORD_DOCUMENT_PATH])
+    text, blocks, spans = _extract_document_text_model(document_root)
+
+    return DocxDocument(
+        entries=entries,
+        document_root=document_root,
+        document_namespaces=document_namespaces,
+        text=text,
+        blocks=blocks,
+        spans=spans,
+    )
+
+
+def split_docx_into_chunks(document: DocxDocument, chunk_size: int = chunking.DEFAULT_CHUNK_SIZE) -> list[ProofreadChunk]:
+    toc_titles = _extract_toc_titles(document.blocks)
+    block_groups = _split_blocks_by_boundaries(document.blocks, "chapter")
+    refined_groups: list[list[DocxBlock]] = []
+
+    for group in block_groups:
+        refined_groups.extend(_split_large_group(group, "section"))
+
+    toc_refined_groups: list[list[DocxBlock]] = []
+    for group in refined_groups:
+        toc_refined_groups.extend(_split_large_group_by_toc_titles(group, toc_titles))
+
+    chunks: list[ProofreadChunk] = []
+    for group in toc_refined_groups:
+        chunks.extend(_chunks_for_group(document.text, group, chunk_size))
+
+    return [
+        ProofreadChunk(index=index, start=chunk.start, end=chunk.end, text=chunk.text)
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def write_docx_result(
+    source_bytes: bytes,
+    issues: list[ChunkedProofreadIssue],
+    application_mode: ApplicationMode,
+    output_path: Path,
+    fallback_summary_truncate_enabled: bool = True,
+) -> WritebackSummary:
+    document = parse_docx(source_bytes)
+    source_text = document.text
+    source_chunks = {chunk.index: chunk for chunk in split_docx_into_chunks(document)}
+    package = _DocxPackage(document.entries, document.document_root)
+    summary = WritebackSummary()
+    fallback_issues: list[ChunkedProofreadIssue] = []
+
+    sorted_issues = sorted(
+        issues,
+        key=lambda issue: issue.global_start if issue.global_start is not None else -1,
+        reverse=True,
+    )
+
+    for issue in sorted_issues:
+        issue = _resolve_issue_for_writeback(source_text, source_chunks, issue)
+        if issue.global_start is None or issue.global_end is None:
+            fallback_issues.append(issue)
+            continue
+
+        if application_mode == "revision" and issue.replacement:
+            if _try_insert_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
+                summary.comment_count += 1
+                summary.revision_count += 1
+                _refresh_document_text_model(document)
+                continue
+
+            if _try_insert_revision(document, issue.global_start, issue.global_end, issue, package):
+                summary.revision_count += 1
+                _refresh_document_text_model(document)
+                continue
+
+        if _try_insert_comment(document, issue.global_start, issue.global_end, issue, package):
+            summary.comment_count += 1
+            _refresh_document_text_model(document)
+            continue
+
+        fallback_issues.append(issue)
+
+    if fallback_issues:
+        inserted_fallback_count = _insert_summary_comments(
+            document,
+            fallback_issues,
+            package,
+            fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+        )
+        if inserted_fallback_count > 0:
+            summary.fallback_count = inserted_fallback_count
+        else:
+            summary.failed_count = len(fallback_issues)
+
+    package.save(output_path)
+    return summary
+
+
+def build_output_filename(source_filename: str, application_mode: ApplicationMode) -> str:
+    stem = Path(source_filename).stem.strip() or "审校文件"
+    suffix = "修订批注" if application_mode == "revision" else "批注"
+    timestamp = datetime.now(OUTPUT_FILENAME_TIMEZONE).strftime("%Y%m%d%H%M%S")
+    safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", stem)
+    return f"{safe_stem}-AI审校-{suffix}-{timestamp}.docx"
+
+
+def _extract_document_text_model(document_root: ET.Element) -> tuple[str, list[DocxBlock], list[TextSpan]]:
     parent_map = _build_parent_map(document_root)
     body = document_root.find(f".//{_w('body')}")
     if body is None:
@@ -162,99 +266,71 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
     if not text.strip():
         raise DocxError("DOCX 未提取到可审校文字。")
 
-    return DocxDocument(
-        entries=entries,
-        document_root=document_root,
-        document_namespaces=document_namespaces,
-        text=text,
-        blocks=blocks,
-        spans=spans,
-    )
+    return text, blocks, spans
 
 
-def split_docx_into_chunks(document: DocxDocument, chunk_size: int = chunking.DEFAULT_CHUNK_SIZE) -> list[ProofreadChunk]:
-    toc_titles = _extract_toc_titles(document.blocks)
-    block_groups = _split_blocks_by_boundaries(document.blocks, "chapter")
-    refined_groups: list[list[DocxBlock]] = []
-
-    for group in block_groups:
-        refined_groups.extend(_split_large_group(group, "section"))
-
-    toc_refined_groups: list[list[DocxBlock]] = []
-    for group in refined_groups:
-        toc_refined_groups.extend(_split_large_group_by_toc_titles(group, toc_titles))
-
-    chunks: list[ProofreadChunk] = []
-    for group in toc_refined_groups:
-        chunks.extend(_chunks_for_group(document.text, group, chunk_size))
-
-    return [
-        ProofreadChunk(index=index, start=chunk.start, end=chunk.end, text=chunk.text)
-        for index, chunk in enumerate(chunks)
-    ]
+def _refresh_document_text_model(document: DocxDocument) -> None:
+    document.text, document.blocks, document.spans = _extract_document_text_model(document.document_root)
 
 
-def write_docx_result(
-    source_bytes: bytes,
-    issues: list[ChunkedProofreadIssue],
-    application_mode: ApplicationMode,
-    output_path: Path,
-    fallback_summary_truncate_enabled: bool = True,
-) -> WritebackSummary:
-    document = parse_docx(source_bytes)
-    package = _DocxPackage(document.entries, document.document_root)
-    summary = WritebackSummary()
-    fallback_issues: list[ChunkedProofreadIssue] = []
+def _resolve_issue_for_writeback(
+    source_text: str,
+    source_chunks: dict[int, ProofreadChunk],
+    issue: ChunkedProofreadIssue,
+) -> ChunkedProofreadIssue:
+    original = issue.original.strip()
+    if not original:
+        return issue
 
-    sorted_issues = sorted(
-        issues,
-        key=lambda issue: issue.global_start if issue.global_start is not None else -1,
-        reverse=True,
-    )
+    if _range_matches(source_text, issue.global_start, issue.global_end, original):
+        return issue
 
-    for issue in sorted_issues:
-        if issue.global_start is None or issue.global_end is None:
-            fallback_issues.append(issue)
-            continue
+    chunk = source_chunks.get(issue.chunk_index)
+    if chunk is None:
+        return issue
 
-        if application_mode == "revision" and issue.replacement:
-            if _try_insert_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
-                summary.comment_count += 1
-                summary.revision_count += 1
-                continue
+    local_start = issue.start
+    local_end = issue.end
+    if local_start is not None and local_end is not None:
+        global_start = chunk.start + local_start
+        global_end = chunk.start + local_end
+        if _range_matches(source_text, global_start, global_end, original):
+            return issue.model_copy(update={"global_start": global_start, "global_end": global_end})
 
-            if _try_insert_revision(document, issue.global_start, issue.global_end, issue, package):
-                summary.revision_count += 1
-                continue
+    matches = _find_occurrences(chunk.text, original)
+    if not matches:
+        return issue
 
-        if _try_insert_comment(document, issue.global_start, issue.global_end, issue, package):
-            summary.comment_count += 1
-            continue
+    if len(matches) == 1:
+        local_found = matches[0]
+    elif local_start is not None:
+        local_found = min(matches, key=lambda match: abs(match - local_start))
+    else:
+        return issue
 
-        fallback_issues.append(issue)
-
-    if fallback_issues:
-        inserted_fallback_count = _insert_summary_comments(
-            document,
-            fallback_issues,
-            package,
-            fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
-        )
-        if inserted_fallback_count > 0:
-            summary.fallback_count = inserted_fallback_count
-        else:
-            summary.failed_count = len(fallback_issues)
-
-    package.save(output_path)
-    return summary
+    global_start = chunk.start + local_found
+    global_end = global_start + len(original)
+    return issue.model_copy(update={"global_start": global_start, "global_end": global_end})
 
 
-def build_output_filename(source_filename: str, application_mode: ApplicationMode) -> str:
-    stem = Path(source_filename).stem.strip() or "审校文件"
-    suffix = "修订批注" if application_mode == "revision" else "批注"
-    timestamp = datetime.now(OUTPUT_FILENAME_TIMEZONE).strftime("%Y%m%d%H%M%S")
-    safe_stem = re.sub(r'[\\/:*?"<>|]+', "_", stem)
-    return f"{safe_stem}-AI审校-{suffix}-{timestamp}.docx"
+def _range_matches(text: str, start: int | None, end: int | None, original: str) -> bool:
+    if start is None or end is None:
+        return False
+    if start < 0 or end < start or end > len(text):
+        return False
+    return text[start:end] == original
+
+
+def _find_occurrences(text: str, needle: str) -> list[int]:
+    matches: list[int] = []
+    search_from = 0
+    while search_from < len(text):
+        found_at = text.find(needle, search_from)
+        if found_at == -1:
+            break
+        matches.append(found_at)
+        search_from = found_at + 1
+    return matches
 
 
 def _split_large_group(group: list[DocxBlock], boundary_kind: str) -> list[list[DocxBlock]]:
@@ -393,7 +469,12 @@ def _try_insert_comment(
 ) -> bool:
     span = _single_span_for_range(document, start, end)
     if span is None:
-        return False
+        spans = _spans_for_range(document, start, end)
+        if not spans:
+            return False
+
+        comment_id = package.add_comment(_format_issue_comment(issue, prefix="文本框" if spans[0].in_textbox else None))
+        return _wrap_text_spans_range(document, spans, start, end, package.comment_markers(comment_id))
 
     comment_id = package.add_comment(_format_issue_comment(issue, prefix="文本框" if span.in_textbox else None))
     return _wrap_single_text_span(document, span, start, end, package.comment_markers(comment_id))
@@ -546,6 +627,32 @@ def _single_span_for_range(document: DocxDocument, start: int, end: int) -> Text
     return None
 
 
+def _spans_for_range(document: DocxDocument, start: int, end: int) -> list[TextSpan] | None:
+    if start >= end:
+        return None
+
+    spans = [span for span in document.spans if span.end > start and span.start < end]
+    if not spans:
+        return None
+
+    paragraph = spans[0].paragraph
+    current = start
+
+    for span in spans:
+        if span.paragraph is not paragraph:
+            return None
+        if span.start > current:
+            return None
+        current = max(current, min(span.end, end))
+        if current >= end:
+            break
+
+    if current < end:
+        return None
+
+    return spans
+
+
 def _wrap_single_text_span(
     document: DocxDocument,
     span: TextSpan,
@@ -586,6 +693,60 @@ def _wrap_single_text_span(
         replacement_nodes.append(_make_run(after, rpr))
 
     _replace_child(run_parent, run, replacement_nodes)
+    return True
+
+
+def _wrap_text_spans_range(
+    document: DocxDocument,
+    spans: list[TextSpan],
+    start: int,
+    end: int,
+    markers: tuple[ET.Element, ET.Element, ET.Element],
+) -> bool:
+    if len(spans) == 1:
+        return _wrap_single_text_span(document, spans[0], start, end, markers)
+
+    parent_map = _build_parent_map(document.document_root)
+    first_span = spans[0]
+    last_span = spans[-1]
+    first_run = _ancestor(first_span.node, parent_map, _w("r"))
+    last_run = _ancestor(last_span.node, parent_map, _w("r"))
+    if first_run is None or last_run is None:
+        return False
+
+    first_parent = parent_map.get(first_run)
+    last_parent = parent_map.get(last_run)
+    if first_parent is None or last_parent is None:
+        return False
+
+    start_marker, end_marker, reference_run = markers
+    last_text = last_span.node.text or ""
+    last_relative_end = end - last_span.start
+    last_target = last_text[:last_relative_end]
+    last_after = last_text[last_relative_end:]
+    if not last_target:
+        return False
+
+    last_rpr = last_run.find(_w("rPr"))
+    last_replacement_nodes = [_make_run(last_target, last_rpr), end_marker, reference_run]
+    if last_after:
+        last_replacement_nodes.append(_make_run(last_after, last_rpr))
+
+    first_text = first_span.node.text or ""
+    first_relative_start = start - first_span.start
+    first_before = first_text[:first_relative_start]
+    first_target = first_text[first_relative_start:]
+    if not first_target:
+        return False
+
+    first_rpr = first_run.find(_w("rPr"))
+    first_replacement_nodes: list[ET.Element] = []
+    if first_before:
+        first_replacement_nodes.append(_make_run(first_before, first_rpr))
+    first_replacement_nodes.extend([start_marker, _make_run(first_target, first_rpr)])
+
+    _replace_child(last_parent, last_run, last_replacement_nodes)
+    _replace_child(first_parent, first_run, first_replacement_nodes)
     return True
 
 

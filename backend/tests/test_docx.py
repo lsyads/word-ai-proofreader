@@ -107,6 +107,15 @@ def make_docx(
     return buffer.getvalue()
 
 
+def replace_docx_entry(document_bytes: bytes, name: str, data: bytes) -> bytes:
+    source = io.BytesIO(document_bytes)
+    output = io.BytesIO()
+    with zipfile.ZipFile(source, "r") as source_archive, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as output_archive:
+        for entry_name in source_archive.namelist():
+            output_archive.writestr(data=data if entry_name == name else source_archive.read(entry_name), zinfo_or_arcname=entry_name)
+    return output.getvalue()
+
+
 def test_parse_docx_extracts_body_table_and_textbox_text():
     document = docx_service.parse_docx(
         make_docx(["目录", "第一章 开始", "正文内容"], table_text="表格文字", textbox_text="文本框文字")
@@ -204,6 +213,98 @@ def test_write_docx_result_inserts_comment(tmp_path: Path):
         document_xml = archive.read("word/document.xml").decode()
         comments_xml = archive.read("word/comments.xml").decode()
     assert "commentRangeStart" in document_xml
+    assert "修正错字" in comments_xml
+
+
+def test_write_docx_result_inserts_multiple_comments_in_same_text_node(tmp_path: Path):
+    source = make_docx(["这里有甲字，也有乙字。"])
+    document = docx_service.parse_docx(source)
+    issues = []
+    for issue_id, original in [("issue-1", "甲字"), ("issue-2", "乙字")]:
+        start = document.text.index(original)
+        issues.append(
+            docx_service.ChunkedProofreadIssue(
+                id=issue_id,
+                category="typo",
+                severity="high",
+                original=original,
+                suggestion=f"修正{original}。",
+                chunk_index=0,
+                global_start=start,
+                global_end=start + len(original),
+            )
+        )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, issues, "comment", output)
+
+    assert summary.comment_count == 2
+    assert summary.fallback_count == 0
+    with zipfile.ZipFile(output) as archive:
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert comments_xml.count("<w:comment ") == 2
+    assert "修正甲字" in comments_xml
+    assert "修正乙字" in comments_xml
+
+
+def test_write_docx_result_relocates_issue_inside_bound_chunk(tmp_path: Path):
+    source = make_docx(["第一章 开始", "这里有甲字。", "第二章 继续", "这里有乙字。"])
+    document = docx_service.parse_docx(source)
+    chunks = docx_service.split_docx_into_chunks(document)
+    target_chunk = next(chunk for chunk in chunks if "乙字" in chunk.text)
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="乙字",
+        suggestion="修正乙字。",
+        chunk_index=target_chunk.index,
+        global_start=None,
+        global_end=None,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, [issue], "comment", output)
+
+    assert summary.comment_count == 1
+    assert summary.fallback_count == 0
+    with zipfile.ZipFile(output) as archive:
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "修正乙字" in comments_xml
+
+
+def test_write_docx_result_inserts_comment_across_split_runs(tmp_path: Path):
+    source = make_docx(["这里有错字。"])
+    with zipfile.ZipFile(io.BytesIO(source)) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+    document_xml = document_xml.replace(
+        "<w:r><w:t>这里有错字。</w:t></w:r>",
+        "<w:r><w:t>这里有错</w:t></w:r><w:r><w:t>字。</w:t></w:r>",
+    )
+    source = replace_docx_entry(source, "word/document.xml", document_xml.encode())
+    document = docx_service.parse_docx(source)
+    start = document.text.index("错字")
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="错字",
+        suggestion="修正错字。",
+        chunk_index=0,
+        global_start=start,
+        global_end=start + 2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, [issue], "comment", output)
+
+    assert summary.comment_count == 1
+    assert summary.fallback_count == 0
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "commentRangeStart" in document_xml
+    assert "commentRangeEnd" in document_xml
     assert "修正错字" in comments_xml
 
 

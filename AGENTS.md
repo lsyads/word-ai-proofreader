@@ -1,48 +1,74 @@
 # AGENTS.md
 
-本项目是一个面向出版社责任编辑的 Word AI 审校助手。
+本项目是一个面向出版社责任编辑的 Word 文档审校 Agent 系统。
 
-## 项目目标
+当前阶段目标不是继续增加零散审校功能，而是完成 V1 Agent 化改造：在保留现有 Word 插件、FastAPI 接口、DOCX 解析、分块审校、SSE 进度、批注/修订写回能力的基础上，引入 LangGraph 作为后端 Agent 编排层，并使用 LangChain 的 tool/model/schema 组件封装现有能力。
 
-在 Word 中选中一段文字，点击插件按钮，调用 FastAPI 后端 AI 审校接口，返回结构化审校问题，并把审校建议作为 Word 批注插入当前选区。
-做到好用、易用：
-- 后端在选中文本中搜索original原文片段的位置，同步返回给word插件，word插件在original原文片段批注suggestion修改建议，这样编辑后续可以在word中直接接受或者拒绝批注建议，避免二次修改
-- 历史记录可以清空、另存为、导入
-- 兼容chat和reponse的AI API，可以在word插件手动切换
+## V1 目标
 
-## 当前目录结构
+完成一个可运行、可测试、可展示的 LangGraph V1 版本，使项目从“AI 审校插件”升级为“文档审校 Agent 工作流”。
+
+V1 必须做到：
+
+1. 保留现有功能兼容性：
+   - 当前选区审校仍可用。
+   - 长选区分块任务仍可用。
+   - 全书 `.docx` 审校仍可用。
+   - 现有 Word 插件调用链路尽量不破坏。
+   - 现有 `spec.md` 中已定义接口除非必要，不做破坏性修改。
+
+2. 新增后端 Agent 编排层：
+   - 使用 LangGraph `StateGraph` 显式定义审校流程。
+   - 不使用黑盒式“一个超级 prompt 跑到底”的实现。
+   - 不把所有逻辑塞进单个 FastAPI endpoint。
+   - 不优先使用复杂多 Agent 框架，V1 先做单图、多节点、可观测的工作流。
+
+3. 使用 LangChain 工具组件：
+   - 将现有文档解析、分块、AI 审校、结果归一化、原文定位、DOCX 写回等能力封装为 tool 或可被 tool 调用的 service function。
+   - tool 输入输出必须有明确类型。
+   - 复杂输入使用 Pydantic schema。
+   - tool 名称使用 `snake_case`。
+   - tool docstring 要清楚说明用途、输入、输出和限制。
+
+4. 新增 Agent run trace：
+   - 每次 Agent 审校任务生成 `run_id`。
+   - 记录每个节点开始、结束、耗时、状态、错误信息。
+   - 记录每个 chunk 的状态、问题数、失败原因、重试次数。
+   - trace 不记录完整正文，不记录 API Key，不记录 Authorization。
+   - trace 可以先存 SQLite，也可以先以现有任务状态结构扩展实现。
+
+5. V1 不追求完整产品化：
+   - 暂不做复杂多用户权限。
+   - 暂不做完整 MCP Server。
+   - 暂不做大型向量知识库。
+
+## 推荐目录结构
+
+在 `backend/app/` 下新增或调整以下结构：
 
 ```text
-.
-├── backend/
-├── docs/
-└── word-addin/
+backend/app/
+├── agents/
+│   ├── __init__.py
+│   ├── graph.py          # LangGraph StateGraph 定义与 compile
+│   ├── state.py          # AgentState / TypedDict / Pydantic 状态定义
+│   ├── nodes.py          # graph 节点函数
+│   ├── tools.py          # LangChain tools 封装
+│   ├── service.py        # Agent runner service，供 FastAPI 调用
+│   └── trace.py          # run trace 记录、查询、序列化
+├── services/
+│   ├── proofread_service.py
+│   ├── docx_service.py
+│   ├── chunk_service.py
+│   ├── locator_service.py
+│   └── ai_provider_service.py
+└── api/
+    └── ...
 ```
 
-- `backend/`：Python FastAPI 后端服务，负责接收文本、调用 AI 审校能力、返回结构化审校结果。
-- `docs/`：项目补充文档；临时联调记录、临时排障说明放在 `docs/tmp/`。
-- `word-addin/`：Office.js + TypeScript + Webpack 的 Word 插件，负责读取 Word 选区、调用后端接口、把审校建议插入为 Word 批注。
-忽略.gitignore中的文件
+注意：
 
-## 开发约定
-
-- 优先围绕项目目标做小步、可验证的改动，避免过早扩展复杂功能。
-- 前后端通过 JSON API 交互，接口保持小而稳定。
-- AI 返回内容必须先转换成结构化审校问题，再进入 Word 批注流程。
-- Word 插件开发服务使用当前模板配置的 `https://localhost:3000/`。
-- 后端默认使用 FastAPI，本地开发端口默认 `8000`。
-- 不提交 API Key、`.env`、本地证书、调试缓存、依赖目录或构建产物。
-- 开发完成后同步新建或更新文档。
-- `README.md` 只保留长期有效的项目说明、启动方式、联调流程和测试命令。
-- 临时问题修复说明、阶段性排障记录不要写进 `README.md`，统一放在 `docs/tmp/`；问题稳定解决后可以删除或归档。
-- 改接口契约时同步更新 `spec.md`；改运行方式或联调流程时同步更新 `README.md`；改协作约定时同步更新本文件。
-
-## 数据流
-
-```text
-Word 选区文本
-  -> word-addin 调用后端 JSON API
-  -> backend/FastAPI 调用 AI 审校
-  -> 返回结构化审校问题
-  -> word-addin 在当前选区插入 Word 批注
-```
+agents/ 只负责 Agent 编排。
+services/ 负责可复用业务能力。
+tools.py 只做薄封装，不要复制大量业务逻辑。
+现有函数尽量复用就迁移/引用，实在不行再重写。

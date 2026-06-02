@@ -1,30 +1,46 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
+from dataclasses import dataclass
 
-from app.agents import planner
+from app.agents import memory, planner
 from app.schemas import (
     BookInfo,
     ChunkedProofreadIssue,
+    ProofreadIssue,
     V2CandidateIssue,
+    V2DocumentMapResponse,
     V2ProjectResponse,
     V2RunCreateRequest,
     V2RunResponse,
     V2WritebackRequest,
     V2WritebackResponse,
 )
-from app.services import document_map_service, project_store, report_service
+from app.services import chunk_service, chunking, document_map_service, project_store, report_service
 from app.services import docx as docx_service
 from app.services import proofread as proofread_service
-from app.services import chunk_service
-from app.services import chunking
+from app.services.ai_client import V2PromptContext
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_STYLE_RULES = [
+    "标点应符合中文出版物体例，避免连续标点、英文逗号混用和半角符号误用。",
+    "数字、单位、年代和序号应前后一致；无法确认时标为需人工核查。",
+    "术语、人名、地名、机构名在同一项目内应保持一致。",
+]
 
 
 class V2WorkspaceConflict(RuntimeError):
     """Raised when a V2 workspace action is not valid for the current project state."""
+
+
+@dataclass(frozen=True)
+class PreparedSource:
+    source_text: str
+    chunks: list
+    document_map: V2DocumentMapResponse
 
 
 class AgentWorkspaceRunner:
@@ -45,7 +61,14 @@ class AgentWorkspaceRunner:
         )
         document_map = document_map_service.build_document_map(project.project_id, source_bytes)
         project_store.save_document_map(document_map)
-        project_store.save_review_plan(planner.create_review_plan(project.project_id))
+        project_store.save_review_plan(
+            planner.create_review_plan(
+                project.project_id,
+                source_type="docx",
+                review_goal=review_goal,
+                document_map=document_map,
+            )
+        )
         return project_store.project_response(project.project_id)
 
     def create_selection_project(
@@ -66,113 +89,124 @@ class AgentWorkspaceRunner:
         )
         document_map = document_map_service.build_selection_document_map(project.project_id, text)
         project_store.save_document_map(document_map)
-        project_store.save_review_plan(planner.create_review_plan(project.project_id))
+        project_store.save_review_plan(
+            planner.create_review_plan(
+                project.project_id,
+                source_type="selection",
+                review_goal=review_goal,
+                document_map=document_map,
+            )
+        )
         return project_store.project_response(project.project_id)
 
-    async def run_project(self, project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
+    def start_project_run(self, project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
         project = project_store.require_project(project_id)
-        if project.source_type == "selection":
-            source_text = project.source_bytes.decode("utf-8")
-            chunks = chunking.split_text_into_chunks(source_text, "selection", chunking.DEFAULT_CHUNK_SIZE)
-        else:
-            document = docx_service.parse_docx(project.source_bytes)
-            source_text = document.text
-            chunks = docx_service.split_docx_into_chunks(document)
-        run = project_store.create_run(project_id, total_chunks=len(chunks))
-        plan = planner.create_review_plan(project_id, run.run_id)
+        prepared = self._prepare_source(project)
+        run = project_store.create_run(project_id, total_chunks=len(prepared.chunks))
+        plan = planner.create_review_plan(
+            project_id,
+            run.run_id,
+            source_type=project.source_type,
+            review_goal=project.review_goal,
+            document_map=prepared.document_map,
+        )
         project_store.save_review_plan(plan)
         project_store.update_project_status(project_id, "running")
-        project_store.update_run(project_id, run.run_id, status="running", stage="plan_created")
         project_store.add_run_event(
             project_id,
             run.run_id,
             "plan_created",
-            {"step_count": len(plan.steps), "message": "V2 审校计划已生成。"},
+            {
+                "step_count": len(plan.steps),
+                "enabled_steps": [step.step_id for step in plan.steps if step.enabled],
+                "review_goal_bound": True,
+                "message": "V2.1 审校计划已生成，审校目标已进入 Agent 上下文。",
+            },
         )
+        project_store.update_run(project_id, run.run_id, status="queued", stage="queued")
+        return project_store.require_run(project_id, run.run_id)
 
+    async def run_project_job(self, project_id: str, run_id: str, request: V2RunCreateRequest) -> None:
+        try:
+            await self._execute_project_run(project_id, run_id, request)
+        except Exception:
+            logger.exception("V2.1 project run failed project_id=%s run_id=%s", project_id, run_id)
+            raise
+
+    async def run_project(self, project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
+        run = self.start_project_run(project_id, request)
+        await self._execute_project_run(project_id, run.run_id, request)
+        return project_store.require_run(project_id, run.run_id)
+
+    async def _execute_project_run(self, project_id: str, run_id: str, request: V2RunCreateRequest) -> None:
+        project = project_store.require_project(project_id)
+        prepared = self._prepare_source(project)
+        plan = project_store.get_review_plan(project_id)
+        memory_items = project_store.list_memory_items(project_id)
         candidates: list[V2CandidateIssue] = []
         completed_chunks = 0
         failed_chunks = 0
-        try:
-            for chunk in chunks:
-                project_store.update_run(
-                    project_id,
-                    run.run_id,
-                    status="running",
-                    stage="proofread_chunks",
-                    completed_chunks=completed_chunks,
-                    failed_chunks=failed_chunks,
-                    candidate_count=len(candidates),
-                )
-                project_store.add_run_event(
-                    project_id,
-                    run.run_id,
-                    "tool_started",
-                    {"tool_name": "proofread_document_chunk", "chunk_index": chunk.index},
-                )
-                try:
-                    issues = await proofread_service.proofread_text(
-                        chunk.text,
-                        project.book,
-                        session_id=request.session_id,
-                        ai_profile_id=request.ai_profile_id,
-                        provider_api=request.provider_api,
-                        proofread_mode=request.proofread_mode,
-                        reasoning_enabled=request.reasoning_enabled,
-                        temperature=request.temperature,
-                    )
-                except Exception as exc:
-                    failed_chunks += 1
-                    project_store.add_run_event(
-                        project_id,
-                        run.run_id,
-                        "error",
-                        {
-                            "tool_name": "proofread_document_chunk",
-                            "chunk_index": chunk.index,
-                            "message": str(exc),
-                        },
-                    )
-                    logger.exception("V2 project chunk failed project_id=%s run_id=%s chunk_index=%s", project_id, run.run_id, chunk.index)
-                    continue
+        project_store.update_run(project_id, run_id, status="running", stage="proofread_pass")
 
-                completed_chunks += 1
-                global_issues = chunk_service.globalize_issues(chunk, issues)
-                chunk_candidates = [
-                    _candidate_from_issue(project_id, run.run_id, issue, source_text)
-                    for issue in global_issues
-                ]
-                candidates.extend(chunk_candidates)
-                for candidate in chunk_candidates:
-                    project_store.add_run_event(
-                        project_id,
-                        run.run_id,
-                        "candidate_found",
-                        {
-                            "candidate_id": candidate.candidate_id,
-                            "chunk_index": candidate.chunk_index,
-                            "category": candidate.category,
-                            "severity": candidate.severity,
-                        },
-                    )
+        try:
+            candidates, completed_chunks, failed_chunks = await self._run_proofread_pass(
+                project=project,
+                run_id=run_id,
+                request=request,
+                prepared=prepared,
+                memory_items=memory_items,
+            )
+            for step in plan.steps:
+                if not step.enabled or step.step_id in {"plan_review", "proofread_pass", "human_approval"}:
+                    continue
+                if step.step_id == "terminology_pass":
+                    candidates.extend(self._run_terminology_pass(project, run_id, prepared))
+                elif step.step_id == "style_rule_pass":
+                    candidates.extend(self._run_style_rule_pass(project, run_id, prepared))
+                elif step.step_id == "consistency_pass":
+                    candidates.extend(self._run_consistency_pass(project, run_id, prepared))
+
+            project_store.update_run(project_id, run_id, status="running", stage="merge_candidates")
+            project_store.add_run_event(project_id, run_id, "pass_started", {"pass_name": "merge_candidates"})
+            before_merge = len(candidates)
+            candidates = _dedupe_candidates(candidates)
+            project_store.add_run_event(
+                project_id,
+                run_id,
+                "candidate_merged",
+                {"before_count": before_merge, "after_count": len(candidates)},
+            )
+            project_store.add_run_event(project_id, run_id, "pass_completed", {"pass_name": "merge_candidates"})
+
+            project_store.update_run(project_id, run_id, status="running", stage="evaluate_candidates")
+            project_store.add_run_event(project_id, run_id, "pass_started", {"pass_name": "evaluate_candidates"})
+            candidates = [_evaluate_candidate(candidate) for candidate in candidates]
+            for candidate in candidates:
                 project_store.add_run_event(
                     project_id,
-                    run.run_id,
-                    "tool_completed",
+                    run_id,
+                    "candidate_evaluated",
                     {
-                        "tool_name": "proofread_document_chunk",
-                        "chunk_index": chunk.index,
-                        "issue_count": len(chunk_candidates),
+                        "candidate_id": candidate.candidate_id,
+                        "pass_name": candidate.pass_name,
+                        "confidence": candidate.confidence,
+                        "needs_human_review": candidate.needs_human_review,
                     },
                 )
+            project_store.add_run_event(
+                project_id,
+                run_id,
+                "pass_completed",
+                {"pass_name": "evaluate_candidates", "candidate_count": len(candidates)},
+            )
 
-            candidates = _dedupe_candidates(candidates)
             project_store.save_candidates(candidates)
+            self._save_safe_memory(project_id, run_id, candidates)
             status = "waiting_for_approval" if completed_chunks > 0 else "failed"
             error_message = "All chunks failed to proofread." if status == "failed" else None
             project_store.update_run(
                 project_id,
-                run.run_id,
+                run_id,
                 status=status,
                 stage=status,
                 completed_chunks=completed_chunks,
@@ -183,17 +217,333 @@ class AgentWorkspaceRunner:
             project_store.update_project_status(project_id, status)
             project_store.add_run_event(
                 project_id,
-                run.run_id,
+                run_id,
                 "waiting_for_approval" if status == "waiting_for_approval" else "error",
-                {"candidate_count": len(candidates), "message": "候选问题已进入编辑确认队列。" if status == "waiting_for_approval" else error_message},
+                {
+                    "candidate_count": len(candidates),
+                    "message": "候选问题已进入编辑确认队列。" if status == "waiting_for_approval" else error_message,
+                },
             )
+            refreshed_project = project_store.require_project(project_id)
+            report = report_service.build_review_report(
+                project_id=project_id,
+                status=refreshed_project.status,
+                source_filename=refreshed_project.source_filename,
+                book=refreshed_project.book,
+                review_goal=refreshed_project.review_goal,
+                candidates=project_store.list_candidates(project_id),
+            )
+            project_store.save_report(report)
+            project_store.add_run_event(project_id, run_id, "report_ready", {"candidate_count": len(candidates)})
         except Exception as exc:
-            project_store.update_run(project_id, run.run_id, status="failed", stage="failed", error_message=str(exc))
+            project_store.update_run(project_id, run_id, status="failed", stage="failed", error_message=str(exc))
             project_store.update_project_status(project_id, "failed")
-            project_store.add_run_event(project_id, run.run_id, "error", {"message": str(exc)})
+            project_store.add_run_event(project_id, run_id, "error", {"message": str(exc)})
             raise
 
-        return project_store.require_run(project_id, run.run_id)
+    async def _run_proofread_pass(
+        self,
+        *,
+        project: project_store.StoredProject,
+        run_id: str,
+        request: V2RunCreateRequest,
+        prepared: PreparedSource,
+        memory_items: list,
+    ) -> tuple[list[V2CandidateIssue], int, int]:
+        candidates: list[V2CandidateIssue] = []
+        completed_chunks = 0
+        failed_chunks = 0
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_started",
+            {"pass_name": "proofread_pass", "chunk_count": len(prepared.chunks), "review_goal_bound": True},
+        )
+        for chunk in prepared.chunks:
+            project_store.update_run(
+                project.project_id,
+                run_id,
+                status="running",
+                stage="proofread_pass",
+                completed_chunks=completed_chunks,
+                failed_chunks=failed_chunks,
+                candidate_count=len(candidates),
+            )
+            project_store.add_run_event(
+                project.project_id,
+                run_id,
+                "tool_started",
+                {"tool_name": "proofread_document_chunk", "pass_name": "proofread_pass", "chunk_index": chunk.index},
+            )
+            try:
+                issues = await proofread_service.proofread_text_with_context(
+                    chunk.text,
+                    project.book,
+                    session_id=request.session_id,
+                    ai_profile_id=request.ai_profile_id,
+                    provider_api=request.provider_api,
+                    proofread_mode=request.proofread_mode,
+                    reasoning_enabled=request.reasoning_enabled,
+                    temperature=request.temperature,
+                    v2_context=self._prompt_context(project, "proofread_pass", prepared.document_map, memory_items),
+                )
+            except Exception as exc:
+                failed_chunks += 1
+                project_store.add_run_event(
+                    project.project_id,
+                    run_id,
+                    "error",
+                    {"tool_name": "proofread_document_chunk", "chunk_index": chunk.index, "message": str(exc)},
+                )
+                logger.exception("V2.1 chunk failed project_id=%s run_id=%s chunk_index=%s", project.project_id, run_id, chunk.index)
+                continue
+
+            completed_chunks += 1
+            global_issues = chunk_service.globalize_issues(chunk, issues)
+            chunk_candidates = [
+                _candidate_from_issue(project.project_id, run_id, issue, prepared.source_text, pass_name="proofread_pass")
+                for issue in global_issues
+            ]
+            candidates.extend(chunk_candidates)
+            for candidate in chunk_candidates:
+                self._add_candidate_found_event(candidate)
+            project_store.add_run_event(
+                project.project_id,
+                run_id,
+                "tool_completed",
+                {
+                    "tool_name": "proofread_document_chunk",
+                    "pass_name": "proofread_pass",
+                    "chunk_index": chunk.index,
+                    "issue_count": len(chunk_candidates),
+                },
+            )
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_completed",
+            {
+                "pass_name": "proofread_pass",
+                "completed_chunks": completed_chunks,
+                "failed_chunks": failed_chunks,
+                "candidate_count": len(candidates),
+            },
+        )
+        return candidates, completed_chunks, failed_chunks
+
+    def _run_terminology_pass(
+        self,
+        project: project_store.StoredProject,
+        run_id: str,
+        prepared: PreparedSource,
+    ) -> list[V2CandidateIssue]:
+        project_store.update_run(project.project_id, run_id, status="running", stage="terminology_pass")
+        project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "terminology_pass"})
+        candidates: list[V2CandidateIssue] = []
+        pairs = [("AI", "人工智能"), ("责任编辑", "责编"), ("DOCX", "docx")]
+        for left, right in pairs:
+            if left in prepared.source_text and right in prepared.source_text:
+                original = right
+                start = prepared.source_text.find(original)
+                issue = _rule_issue(
+                    category="consistency",
+                    severity="medium",
+                    original=original,
+                    suggestion=f"发现“{left}”与“{right}”并用，请确认本书术语或称谓是否统一。",
+                    start=start,
+                    rule_id="terminology_variant_pair",
+                )
+                candidates.append(
+                    _candidate_from_issue(
+                        project.project_id,
+                        run_id,
+                        issue,
+                        prepared.source_text,
+                        pass_name="terminology_pass",
+                        confidence=0.68,
+                        evidence_kind="rule",
+                        rule_id="terminology_variant_pair",
+                    )
+                )
+        for candidate in candidates:
+            self._add_candidate_found_event(candidate)
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_completed",
+            {"pass_name": "terminology_pass", "candidate_count": len(candidates)},
+        )
+        return candidates
+
+    def _run_style_rule_pass(
+        self,
+        project: project_store.StoredProject,
+        run_id: str,
+        prepared: PreparedSource,
+    ) -> list[V2CandidateIssue]:
+        project_store.update_run(project.project_id, run_id, status="running", stage="style_rule_pass")
+        project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "style_rule_pass"})
+        rules = [
+            ("style_consecutive_punctuation", re.compile(r"[。！？!?]{2,}"), "连续标点可能不符合出版体例，请核对。"),
+            ("style_ascii_comma", re.compile(r"[\u4e00-\u9fff],[\u4e00-\u9fff]"), "中文语境中出现英文逗号，请确认是否应改为中文逗号。"),
+            ("style_halfwidth_parenthesis", re.compile(r"[\u4e00-\u9fff]\([^)]+\)"), "中文正文中的半角括号可能不符合体例，请核对。"),
+        ]
+        candidates: list[V2CandidateIssue] = []
+        for rule_id, pattern, suggestion in rules:
+            match = pattern.search(prepared.source_text)
+            if not match:
+                continue
+            original = match.group(0)
+            issue = _rule_issue(
+                category="style",
+                severity="low",
+                original=original,
+                suggestion=suggestion,
+                start=match.start(),
+                rule_id=rule_id,
+            )
+            candidates.append(
+                _candidate_from_issue(
+                    project.project_id,
+                    run_id,
+                    issue,
+                    prepared.source_text,
+                    pass_name="style_rule_pass",
+                    confidence=0.74,
+                    evidence_kind="rule",
+                    rule_id=rule_id,
+                )
+            )
+        for candidate in candidates:
+            self._add_candidate_found_event(candidate)
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_completed",
+            {"pass_name": "style_rule_pass", "candidate_count": len(candidates)},
+        )
+        return candidates
+
+    def _run_consistency_pass(
+        self,
+        project: project_store.StoredProject,
+        run_id: str,
+        prepared: PreparedSource,
+    ) -> list[V2CandidateIssue]:
+        project_store.update_run(project.project_id, run_id, status="running", stage="consistency_pass")
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_started",
+            {"pass_name": "consistency_pass", "scope": project.source_type},
+        )
+        candidates: list[V2CandidateIssue] = []
+        numeric_tokens = re.findall(r"\d+(?:\.\d+)?(?:年|月|日|%|％|页|章|节)?", prepared.source_text)
+        repeated_numbers = sorted({token for token in numeric_tokens if numeric_tokens.count(token) > 1})
+        if project.source_type == "docx" and len(numeric_tokens) >= 3 and repeated_numbers:
+            original = repeated_numbers[0]
+            start = prepared.source_text.find(original)
+            issue = _rule_issue(
+                category="consistency",
+                severity="medium",
+                original=original,
+                suggestion="全书出现多个数字/时间表达，请结合上下文核对统计口径、单位和前后一致性。",
+                start=start,
+                rule_id="cross_chapter_numeric_consistency",
+            )
+            candidates.append(
+                _candidate_from_issue(
+                    project.project_id,
+                    run_id,
+                    issue,
+                    prepared.source_text,
+                    pass_name="consistency_pass",
+                    confidence=0.62,
+                    evidence_kind="document_map",
+                    rule_id="cross_chapter_numeric_consistency",
+                )
+            )
+        project_store.add_run_event(
+            project.project_id,
+            run_id,
+            "pass_completed",
+            {"pass_name": "consistency_pass", "candidate_count": len(candidates)},
+        )
+        return candidates
+
+    def _prepare_source(self, project: project_store.StoredProject) -> PreparedSource:
+        if project.source_type == "selection":
+            source_text = project.source_bytes.decode("utf-8")
+            chunks = chunking.split_text_into_chunks(source_text, "selection", chunking.DEFAULT_CHUNK_SIZE)
+            document_map = project_store.get_document_map(project.project_id)
+            return PreparedSource(source_text=source_text, chunks=chunks, document_map=document_map)
+
+        document = docx_service.parse_docx(project.source_bytes)
+        source_text = document.text
+        chunks = docx_service.split_docx_into_chunks(document)
+        document_map = project_store.get_document_map(project.project_id)
+        return PreparedSource(source_text=source_text, chunks=chunks, document_map=document_map)
+
+    def _prompt_context(
+        self,
+        project: project_store.StoredProject,
+        pass_name: str,
+        document_map: V2DocumentMapResponse,
+        memory_items: list,
+    ) -> V2PromptContext:
+        return V2PromptContext(
+            review_goal=project.review_goal,
+            source_type=project.source_type,
+            pass_name=pass_name,
+            document_map_summary=(
+                f"text_len={document_map.text_len}; blocks={document_map.block_count}; "
+                f"chunks={document_map.chunk_count}"
+            ),
+            memory_items=[
+                {
+                    "kind": item.kind,
+                    "key": item.key,
+                    "value": item.value,
+                    "source": item.source,
+                    "confidence": item.confidence,
+                }
+                for item in memory_items[:20]
+            ],
+            style_rules=DEFAULT_STYLE_RULES,
+        )
+
+    def _add_candidate_found_event(self, candidate: V2CandidateIssue) -> None:
+        project_store.add_run_event(
+            candidate.project_id,
+            candidate.run_id,
+            "candidate_found",
+            {
+                "candidate_id": candidate.candidate_id,
+                "chunk_index": candidate.chunk_index,
+                "category": candidate.category,
+                "severity": candidate.severity,
+                "pass_name": candidate.pass_name,
+                "confidence": candidate.confidence,
+            },
+        )
+
+    def _save_safe_memory(self, project_id: str, run_id: str, candidates: list[V2CandidateIssue]) -> None:
+        items = memory.derive_memory_items(candidates)
+        for item in items:
+            saved = project_store.save_memory_item(
+                project_id,
+                kind=item.kind,
+                key=item.key,
+                value=item.value,
+                source=item.source,
+                confidence=item.confidence,
+            )
+            project_store.add_run_event(
+                project_id,
+                run_id,
+                "memory_updated",
+                {"memory_id": saved.memory_id, "kind": saved.kind, "key": saved.key, "source": saved.source},
+            )
 
     def write_approved(self, project_id: str, request: V2WritebackRequest) -> V2WritebackResponse:
         project = project_store.require_project(project_id)
@@ -242,6 +592,11 @@ def _candidate_from_issue(
     run_id: str,
     issue: ChunkedProofreadIssue,
     document_text: str,
+    *,
+    pass_name: str,
+    confidence: float = 0.72,
+    evidence_kind: str | None = None,
+    rule_id: str | None = None,
 ) -> V2CandidateIssue:
     now = project_store._now_iso()
     evidence = _evidence_for_issue(issue, document_text)
@@ -260,9 +615,63 @@ def _candidate_from_issue(
         global_start=issue.global_start,
         global_end=issue.global_end,
         locator=issue.locator,
-        self_check="已由 V2 evaluator 绑定文档位置和上下文证据，等待编辑确认。",
+        self_check="已由 V2.1 evaluator 绑定位置、证据和审校目标，等待编辑确认。",
+        pass_name=pass_name,
+        confidence=confidence,
+        evidence_kind=evidence_kind or ("locator" if issue.locator else "context"),
+        rule_id=rule_id,
+        needs_human_review=True,
+        evaluation_note=None,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _rule_issue(
+    *,
+    category: str,
+    severity: str,
+    original: str,
+    suggestion: str,
+    start: int,
+    rule_id: str,
+) -> ChunkedProofreadIssue:
+    return ChunkedProofreadIssue(
+        id=rule_id,
+        category=category,
+        severity=severity,
+        original=original,
+        replacement=None,
+        suggestion=suggestion,
+        start=start,
+        end=start + len(original),
+        locator=None,
+        chunk_index=0,
+        global_start=start,
+        global_end=start + len(original),
+    )
+
+
+def _evaluate_candidate(candidate: V2CandidateIssue) -> V2CandidateIssue:
+    confidence = candidate.confidence
+    if candidate.locator:
+        confidence = min(1, confidence + 0.08)
+    if candidate.replacement is None:
+        confidence = max(0.45, confidence - 0.08)
+    if len(candidate.original.strip()) <= 1:
+        confidence = max(0.35, confidence - 0.2)
+    needs_human_review = candidate.replacement is None or candidate.severity == "high" or confidence < 0.7
+    note = "证据充分，可进入编辑确认。"
+    if needs_human_review:
+        note = "建议人工重点判断：候选涉及核查、无直接替换或置信度偏低。"
+    return candidate.model_copy(
+        update={
+            "confidence": round(confidence, 2),
+            "needs_human_review": needs_human_review,
+            "evaluation_note": note,
+            "self_check": f"V2.1 复核：{note}",
+            "updated_at": project_store._now_iso(),
+        }
     )
 
 
@@ -270,7 +679,7 @@ def _dedupe_candidates(candidates: list[V2CandidateIssue]) -> list[V2CandidateIs
     seen: set[tuple] = set()
     deduped: list[V2CandidateIssue] = []
     for candidate in candidates:
-        key = (candidate.original, candidate.replacement, candidate.suggestion, candidate.global_start, candidate.global_end)
+        key = (candidate.original, candidate.replacement, candidate.suggestion, candidate.global_start, candidate.global_end, candidate.pass_name)
         if key in seen:
             continue
         seen.add(key)

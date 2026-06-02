@@ -111,6 +111,16 @@
 
         <section class="workspace-panel">
             <div class="panel-heading">
+                <h2 class="ms-font-m">最近项目</h2>
+                <button id="refresh-projects" class="ms-Button" type="button">
+                    <span class="ms-Button-label">刷新</span>
+                </button>
+            </div>
+            <div id="recent-projects" class="workspace-empty">暂无最近项目。</div>
+        </section>
+
+        <section class="workspace-panel">
+            <div class="panel-heading">
                 <h2 class="ms-font-m">项目概览</h2>
                 <button id="refresh-workspace" class="ms-Button" type="button" disabled>
                     <span class="ms-Button-label">刷新</span>
@@ -150,6 +160,9 @@
                     <option value="deferred">暂缓</option>
                     <option value="written">已写回</option>
                 </select>
+                <select id="candidate-pass-filter" class="control-select narrow">
+                    <option value="all">全部阶段</option>
+                </select>
             </div>
             <div class="button-row">
                 <button id="approve-all" class="ms-Button" type="button" disabled>
@@ -161,6 +174,11 @@
             </div>
             <div id="candidate-summary" class="summary-line">暂无候选问题。</div>
             <div id="candidates" class="workspace-empty">运行 Agent 后显示候选问题。</div>
+        </section>
+
+        <section class="workspace-panel">
+            <h2 class="ms-font-m">项目记忆</h2>
+            <div id="project-memory" class="workspace-empty">暂无项目记忆。</div>
         </section>
 
         <section class="workspace-panel">

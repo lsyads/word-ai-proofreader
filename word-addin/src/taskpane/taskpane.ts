@@ -1,17 +1,22 @@
-/* global AbortController, AbortSignal, File, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Office, document, window */
+/* global AbortController, AbortSignal, File, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Office, document, localStorage, window */
 
 import {
   createSession,
   createV2Project,
   createV2SelectionProject,
   decideV2Candidates,
+  deleteV2Memory,
   getAIProfiles,
   getV2Candidates,
   getV2DocumentMap,
   getV2DownloadUrl,
+  getV2Memory,
   getV2Project,
   getV2ReviewReport,
+  getV2ReviewPlan,
+  getV2Run,
   getV2RunTrace,
+  listV2Projects,
   markV2CandidatesWritten,
   runV2Project,
   writebackV2Project,
@@ -28,7 +33,9 @@ import {
   V2CandidateIssue,
   V2CandidateStatus,
   V2DocumentMap,
+  V2MemoryItem,
   V2Project,
+  V2ReviewPlan,
   V2ReviewReport,
   V2Run,
   V2RunTrace,
@@ -43,15 +50,26 @@ import {
 type SourceType = "selection" | "docx";
 
 const DEFAULT_REVIEW_GOAL = "完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。";
+const LAST_PROJECT_ID_KEY = "docpilot_v2_last_project_id";
+const TERMINAL_RUN_STATUSES = new Set([
+  "waiting_for_approval",
+  "succeeded",
+  "partial_succeeded",
+  "failed",
+  "cancelled",
+]);
 
 let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
 let aiProfiles: AIProfile[] = [];
+let recentProjects: V2Project[] = [];
 let currentProject: V2Project | null = null;
 let currentDocumentMap: V2DocumentMap | null = null;
+let currentPlan: V2ReviewPlan | null = null;
 let currentRun: V2Run | null = null;
 let currentTrace: V2RunTrace | null = null;
 let currentCandidates: V2CandidateIssue[] = [];
+let currentMemory: V2MemoryItem[] = [];
 let currentReport: V2ReviewReport | null = null;
 let currentSelectionText = "";
 let isBusy = false;
@@ -67,11 +85,13 @@ Office.onReady((info) => {
   initializeDefaults();
   initializeSession();
   initializeAIProfiles();
+  initializeProjects();
   renderWorkspace();
 });
 
 function bindEvents() {
   getButton("create-project").onclick = createProject;
+  getButton("refresh-projects").onclick = refreshProjects;
   getButton("run-agent").onclick = runAgent;
   getButton("refresh-workspace").onclick = refreshWorkspace;
   getButton("refresh-trace").onclick = refreshTrace;
@@ -83,6 +103,7 @@ function bindEvents() {
   getButton("clear-debug-log").onclick = clearDebugLog;
   getSelect("source-type").onchange = handleSourceTypeChange;
   getSelect("candidate-filter").onchange = renderCandidates;
+  getSelect("candidate-pass-filter").onchange = renderCandidates;
   getInput("docx-file").onchange = updateDocxFileSummary;
 }
 
@@ -123,6 +144,48 @@ async function initializeAIProfiles() {
   }
 }
 
+async function initializeProjects() {
+  const abortController = new AbortController();
+  try {
+    await loadRecentProjects(abortController.signal);
+    const lastProjectId = localStorage.getItem(LAST_PROJECT_ID_KEY);
+    if (lastProjectId && recentProjects.some((project) => project.project_id === lastProjectId)) {
+      await loadProject(lastProjectId, abortController.signal);
+      showMessage("已恢复最近的 V2.1 审校项目。", "success");
+    }
+  } catch (error) {
+    appendDebugLog("warn", "加载最近项目失败", { error: getErrorMessage(error) });
+  } finally {
+    renderWorkspace();
+  }
+}
+
+async function refreshProjects() {
+  const abortController = startBusy();
+  try {
+    await loadRecentProjects(abortController.signal);
+    showMessage("最近项目已刷新。", "success");
+  } catch (error) {
+    showMessage(`刷新项目失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function openRecentProject(projectId: string) {
+  const abortController = startBusy();
+  try {
+    await loadProject(projectId, abortController.signal);
+    showMessage("已打开 V2.1 审校项目。", "success");
+  } catch (error) {
+    showMessage(`打开项目失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
 async function createProject() {
   const book = getValidatedBookInfo();
   if (!book) {
@@ -153,7 +216,9 @@ async function createProject() {
       currentSelectionText = "";
     }
     currentDocumentMap = await getV2DocumentMap(currentProject.project_id, abortController.signal);
-    showMessage("V2 审校项目已创建。", "success");
+    localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
+    await loadRecentProjects(abortController.signal);
+    showMessage("V2.1 审校项目已创建，审校目标会进入 Agent prompt。", "success");
   } catch (error) {
     showMessage(`创建项目失败：${getErrorMessage(error)}`, "error");
     appendDebugLog("error", "创建 V2 项目失败", { error: getErrorMessage(error) });
@@ -181,8 +246,11 @@ async function runAgent() {
       controls.temperature,
       abortController.signal
     );
+    renderWorkspace();
+    showMessage("Agent run 已启动，正在分阶段审校。", "default");
+    await pollRunUntilFinished(currentRun.run_id, abortController.signal);
     await refreshWorkspaceData(abortController.signal);
-    showMessage("Agent 已完成审校，候选问题已进入确认队列。", "success");
+    showMessage("V2.1 Agent 已完成本轮审校，候选问题已进入确认队列。", "success");
   } catch (error) {
     showMessage(`运行 Agent 失败：${getErrorMessage(error)}`, "error");
     appendDebugLog("error", "运行 V2 Agent 失败", { error: getErrorMessage(error) });
@@ -213,12 +281,52 @@ async function refreshWorkspaceData(signal: AbortSignal) {
     return;
   }
   currentProject = await getV2Project(currentProject.project_id, signal);
+  if (!currentRun && currentProject.latest_run_id) {
+    currentRun = await getV2Run(currentProject.project_id, currentProject.latest_run_id, signal);
+  } else if (currentRun) {
+    currentRun = await getV2Run(currentProject.project_id, currentRun.run_id, signal);
+  }
   currentDocumentMap = await getV2DocumentMap(currentProject.project_id, signal);
+  currentPlan = await getV2ReviewPlan(currentProject.project_id, signal);
   currentCandidates = (await getV2Candidates(currentProject.project_id, signal)).candidates;
   if (currentRun) {
     currentTrace = await getV2RunTrace(currentProject.project_id, currentRun.run_id, signal);
   }
+  currentMemory = (await getV2Memory(currentProject.project_id, signal)).memory;
   currentReport = await getV2ReviewReport(currentProject.project_id, signal);
+  await loadRecentProjects(signal);
+}
+
+async function loadRecentProjects(signal: AbortSignal) {
+  recentProjects = (await listV2Projects(signal)).projects;
+}
+
+async function loadProject(projectId: string, signal: AbortSignal) {
+  resetProjectState();
+  currentProject = await getV2Project(projectId, signal);
+  if (currentProject.latest_run_id) {
+    currentRun = await getV2Run(currentProject.project_id, currentProject.latest_run_id, signal);
+  }
+  await refreshWorkspaceData(signal);
+  localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
+}
+
+async function pollRunUntilFinished(runId: string, signal: AbortSignal) {
+  if (!currentProject) {
+    return;
+  }
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    currentRun = await getV2Run(currentProject.project_id, runId, signal);
+    currentTrace = await getV2RunTrace(currentProject.project_id, runId, signal);
+    currentProject = await getV2Project(currentProject.project_id, signal);
+    currentCandidates = (await getV2Candidates(currentProject.project_id, signal)).candidates;
+    renderWorkspace();
+    if (TERMINAL_RUN_STATUSES.has(currentRun.status)) {
+      return;
+    }
+    await delay(1000);
+  }
+  throw new Error("Agent run 仍在运行，请稍后刷新工作台。");
 }
 
 async function refreshTrace() {
@@ -359,11 +467,13 @@ function downloadDocx() {
 
 function renderWorkspace() {
   renderProjectBadge();
+  renderRecentProjects();
   renderProjectSummary();
   renderDocumentMap();
   renderReviewPlan();
   renderTrace();
   renderCandidates();
+  renderMemory();
   renderReport();
   updateButtons();
 }
@@ -397,10 +507,37 @@ function renderProjectSummary() {
       ${summaryItem("候选问题", String(currentProject.candidate_count))}
       ${summaryItem("待确认", String(currentProject.pending_count))}
       ${summaryItem("已批准", String(currentProject.approved_count))}
+      ${summaryItem("当前阶段", currentRun?.stage || currentProject.latest_run_stage || "-")}
+      ${summaryItem("审校目标", "已进入 Agent prompt")}
       ${summaryItem("文件", currentProject.source_filename || currentProject.text_preview || "-")}
       ${summaryItem("Run", currentRun?.run_id || "-")}
     </div>
   `;
+}
+
+function renderRecentProjects() {
+  const container = getElement("recent-projects");
+  if (recentProjects.length === 0) {
+    renderEmpty(container, "暂无最近项目。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = recentProjects
+    .map(
+      (project) => `
+        <button class="project-item" data-project-id="${escapeHtml(project.project_id)}" type="button">
+          <span class="item-title">${escapeHtml(project.book.title || project.source_filename)}</span>
+          <span class="item-meta">${translateStatus(project.source_type)} · ${translateStatus(project.status)} · 候选 ${project.candidate_count}</span>
+        </button>
+      `
+    )
+    .join("");
+  recentProjects.forEach((project) => {
+    const button = container.querySelector(`[data-project-id="${project.project_id}"]`);
+    if (button) {
+      button.addEventListener("click", () => openRecentProject(project.project_id));
+    }
+  });
 }
 
 function renderDocumentMap() {
@@ -429,28 +566,53 @@ function renderDocumentMap() {
 
 function renderReviewPlan() {
   const container = getElement("review-plan");
-  if (!currentRun && !currentProject) {
-    renderEmpty(container, "运行 Agent 后显示审校计划。");
+  if (!currentPlan) {
+    renderEmpty(container, "创建项目后显示审校计划。");
     return;
   }
   container.className = "workspace-list";
-  const steps = [
-    ["建立文档地图", "build_document_map"],
-    ["生成审校计划", "create_review_plan"],
-    ["分块审校", "proofread_document_chunk"],
-    ["候选问题归并与自检", "evaluate_candidate_issues"],
-    ["等待编辑确认", "human_approval_queue"],
-  ];
-  container.innerHTML = steps
-    .map(
-      ([title, toolName], index) => `
-        <div class="plan-item">
-          <div class="item-title">${index + 1}. ${title}</div>
-          <div class="item-meta">${toolName}</div>
+  container.innerHTML = currentPlan.steps
+    .map((step, index) => {
+      const status = getPlanStepDisplayStatus(step.step_id, step.status);
+      return `
+        <div class="plan-item ${step.enabled ? "" : "is-disabled"}">
+          <div class="item-title">${index + 1}. ${escapeHtml(step.title)} · ${translateStatus(status)}</div>
+          <div class="item-meta">${escapeHtml(step.tool_name)} · ${step.enabled ? "已启用" : "未启用"}</div>
+          <div class="item-body">${escapeHtml(step.description)}</div>
+          <div class="item-meta">${escapeHtml(step.reason || "")}</div>
         </div>
-      `
-    )
+      `;
+    })
     .join("");
+}
+
+function getPlanStepDisplayStatus(stepId: string, fallback: string): string {
+  if (!currentRun && !currentTrace) {
+    return fallback;
+  }
+  if (currentRun?.stage === stepId) {
+    return "running";
+  }
+  const events = currentTrace?.events || [];
+  if (stepId === "plan_review" && events.some((event) => event.event === "plan_created")) {
+    return "succeeded";
+  }
+  if (
+    stepId === "human_approval" &&
+    currentRun &&
+    TERMINAL_RUN_STATUSES.has(currentRun.status) &&
+    currentRun.status !== "failed"
+  ) {
+    return "running";
+  }
+  if (
+    events.some(
+      (event) => event.event === "pass_completed" && String(event.data.pass_name || "") === stepId
+    )
+  ) {
+    return "succeeded";
+  }
+  return fallback;
 }
 
 function renderTrace() {
@@ -476,10 +638,16 @@ function renderTrace() {
 function renderCandidates() {
   const container = getElement("candidates");
   const filter = getSelect("candidate-filter").value as V2CandidateStatus | "all";
-  const visible =
+  updateCandidatePassFilterOptions();
+  const passFilter = getSelect("candidate-pass-filter").value;
+  const statusVisible =
     filter === "all"
       ? currentCandidates
       : currentCandidates.filter((candidate) => candidate.status === filter);
+  const visible =
+    passFilter === "all"
+      ? statusVisible
+      : statusVisible.filter((candidate) => candidate.pass_name === passFilter);
   getElement("candidate-summary").textContent = formatCandidateSummary(currentCandidates);
   if (visible.length === 0) {
     renderEmpty(
@@ -504,11 +672,13 @@ function renderCandidateCard(candidate: V2CandidateIssue): string {
         <div class="item-title">${escapeHtml(candidate.category)} · ${translateStatus(candidate.status)}</div>
         <span class="severity ${candidate.severity}">${candidate.severity}</span>
       </div>
+      <div class="item-meta">${escapeHtml(candidate.pass_name)} · 置信度 ${Math.round(candidate.confidence * 100)}% · ${escapeHtml(candidate.rule_id || candidate.evidence_kind)}</div>
       <div class="item-body"><strong>原文：</strong>${escapeHtml(candidate.original || "-")}</div>
       <div class="item-body"><strong>替换：</strong>${escapeHtml(candidate.replacement || "需人工判断")}</div>
       <div class="item-body"><strong>建议：</strong>${escapeHtml(candidate.suggestion || "-")}</div>
       <div class="item-body"><strong>证据：</strong>${escapeHtml(candidate.evidence || "-")}</div>
-      <div class="item-meta">${escapeHtml(candidate.self_check || "")}</div>
+      <div class="item-meta">${escapeHtml(candidate.evaluation_note || candidate.self_check || "")}</div>
+      ${candidate.needs_human_review ? `<div class="item-meta">需要编辑重点确认</div>` : ""}
       <div class="candidate-actions">
         <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="approved" type="button">批准</button>
         <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="rejected" type="button">拒绝</button>
@@ -523,6 +693,66 @@ function bindCandidateButton(candidateId: string, status: "approved" | "rejected
   const button = getElement("candidates").querySelector(selector);
   if (button) {
     button.addEventListener("click", () => decideCandidate(candidateId, status));
+  }
+}
+
+function updateCandidatePassFilterOptions() {
+  const select = getSelect("candidate-pass-filter");
+  const currentValue = select.value || "all";
+  const passNames = Array.from(
+    new Set(currentCandidates.map((candidate) => candidate.pass_name))
+  ).sort();
+  select.innerHTML = [
+    `<option value="all">全部阶段</option>`,
+    ...passNames.map(
+      (passName) => `<option value="${escapeHtml(passName)}">${escapeHtml(passName)}</option>`
+    ),
+  ].join("");
+  select.value = passNames.includes(currentValue) ? currentValue : "all";
+}
+
+function renderMemory() {
+  const container = getElement("project-memory");
+  if (!currentProject || currentMemory.length === 0) {
+    renderEmpty(container, "暂无项目记忆。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = currentMemory
+    .map(
+      (item) => `
+        <div class="memory-item">
+          <div class="item-title">${escapeHtml(item.kind)} · ${escapeHtml(item.key)}</div>
+          <div class="item-body">${escapeHtml(item.value)}</div>
+          <div class="item-meta">${escapeHtml(item.source)} · 置信度 ${Math.round(item.confidence * 100)}%</div>
+          <button class="ms-Button" data-memory-id="${escapeHtml(item.memory_id)}" type="button">删除记忆</button>
+        </div>
+      `
+    )
+    .join("");
+  currentMemory.forEach((item) => {
+    const button = container.querySelector(`[data-memory-id="${item.memory_id}"]`);
+    if (button) {
+      button.addEventListener("click", () => deleteMemoryItem(item.memory_id));
+    }
+  });
+}
+
+async function deleteMemoryItem(memoryId: string) {
+  if (!currentProject) {
+    return;
+  }
+  const abortController = startBusy();
+  try {
+    currentMemory = (
+      await deleteV2Memory(currentProject.project_id, memoryId, abortController.signal)
+    ).memory;
+    showMessage("项目记忆已删除。", "success");
+  } catch (error) {
+    showMessage(`删除项目记忆失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
   }
 }
 
@@ -551,6 +781,10 @@ function renderReport() {
       <div class="item-body">${escapeHtml(JSON.stringify(currentReport.category_counts))}</div>
     </div>
     <div class="report-item">
+      <div class="item-title">专项阶段分布</div>
+      <div class="item-body">${escapeHtml(JSON.stringify(currentReport.pass_counts))}</div>
+    </div>
+    <div class="report-item">
       <div class="item-title">未处理事项</div>
       <div class="item-body">${escapeHtml(currentReport.unresolved_items.join("；") || "无")}</div>
     </div>
@@ -567,6 +801,7 @@ function updateButtons() {
     (candidate) => candidate.status === "pending"
   ).length;
   getButton("create-project").disabled = isBusy;
+  getButton("refresh-projects").disabled = isBusy;
   getButton("run-agent").disabled = isBusy || !hasProject;
   getButton("refresh-workspace").disabled = isBusy || !hasProject;
   getButton("refresh-trace").disabled = isBusy || !hasProject || !hasRun;
@@ -641,9 +876,11 @@ function stopBusy() {
 function resetProjectState() {
   currentProject = null;
   currentDocumentMap = null;
+  currentPlan = null;
   currentRun = null;
   currentTrace = null;
   currentCandidates = [];
+  currentMemory = [];
   currentReport = null;
 }
 
@@ -691,6 +928,7 @@ function translateStatus(status: string): string {
     failed: "失败",
     partial_succeeded: "部分成功",
     pending: "待确认",
+    queued: "排队中",
     rejected: "已拒绝",
     running: "运行中",
     selection: "当前选区",
@@ -738,4 +976,10 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }

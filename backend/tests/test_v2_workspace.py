@@ -58,6 +58,15 @@ def make_docx(paragraphs: list[str]) -> bytes:
     return buffer.getvalue()
 
 
+def get_completed_run(project_id: str, run_id: str) -> dict:
+    run_response = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}")
+    assert run_response.status_code == 200
+    run = run_response.json()
+    assert run["status"] == "waiting_for_approval"
+    assert run["candidate_count"] >= 1
+    return run
+
+
 def test_v2_project_run_approval_writeback_report_and_download():
     source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
     create_response = client.post(
@@ -85,17 +94,34 @@ def test_v2_project_run_approval_writeback_report_and_download():
     run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
     assert run_response.status_code == 200
     run = run_response.json()
+    assert run["status"] == "queued"
+    run = get_completed_run(project_id, run["run_id"])
     assert run["status"] == "waiting_for_approval"
     assert run["candidate_count"] >= 1
+
+    projects_response = client.get("/api/v2/projects")
+    assert projects_response.status_code == 200
+    assert projects_response.json()["projects"][0]["project_id"] == project_id
+
+    plan_response = client.get(f"/api/v2/projects/{project_id}/plan")
+    assert plan_response.status_code == 200
+    plan_steps = plan_response.json()["steps"]
+    assert any(step["step_id"] == "proofread_pass" for step in plan_steps)
+    assert any(step["step_id"] == "style_rule_pass" for step in plan_steps)
 
     trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
     assert trace_response.status_code == 200
     assert "第一章 开始" not in trace_response.text
     assert any(event["event"] == "candidate_found" for event in trace_response.json()["events"])
+    assert any(event["event"] == "pass_started" for event in trace_response.json()["events"])
+    assert any(event["event"] == "candidate_evaluated" for event in trace_response.json()["events"])
 
     candidates_response = client.get(f"/api/v2/projects/{project_id}/candidates")
     assert candidates_response.status_code == 200
     candidate = candidates_response.json()["candidates"][0]
+    assert candidate["pass_name"]
+    assert candidate["confidence"] > 0
+    assert candidate["evaluation_note"]
 
     decision_response = client.post(
         f"/api/v2/projects/{project_id}/candidates/decisions",
@@ -103,6 +129,10 @@ def test_v2_project_run_approval_writeback_report_and_download():
     )
     assert decision_response.status_code == 200
     assert decision_response.json()["updated_count"] == 1
+
+    memory_response = client.get(f"/api/v2/projects/{project_id}/memory")
+    assert memory_response.status_code == 200
+    assert any(item["key"] == "approved_issue_categories" for item in memory_response.json()["memory"])
 
     writeback_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "comment"})
     assert writeback_response.status_code == 200
@@ -115,6 +145,7 @@ def test_v2_project_run_approval_writeback_report_and_download():
     report = report_response.json()
     assert report["written_count"] == 1
     assert report["issue_count"] >= 1
+    assert report["pass_counts"]
 
     download_response = client.get(f"/api/v2/projects/{project_id}/download")
     assert download_response.status_code == 200
@@ -145,6 +176,8 @@ def test_v2_selection_project_run_writeback_conflict_and_mark_written():
     run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
     assert run_response.status_code == 200
     run = run_response.json()
+    assert run["status"] == "queued"
+    run = get_completed_run(project_id, run["run_id"])
     assert run["status"] == "waiting_for_approval"
     assert run["candidate_count"] >= 1
 

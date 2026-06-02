@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -26,9 +26,13 @@ from app.schemas import (
     V2ApprovalDecisionResponse,
     V2CandidateListResponse,
     V2DocumentMapResponse,
+    V2MemoryCreateRequest,
+    V2MemoryListResponse,
     V2MarkWrittenRequest,
     V2MarkWrittenResponse,
+    V2ProjectListResponse,
     V2ProjectResponse,
+    V2ReviewPlanResponse,
     V2ReviewReportResponse,
     V2RunCreateRequest,
     V2RunResponse,
@@ -38,6 +42,7 @@ from app.schemas import (
     V2WritebackResponse,
 )
 from app.agents import trace as agent_trace
+from app.agents import memory as agent_memory
 from app.agents.service import AgentOptions, agent_runner
 from app.agents.workspace import V2WorkspaceConflict, workspace_runner
 import app.services.proofread as proofread_service
@@ -294,6 +299,11 @@ async def create_v2_selection_project(request: V2SelectionProjectCreateRequest) 
     )
 
 
+@app.get("/api/v2/projects", response_model=V2ProjectListResponse)
+async def list_v2_projects(limit: int = Query(default=20, ge=1, le=100)) -> V2ProjectListResponse:
+    return V2ProjectListResponse(projects=project_store.list_projects(limit=limit))
+
+
 @app.get("/api/v2/projects/{project_id}", response_model=V2ProjectResponse)
 async def get_v2_project(project_id: str) -> V2ProjectResponse:
     try:
@@ -310,11 +320,25 @@ async def get_v2_document_map(project_id: str) -> V2DocumentMapResponse:
         raise HTTPException(status_code=404, detail="V2 document map not found") from exc
 
 
+@app.get("/api/v2/projects/{project_id}/plan", response_model=V2ReviewPlanResponse)
+async def get_v2_review_plan(project_id: str) -> V2ReviewPlanResponse:
+    try:
+        return project_store.get_review_plan(project_id)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 review plan not found") from exc
+
+
 @app.post("/api/v2/projects/{project_id}/runs", response_model=V2RunResponse)
-async def create_v2_run(project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
+async def create_v2_run(
+    project_id: str,
+    request: V2RunCreateRequest,
+    background_tasks: BackgroundTasks,
+) -> V2RunResponse:
     try:
         proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
-        return await workspace_runner.run_project(project_id, request)
+        run = workspace_runner.start_project_run(project_id, request)
+        background_tasks.add_task(workspace_runner.run_project_job, project_id, run.run_id, request)
+        return run
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
     except AIProfileError as exc:
@@ -378,6 +402,7 @@ async def decide_v2_candidates(project_id: str, request: V2ApprovalDecisionReque
             project_id,
             {decision.candidate_id: decision.status for decision in request.decisions},
         )
+        _refresh_v2_memory_from_decisions(project_id)
         return V2ApprovalDecisionResponse(
             project_id=project_id,
             updated_count=updated_count,
@@ -387,6 +412,49 @@ async def decide_v2_candidates(project_id: str, request: V2ApprovalDecisionReque
         raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.get("/api/v2/projects/{project_id}/memory", response_model=V2MemoryListResponse)
+async def get_v2_project_memory(project_id: str) -> V2MemoryListResponse:
+    try:
+        return V2MemoryListResponse(project_id=project_id, memory=project_store.list_memory_items(project_id))
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/memory", response_model=V2MemoryListResponse)
+async def create_v2_project_memory(project_id: str, request: V2MemoryCreateRequest) -> V2MemoryListResponse:
+    try:
+        saved = project_store.save_memory_item(
+            project_id,
+            kind=request.kind,
+            key=request.key,
+            value=request.value,
+            source=request.source,
+            confidence=request.confidence,
+        )
+        latest = project_store.latest_run(project_id)
+        if latest:
+            project_store.add_run_event(
+                project_id,
+                latest.run_id,
+                "memory_updated",
+                {"memory_id": saved.memory_id, "kind": saved.kind, "key": saved.key, "source": saved.source},
+            )
+        return V2MemoryListResponse(project_id=project_id, memory=project_store.list_memory_items(project_id))
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.delete("/api/v2/projects/{project_id}/memory/{memory_id}", response_model=V2MemoryListResponse)
+async def delete_v2_project_memory(project_id: str, memory_id: str) -> V2MemoryListResponse:
+    try:
+        project_store.delete_memory_item(project_id, memory_id)
+        return V2MemoryListResponse(project_id=project_id, memory=project_store.list_memory_items(project_id))
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2MemoryNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 memory item not found") from exc
 
 
 @app.post("/api/v2/projects/{project_id}/candidates/mark-written", response_model=V2MarkWrittenResponse)
@@ -763,6 +831,33 @@ async def _task_event_stream(events: AsyncIterator[Any]) -> AsyncIterator[str]:
 async def _v2_event_stream(events: list[Any]) -> AsyncIterator[str]:
     for event in events:
         yield _format_sse(event.event, event.data)
+
+
+def _refresh_v2_memory_from_decisions(project_id: str) -> None:
+    candidates = project_store.list_candidates(project_id)
+    saved_count = 0
+    for item in agent_memory.derive_memory_items(candidates):
+        if item.source != "editor_decision":
+            continue
+        project_store.save_memory_item(
+            project_id,
+            kind=item.kind,
+            key=item.key,
+            value=item.value,
+            source=item.source,
+            confidence=item.confidence,
+        )
+        saved_count += 1
+    if saved_count == 0:
+        return
+    latest = project_store.latest_run(project_id)
+    if latest:
+        project_store.add_run_event(
+            project_id,
+            latest.run_id,
+            "memory_updated",
+            {"source": "editor_decision", "updated_count": saved_count},
+        )
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:

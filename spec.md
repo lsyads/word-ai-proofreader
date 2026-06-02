@@ -1,8 +1,8 @@
 # Word AI 审校助手 API 契约与验收标准
 
-本文是当前 V1 基线和已实现 V2 纵向切片的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
+本文是当前 V1 基线和已实现 V2.1 Agent 工作台的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2 第一版实现当前选区和 DOCX 审校项目、文档地图、同步 Agent run、候选问题确认、approved 写回、DOCX 下载、报告和脱敏 run event trace。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.1 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace。
 
 ## 范围
 
@@ -124,7 +124,7 @@ Response:
 
 ## V2 Agent 工作台 API
 
-V2 API 以审校项目为核心，当前第一版支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，不读取或迁移 V1 history、trace、task 或 DOCX result index。
+V2 API 以审校项目为核心，V2.1 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.1 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。
 
 ### `POST /api/v2/projects`
 
@@ -138,7 +138,7 @@ Query：
 
 Request body：原始 `.docx` 二进制。
 
-Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/run_count/candidate_count/pending_count/approved_count`。DOCX 项目的 `source_type` 为 `docx`。
+Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count`。DOCX 项目的 `source_type` 为 `docx`。
 
 ### `POST /api/v2/projects/selection`
 
@@ -157,6 +157,10 @@ Request:
 
 Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`source_filename` 为 `当前选区`，`text_preview` 为选区短预览。
 
+### `GET /api/v2/projects`
+
+返回最近 V2.1 项目列表，用于插件重新打开后恢复工作台。Query `limit` 默认 20，返回 `{"projects": [V2ProjectResponse]}`。
+
 ### `GET /api/v2/projects/{project_id}`
 
 查询 V2 项目摘要。项目不存在返回 404。
@@ -165,9 +169,13 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 
 返回文档地图摘要：`text_len/block_count/chunk_count/blocks/chunks`。DOCX 项目基于 DOCX 文档模型生成；selection 项目基于选区文本的段落和分块生成。`blocks` 和 `chunks` 只包含短 preview，不返回完整正文。
 
+### `GET /api/v2/projects/{project_id}/plan`
+
+返回 V2.1 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。
+
 ### `POST /api/v2/projects/{project_id}/runs`
 
-同步启动一次 V2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。当前第一版会在请求内完成分块审校并返回 `V2RunResponse`；成功后状态为 `waiting_for_approval`，候选问题进入编辑确认队列。
+启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后状态进入 `waiting_for_approval`，候选问题进入编辑确认队列。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -175,7 +183,7 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
 
-以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`tool_started`、`tool_completed`、`candidate_found`、`waiting_for_approval` 和 `error`。
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`report_ready` 和 `error`。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
 
@@ -183,7 +191,7 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-查询候选问题队列。候选状态支持 `pending`、`approved`、`rejected`、`deferred`、`written`。
+查询候选问题队列。候选状态支持 `pending`、`approved`、`rejected`、`deferred`、`written`。V2.1 候选增加 `pass_name/confidence/evidence_kind/rule_id/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型和 evaluator 复核意见。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
@@ -200,6 +208,20 @@ Request:
 ```
 
 `status` 仅允许 `approved`、`rejected`、`deferred`。
+
+编辑决策会派生轻量项目记忆，例如已批准的问题类别；不会把完整正文写入长期记忆。
+
+### `GET /api/v2/projects/{project_id}/memory`
+
+返回项目记忆列表。记忆项包含 `memory_id/kind/key/value/source/confidence/created_at/updated_at`，默认保存术语、体例规则、编辑偏好、本书约定或候选摘要，不保存完整正文。
+
+### `POST /api/v2/projects/{project_id}/memory`
+
+手动新增项目记忆。Request 包含 `kind/key/value/source/confidence`，用于把责任编辑确认过的术语、体例或本书约定写入后续 Agent run 上下文。
+
+### `DELETE /api/v2/projects/{project_id}/memory/{memory_id}`
+
+删除错误或过时的项目记忆。删除后返回最新 memory 列表。
 
 ### `POST /api/v2/projects/{project_id}/writeback`
 
@@ -221,7 +243,7 @@ Response 包含 `project_id/updated_count/candidates`。
 
 ### `GET /api/v2/projects/{project_id}/report`
 
-返回审校报告，包含问题总数、各状态数量、severity/category 分布和未处理事项。
+返回审校报告，包含问题总数、各状态数量、severity/category/pass 分布和未处理事项。
 
 ### `GET /api/v2/projects/{project_id}/download`
 

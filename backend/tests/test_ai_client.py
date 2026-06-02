@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import AIClientError, V2PromptContext, proofread_with_ai, stream_proofread_with_ai
 from app.settings import Settings
 
 
@@ -187,6 +187,30 @@ def test_proofread_with_ai_uses_custom_temperature_for_responses(monkeypatch):
     asyncio.run(proofread_with_ai("文本", book(), settings=settings(), temperature=0.7))
 
     assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.7
+
+
+def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=response_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    context = V2PromptContext(
+        review_goal="重点检查术语一致性。",
+        source_type="docx",
+        pass_name="terminology_pass",
+        document_map_summary="text_len=100; blocks=2; chunks=1",
+        memory_items=[{"kind": "preference", "key": "approved_issue_categories", "value": "style"}],
+        style_rules=["统一术语。"],
+    )
+
+    asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
+
+    payload_input = FakeAsyncClient.calls[0]["json"]["input"]
+    assert "V2.1 Agent 工作台要求" in payload_input
+    assert "重点检查术语一致性。" in payload_input
+    assert "terminology_pass" in payload_input
+    assert "text_len=100; blocks=2; chunks=1" in payload_input
+    assert "approved_issue_categories" in payload_input
 
 
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):

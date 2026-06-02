@@ -13,6 +13,7 @@ from app.schemas import (
     BookInfo,
     V2CandidateIssue,
     V2DocumentMapResponse,
+    V2MemoryItemResponse,
     V2ProjectResponse,
     V2ReviewPlanResponse,
     V2ReviewReportResponse,
@@ -32,6 +33,10 @@ class V2RunNotFound(KeyError):
 
 class V2CandidateNotFound(KeyError):
     """Raised when a V2 candidate issue cannot be found."""
+
+
+class V2MemoryNotFound(KeyError):
+    """Raised when a V2 project memory item cannot be found."""
 
 
 @dataclass(frozen=True)
@@ -118,6 +123,21 @@ def require_project(project_id: str, settings: Settings | None = None) -> Stored
     if not row:
         raise V2ProjectNotFound(project_id)
     return _row_to_project(row)
+
+
+def list_projects(limit: int = 20, settings: Settings | None = None) -> list[V2ProjectResponse]:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT project_id
+            FROM v2_projects
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [project_response(row[0], settings) for row in rows]
 
 
 def update_project_status(project_id: str, status: str, settings: Settings | None = None) -> None:
@@ -249,6 +269,22 @@ def require_run(project_id: str, run_id: str, settings: Settings | None = None) 
         created_at=row[9],
         updated_at=row[10],
     )
+
+
+def latest_run(project_id: str, settings: Settings | None = None) -> V2RunResponse | None:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT run_id
+            FROM v2_runs
+            WHERE project_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+    return require_run(project_id, row[0], settings) if row else None
 
 
 def update_run(
@@ -403,6 +439,87 @@ def mark_candidates_written(project_id: str, candidate_ids: list[str], settings:
     return update_candidate_statuses(project_id, {candidate_id: "written" for candidate_id in candidate_ids}, settings)
 
 
+def save_memory_item(
+    project_id: str,
+    *,
+    kind: str,
+    key: str,
+    value: str,
+    source: str,
+    confidence: float = 0.7,
+    memory_id: str | None = None,
+    settings: Settings | None = None,
+) -> V2MemoryItemResponse:
+    _ensure_schema(settings)
+    require_project(project_id, settings)
+    now = _now_iso()
+    resolved_id = memory_id or f"memory_{uuid.uuid4().hex}"
+    with _connect(settings) as connection:
+        connection.execute(
+            """
+            INSERT INTO v2_memory_items (
+                memory_id, project_id, kind, key, value, source, confidence, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+                kind = excluded.kind,
+                key = excluded.key,
+                value = excluded.value,
+                source = excluded.source,
+                confidence = excluded.confidence,
+                updated_at = excluded.updated_at
+            """,
+            (resolved_id, project_id, kind, key[:120], value[:500], source[:120], confidence, now, now),
+        )
+        connection.commit()
+    return require_memory_item(project_id, resolved_id, settings)
+
+
+def list_memory_items(project_id: str, settings: Settings | None = None) -> list[V2MemoryItemResponse]:
+    _ensure_schema(settings)
+    require_project(project_id, settings)
+    with _connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT memory_id, project_id, kind, key, value, source, confidence, created_at, updated_at
+            FROM v2_memory_items
+            WHERE project_id = ?
+            ORDER BY created_at, memory_id
+            """,
+            (project_id,),
+        ).fetchall()
+    return [_row_to_memory(row) for row in rows]
+
+
+def require_memory_item(project_id: str, memory_id: str, settings: Settings | None = None) -> V2MemoryItemResponse:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT memory_id, project_id, kind, key, value, source, confidence, created_at, updated_at
+            FROM v2_memory_items
+            WHERE project_id = ? AND memory_id = ?
+            """,
+            (project_id, memory_id),
+        ).fetchone()
+    if not row:
+        raise V2MemoryNotFound(memory_id)
+    return _row_to_memory(row)
+
+
+def delete_memory_item(project_id: str, memory_id: str, settings: Settings | None = None) -> None:
+    _ensure_schema(settings)
+    require_project(project_id, settings)
+    with _connect(settings) as connection:
+        cursor = connection.execute(
+            "DELETE FROM v2_memory_items WHERE project_id = ? AND memory_id = ?",
+            (project_id, memory_id),
+        )
+        connection.commit()
+    if cursor.rowcount == 0:
+        raise V2MemoryNotFound(memory_id)
+
+
 def save_report(report: V2ReviewReportResponse, settings: Settings | None = None) -> None:
     _ensure_schema(settings)
     with _connect(settings) as connection:
@@ -430,6 +547,7 @@ def project_response(project_id: str, settings: Settings | None = None) -> V2Pro
     project = require_project(project_id, settings)
     candidates = list_candidates(project_id, settings)
     run_count = _run_count(project_id, settings)
+    latest = latest_run(project_id, settings)
     return V2ProjectResponse(
         project_id=project.project_id,
         source_type=project.source_type,
@@ -441,6 +559,9 @@ def project_response(project_id: str, settings: Settings | None = None) -> V2Pro
         created_at=project.created_at,
         updated_at=project.updated_at,
         run_count=run_count,
+        latest_run_id=latest.run_id if latest else None,
+        latest_run_status=latest.status if latest else None,
+        latest_run_stage=latest.stage if latest else None,
         candidate_count=len(candidates),
         pending_count=sum(1 for candidate in candidates if candidate.status == "pending"),
         approved_count=sum(1 for candidate in candidates if candidate.status == "approved"),
@@ -568,6 +689,21 @@ def _ensure_schema(settings: Settings | None = None) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS v2_memory_items (
+                memory_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         connection.commit()
 
 
@@ -585,6 +721,20 @@ def _row_to_project(row: tuple) -> StoredProject:
         updated_at=row[9],
         output_filename=row[10],
         output_relative_path=row[11],
+    )
+
+
+def _row_to_memory(row: tuple) -> V2MemoryItemResponse:
+    return V2MemoryItemResponse(
+        memory_id=row[0],
+        project_id=row[1],
+        kind=row[2],
+        key=row[3],
+        value=row[4],
+        source=row[5],
+        confidence=row[6],
+        created_at=row[7],
+        updated_at=row[8],
     )
 
 

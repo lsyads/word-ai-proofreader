@@ -43,6 +43,16 @@ class AIStreamEvent:
     data: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class V2PromptContext:
+    review_goal: str
+    source_type: str
+    pass_name: str
+    document_map_summary: str
+    memory_items: list[dict[str, Any]]
+    style_rules: list[str]
+
+
 BASE_SYSTEM_PROMPT = """
 你是出版社责任编辑的中文审校助手。请审校用户提供的 Word 选区文本，并返回结构化JSON结果。
 
@@ -132,6 +142,7 @@ async def proofread_with_ai(
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
+    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
     try:
@@ -149,6 +160,7 @@ async def proofread_with_ai(
             proofread_mode=proofread_mode,
             reasoning_enabled=reasoning_enabled,
             temperature=temperature,
+            v2_context=v2_context,
         )
 
     _ensure_responses_api(profile)
@@ -160,6 +172,7 @@ async def proofread_with_ai(
         profile,
         proofread_mode=proofread_mode,
         temperature=temperature,
+        v2_context=v2_context,
     )
     logger.info(
         "AI responses request started profile_id=%s model=%s proofread_mode=%s temperature=%s text_len=%s max_output_tokens=%s",
@@ -321,6 +334,7 @@ async def _proofread_with_chat(
     proofread_mode: ProofreadMode,
     reasoning_enabled: bool,
     temperature: float,
+    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     _ensure_api_key(profile)
     dialect = _chat_dialect(profile)
@@ -333,6 +347,7 @@ async def _proofread_with_chat(
         reasoning_enabled=reasoning_enabled,
         temperature=temperature,
         dialect=dialect,
+        v2_context=v2_context,
     )
     logger.info(
         "AI chat request started profile_id=%s model=%s dialect=%s proofread_mode=%s reasoning_enabled=%s temperature=%s text_len=%s output_token_limit=%s",
@@ -383,10 +398,11 @@ def _build_responses_payload(
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
+    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": profile.model,
-        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
+        "input": f"{_build_system_prompt(proofread_mode, v2_context)}\n\n{_build_user_prompt(text, book, v2_context)}",
         "temperature": temperature,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
@@ -407,13 +423,14 @@ def _build_chat_payload(
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
     dialect: ChatDialect | None = None,
+    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     resolved_dialect = dialect or _chat_dialect(profile)
     payload: dict[str, Any] = {
         "model": profile.model,
         "messages": [
-            {"role": "system", "content": _build_system_prompt(proofread_mode)},
-            {"role": "user", "content": _build_user_prompt(text, book)},
+            {"role": "system", "content": _build_system_prompt(proofread_mode, v2_context)},
+            {"role": "user", "content": _build_user_prompt(text, book, v2_context)},
         ],
         "temperature": temperature,
     }
@@ -442,16 +459,45 @@ def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
     return payload.get("max_tokens", payload.get("max_completion_tokens"))
 
 
-def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
-    return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
+def _build_system_prompt(proofread_mode: ProofreadMode, v2_context: V2PromptContext | None = None) -> str:
+    if v2_context is None:
+        return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
+
+    return f"""
+{BASE_SYSTEM_PROMPT}
+{MODE_PROMPTS[proofread_mode]}
+
+V2.1 Agent 工作台要求：
+1. 你当前处在 {v2_context.pass_name} 阶段，必须优先完成该阶段职责，不要泛泛审校。
+2. 审校目标是硬约束，不是备注；候选问题必须服务审校目标。
+3. 结合项目记忆、出版体例规则和文档地图摘要判断问题，但 original 仍必须逐字来自 <text>。
+4. 对证据不足、可能误改、需要全书核验的问题，replacement 必须为 null，并在 suggestion 中标明需人工核查。
+5. 不要把完整正文、密钥、Authorization 或项目记忆原样复述到输出中。
+""".strip()
 
 
-def _build_user_prompt(text: str, book: BookInfo) -> str:
+def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | None = None) -> str:
     book_context = json.dumps(
         book.model_dump(),
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    v2_context_block = ""
+    if v2_context is not None:
+        context_payload = {
+            "review_goal": v2_context.review_goal,
+            "source_type": v2_context.source_type,
+            "pass_name": v2_context.pass_name,
+            "document_map_summary": v2_context.document_map_summary,
+            "memory_items": v2_context.memory_items,
+            "style_rules": v2_context.style_rules,
+        }
+        v2_context_block = f"""
+<v2_agent_context>
+{json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))}
+</v2_agent_context>
+""".strip()
+
     return f"""
 请审校 <text> 标签内的 Word 选区文本。
 
@@ -459,6 +505,8 @@ def _build_user_prompt(text: str, book: BookInfo) -> str:
 <book>
 {book_context}
 </book>
+
+{v2_context_block}
 
 要求：
 1. 只审校 <text> 内文本。

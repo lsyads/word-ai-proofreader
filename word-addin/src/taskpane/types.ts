@@ -152,11 +152,18 @@ export interface V2Project {
   created_at: string;
   updated_at: string;
   run_count: number;
+  latest_run_id?: string | null;
+  latest_run_status?: V2RunStatus | null;
+  latest_run_stage?: string | null;
   candidate_count: number;
   pending_count: number;
   approved_count: number;
   output_filename?: string | null;
   download_url?: string | null;
+}
+
+export interface V2ProjectList {
+  projects: V2Project[];
 }
 
 export interface V2DocumentBlock {
@@ -229,6 +236,12 @@ export interface V2CandidateIssue {
   global_end?: number | null;
   locator?: ProofreadLocator | null;
   self_check?: string | null;
+  pass_name: string;
+  confidence: number;
+  evidence_kind: "locator" | "context" | "rule" | "memory" | "document_map";
+  rule_id?: string | null;
+  needs_human_review: boolean;
+  evaluation_note?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -279,6 +292,23 @@ export interface V2RunTrace {
   events: V2RunEvent[];
 }
 
+export interface V2MemoryItem {
+  memory_id: string;
+  project_id: string;
+  kind: "terminology" | "style_rule" | "preference" | "book_convention" | "observation";
+  key: string;
+  value: string;
+  source: string;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface V2MemoryList {
+  project_id: string;
+  memory: V2MemoryItem[];
+}
+
 export interface V2ReviewReport {
   project_id: string;
   status: V2ProjectStatus;
@@ -293,6 +323,7 @@ export interface V2ReviewReport {
   written_count: number;
   severity_counts: Record<string, number>;
   category_counts: Record<string, number>;
+  pass_counts: Record<string, number>;
   unresolved_items: string[];
   generated_at: string;
 }

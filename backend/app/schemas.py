@@ -204,10 +204,15 @@ V2RunEventName = Literal[
     "project_created",
     "document_map_built",
     "plan_created",
+    "pass_started",
+    "pass_completed",
     "tool_started",
     "tool_completed",
     "candidate_found",
+    "candidate_merged",
+    "candidate_evaluated",
     "waiting_for_approval",
+    "memory_updated",
     "writeback_completed",
     "report_ready",
     "error",
@@ -243,11 +248,18 @@ class V2ProjectResponse(BaseModel):
     created_at: str
     updated_at: str
     run_count: int = 0
+    latest_run_id: str | None = None
+    latest_run_status: V2RunStatus | None = None
+    latest_run_stage: str | None = None
     candidate_count: int = 0
     pending_count: int = 0
     approved_count: int = 0
     output_filename: str | None = None
     download_url: str | None = None
+
+
+class V2ProjectListResponse(BaseModel):
+    projects: list[V2ProjectResponse]
 
 
 class V2DocumentBlock(BaseModel):
@@ -282,6 +294,8 @@ class V2ReviewPlanStep(BaseModel):
     tool_name: str
     status: Literal["pending", "running", "succeeded", "failed"] = "pending"
     description: str
+    enabled: bool = True
+    reason: str | None = None
 
 
 class V2ReviewPlanResponse(BaseModel):
@@ -329,6 +343,12 @@ class V2CandidateIssue(BaseModel):
     global_end: int | None = None
     locator: ProofreadLocator | None = None
     self_check: str | None = None
+    pass_name: str = "proofread_pass"
+    confidence: float = Field(default=0.72, ge=0, le=1)
+    evidence_kind: Literal["locator", "context", "rule", "memory", "document_map"] = "context"
+    rule_id: str | None = None
+    needs_human_review: bool = True
+    evaluation_note: str | None = None
     created_at: str
     updated_at: str
 
@@ -392,6 +412,31 @@ class V2RunTraceResponse(BaseModel):
     events: list[V2RunEventResponse]
 
 
+class V2MemoryItemResponse(BaseModel):
+    memory_id: str
+    project_id: str
+    kind: Literal["terminology", "style_rule", "preference", "book_convention", "observation"]
+    key: str
+    value: str
+    source: str
+    confidence: float = Field(default=0.7, ge=0, le=1)
+    created_at: str
+    updated_at: str
+
+
+class V2MemoryListResponse(BaseModel):
+    project_id: str
+    memory: list[V2MemoryItemResponse]
+
+
+class V2MemoryCreateRequest(BaseModel):
+    kind: Literal["terminology", "style_rule", "preference", "book_convention", "observation"] = "book_convention"
+    key: str = Field(..., min_length=1)
+    value: str = Field(..., min_length=1)
+    source: str = "editor"
+    confidence: float = Field(default=0.9, ge=0, le=1)
+
+
 class V2ReviewReportResponse(BaseModel):
     project_id: str
     status: V2ProjectStatus
@@ -406,5 +451,6 @@ class V2ReviewReportResponse(BaseModel):
     written_count: int
     severity_counts: dict[str, int]
     category_counts: dict[str, int]
+    pass_counts: dict[str, int] = Field(default_factory=dict)
     unresolved_items: list[str]
     generated_at: str

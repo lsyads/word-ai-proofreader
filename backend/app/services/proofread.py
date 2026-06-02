@@ -10,6 +10,7 @@ from app.services.ai_client import (
     AIClientError,
     AIStreamEvent,
     DEFAULT_TEMPERATURE,
+    V2PromptContext,
     proofread_with_ai,
     stream_proofread_with_ai,
 )
@@ -34,6 +35,30 @@ async def proofread_text(
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
+) -> list[ProofreadIssue]:
+    return await proofread_text_with_context(
+        text,
+        book,
+        session_id=session_id,
+        ai_profile_id=ai_profile_id,
+        provider_api=provider_api,
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+        temperature=temperature,
+        v2_context=None,
+    )
+
+
+async def proofread_text_with_context(
+    text: str,
+    book: BookInfo,
+    session_id: str | None = None,
+    ai_profile_id: str | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+    v2_context: V2PromptContext | None = None,
 ) -> list[ProofreadIssue]:
     settings = get_settings()
     profile = resolve_ai_profile(settings, ai_profile_id)
@@ -70,11 +95,13 @@ async def proofread_text(
         if temperature != DEFAULT_TEMPERATURE:
             ai_kwargs["temperature"] = temperature
 
+        if v2_context is not None:
+            ai_kwargs["v2_context"] = v2_context
         result = await proofread_with_ai(text, book, **ai_kwargs)
         return locate_issues(text, result.issues)
 
     logger.info("proofread service using mock issues")
-    return locate_issues(text, build_mock_issues(text))
+    return locate_issues(text, build_mock_issues(text, v2_context))
 
 
 async def stream_proofread_text(
@@ -138,8 +165,9 @@ async def stream_proofread_text(
         yield event
 
 
-def build_mock_issues(text: str) -> list[ProofreadIssue]:
+def build_mock_issues(text: str, v2_context: V2PromptContext | None = None) -> list[ProofreadIssue]:
     sample = text[: min(len(text), 12)]
+    prefix = f"[{v2_context.pass_name}] " if v2_context else ""
 
     return [
         ProofreadIssue(
@@ -148,7 +176,7 @@ def build_mock_issues(text: str) -> list[ProofreadIssue]:
             severity="medium",
             original=sample,
             replacement=f"{sample}（建议核对）" if sample else None,
-            suggestion="请结合上下文检查该表述是否准确、简洁，并确认是否符合出版物体例。",
+            suggestion=f"{prefix}请结合审校目标检查该表述是否准确、简洁，并确认是否符合出版物体例。",
         )
     ]
 

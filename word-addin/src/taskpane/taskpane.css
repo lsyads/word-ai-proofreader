@@ -240,11 +240,28 @@ body {
 .plan-item,
 .event-item,
 .candidate-item,
+.memory-item,
+.project-item,
 .report-item {
   background: #ffffff;
   border: 1px solid #edebe9;
   border-radius: 6px;
   padding: 10px;
+}
+
+.project-item {
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.project-item:hover {
+  border-color: #0078d4;
+}
+
+.plan-item.is-disabled {
+  opacity: 0.58;
 }
 
 .item-title {

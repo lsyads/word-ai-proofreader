@@ -17,6 +17,7 @@ def build_review_report(
 ) -> V2ReviewReportResponse:
     severity_counts = Counter(candidate.severity for candidate in candidates)
     category_counts = Counter(candidate.category for candidate in candidates)
+    pass_counts = Counter(candidate.pass_name for candidate in candidates)
     unresolved = [
         f"{candidate.severity}/{candidate.category}: {candidate.original[:40]} - {candidate.suggestion[:80]}"
         for candidate in candidates
@@ -36,6 +37,7 @@ def build_review_report(
         written_count=sum(1 for candidate in candidates if candidate.status == "written"),
         severity_counts=dict(severity_counts),
         category_counts=dict(category_counts),
+        pass_counts=dict(pass_counts),
         unresolved_items=unresolved,
         generated_at=datetime.now(UTC).isoformat(),
     )

@@ -11,8 +11,11 @@ import {
   V2ApprovalDecisionResponse,
   V2CandidateList,
   V2DocumentMap,
+  V2MemoryList,
   V2MarkWrittenResponse,
   V2Project,
+  V2ProjectList,
+  V2ReviewPlan,
   V2ReviewReport,
   V2Run,
   V2RunTrace,
@@ -100,6 +103,19 @@ export async function createV2SelectionProject(
   return (await response.json()) as V2Project;
 }
 
+export async function listV2Projects(signal: AbortSignal): Promise<V2ProjectList> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects`, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ProjectList;
+}
+
 export async function getV2Project(projectId: string, signal: AbortSignal): Promise<V2Project> {
   const response = await fetch(`${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}`, {
     method: "GET",
@@ -111,6 +127,25 @@ export async function getV2Project(projectId: string, signal: AbortSignal): Prom
   }
 
   return (await response.json()) as V2Project;
+}
+
+export async function getV2ReviewPlan(
+  projectId: string,
+  signal: AbortSignal
+): Promise<V2ReviewPlan> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/plan`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ReviewPlan;
 }
 
 export async function getV2DocumentMap(
@@ -168,6 +203,26 @@ export async function runV2Project(
   return (await response.json()) as V2Run;
 }
 
+export async function getV2Run(
+  projectId: string,
+  runId: string,
+  signal: AbortSignal
+): Promise<V2Run> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Run;
+}
+
 export async function getV2RunTrace(
   projectId: string,
   runId: string,
@@ -186,6 +241,42 @@ export async function getV2RunTrace(
   }
 
   return (await response.json()) as V2RunTrace;
+}
+
+export async function getV2Memory(projectId: string, signal: AbortSignal): Promise<V2MemoryList> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/memory`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2MemoryList;
+}
+
+export async function deleteV2Memory(
+  projectId: string,
+  memoryId: string,
+  signal: AbortSignal
+): Promise<V2MemoryList> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/memory/${encodeURIComponent(memoryId)}`,
+    {
+      method: "DELETE",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2MemoryList;
 }
 
 export async function getV2Candidates(

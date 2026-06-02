@@ -1,8 +1,8 @@
 # Word AI 审校助手 API 契约与验收标准
 
-本文是当前 V1 基线的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
+本文是当前 V1 基线和已实现 V2 纵向切片的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。正式 V2 API、状态机和数据结构必须在实现前补充到本文；在未补充前，下文仍只描述当前已实现的 V1/current API，不代表 V2 已发布接口。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2 第一版实现当前选区和 DOCX 审校项目、文档地图、同步 Agent run、候选问题确认、approved 写回、DOCX 下载、报告和脱敏 run event trace。
 
 ## 范围
 
@@ -121,6 +121,111 @@ Response:
   "status": "ok"
 }
 ```
+
+## V2 Agent 工作台 API
+
+V2 API 以审校项目为核心，当前第一版支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，不读取或迁移 V1 history、trace、task 或 DOCX result index。
+
+### `POST /api/v2/projects`
+
+创建 V2 DOCX 审校项目，立即建立文档地图和默认审校计划。
+
+Query：
+
+- `filename`：必填，必须以 `.docx` 结尾。
+- `book`：必填，URL 编码后的 `BookInfo` JSON。
+- `review_goal`：可选，审校目标；缺省为全书出版审校目标。
+
+Request body：原始 `.docx` 二进制。
+
+Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/run_count/candidate_count/pending_count/approved_count`。DOCX 项目的 `source_type` 为 `docx`。
+
+### `POST /api/v2/projects/selection`
+
+创建 V2 当前选区审校项目，立即建立轻量文档地图和默认审校计划。
+
+Request:
+
+```json
+{
+  "text": "当前 Word 选区文本",
+  "book": {"title": "书名", "introduction": "可选书籍介绍"},
+  "review_goal": "检查当前选区中的出版审校问题。",
+  "session_id": "session_xxx"
+}
+```
+
+Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`source_filename` 为 `当前选区`，`text_preview` 为选区短预览。
+
+### `GET /api/v2/projects/{project_id}`
+
+查询 V2 项目摘要。项目不存在返回 404。
+
+### `GET /api/v2/projects/{project_id}/document-map`
+
+返回文档地图摘要：`text_len/block_count/chunk_count/blocks/chunks`。DOCX 项目基于 DOCX 文档模型生成；selection 项目基于选区文本的段落和分块生成。`blocks` 和 `chunks` 只包含短 preview，不返回完整正文。
+
+### `POST /api/v2/projects/{project_id}/runs`
+
+同步启动一次 V2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。当前第一版会在请求内完成分块审校并返回 `V2RunResponse`；成功后状态为 `waiting_for_approval`，候选问题进入编辑确认队列。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}`
+
+查询 V2 run 状态、chunk 统计和候选问题数量。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
+
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`tool_started`、`tool_completed`、`candidate_found`、`waiting_for_approval` 和 `error`。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
+
+返回脱敏 run event trace。trace 不保存完整正文、API Key、Authorization 或 Bearer token。
+
+### `GET /api/v2/projects/{project_id}/candidates`
+
+查询候选问题队列。候选状态支持 `pending`、`approved`、`rejected`、`deferred`、`written`。
+
+### `POST /api/v2/projects/{project_id}/candidates/decisions`
+
+批量更新候选问题决策。
+
+Request:
+
+```json
+{
+  "decisions": [
+    {"candidate_id": "candidate_xxx", "status": "approved"}
+  ]
+}
+```
+
+`status` 仅允许 `approved`、`rejected`、`deferred`。
+
+### `POST /api/v2/projects/{project_id}/writeback`
+
+DOCX 项目只写回 `approved` 候选问题；没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后 approved 候选变为 `written`，项目状态变为 `written`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+
+### `POST /api/v2/projects/{project_id}/candidates/mark-written`
+
+当前选区项目由 Word 插件完成 Office.js 写回后，调用该接口把已成功写回的候选标记为 `written`，并刷新项目报告。
+
+Request:
+
+```json
+{
+  "candidate_ids": ["candidate_xxx"]
+}
+```
+
+Response 包含 `project_id/updated_count/candidates`。
+
+### `GET /api/v2/projects/{project_id}/report`
+
+返回审校报告，包含问题总数、各状态数量、severity/category 分布和未处理事项。
+
+### `GET /api/v2/projects/{project_id}/download`
+
+下载 V2 写回后的 DOCX。尚未写回或文件丢失时返回 404。
 
 ### `POST /api/sessions`
 
@@ -483,6 +588,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 DOCX_OUTPUT_DIR=var/docx-results
 DOCX_RETENTION_DAYS=7
 AGENT_TRACE_DIR=var/agent-traces
+AGENT_WORKSPACE_DIR=var/agent-workspace
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
@@ -493,6 +599,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
 - `temperature` 是请求级参数，插件默认 `0.2`，不需要环境变量。
 - `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
+- `AGENT_WORKSPACE_DIR` 保存 V2 project/session/run/history schema 的 SQLite 文件和 V2 输出文件，默认 `backend/var/agent-workspace`。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
 
 ## 验收标准

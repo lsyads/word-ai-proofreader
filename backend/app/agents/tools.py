@@ -6,8 +6,9 @@ from typing import Literal
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from app.schemas import BookInfo, ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue, ProofreadScope
-from app.services import chunk_service, docx_service, locator_service
+from app.agents import planner
+from app.schemas import BookInfo, ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue, ProofreadScope, V2CandidateIssue
+from app.services import chunk_service, docx_service, document_map_service, locator_service, report_service
 from app.services.ai_client import DEFAULT_TEMPERATURE
 from app.services.ai_provider_service import proofread_text_with_provider
 from app.services.proofread import ProofreadMode, ProviderAPI
@@ -50,6 +51,20 @@ class WriteDocxInput(BaseModel):
     application_mode: Literal["comment", "revision"] = "comment"
     output_path: Path
     fallback_summary_truncate_enabled: bool = True
+
+
+class BuildDocumentMapInput(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    content: bytes = Field(..., min_length=1)
+
+
+class CreateReviewPlanInput(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    run_id: str | None = None
+
+
+class CandidateIssuesInput(BaseModel):
+    candidates: list[V2CandidateIssue]
 
 
 def split_text(text: str, scope: ProofreadScope = "selection", chunk_size: int = 5000) -> list[ProofreadChunk]:
@@ -119,6 +134,47 @@ def write_docx_output(
     }
 
 
+def build_document_map(project_id: str, content: bytes) -> dict:
+    """Build a V2 document map from DOCX bytes. Input is project ID and source bytes; output is safe map metadata with previews only."""
+    return document_map_service.build_document_map(project_id, content).model_dump()
+
+
+def create_review_plan(project_id: str, run_id: str | None = None) -> dict:
+    """Create the V2 publishing review plan. Input is project/run identity; output is ordered Agent plan steps."""
+    return planner.create_review_plan(project_id, run_id).model_dump()
+
+
+def check_terminology_consistency(candidates: list[V2CandidateIssue]) -> dict[str, int]:
+    """Summarize terminology-related candidate issues. Input is candidates; output is count metadata for planner/evaluator use."""
+    return {"candidate_count": len(candidates), "terminology_count": sum(1 for candidate in candidates if "term" in candidate.category.lower() or "术语" in candidate.category)}
+
+
+def check_style_rules(candidates: list[V2CandidateIssue]) -> dict[str, int]:
+    """Summarize style-related candidate issues. Input is candidates; output is count metadata for planner/evaluator use."""
+    return {"candidate_count": len(candidates), "style_count": sum(1 for candidate in candidates if "style" in candidate.category.lower() or "体例" in candidate.category)}
+
+
+def merge_candidate_issues(candidates: list[V2CandidateIssue]) -> list[V2CandidateIssue]:
+    """Merge duplicate V2 candidates. Input is candidate issues; output keeps the first unique original/replacement/suggestion/range tuple."""
+    seen: set[tuple] = set()
+    merged: list[V2CandidateIssue] = []
+    for candidate in candidates:
+        key = (candidate.original, candidate.replacement, candidate.suggestion, candidate.global_start, candidate.global_end)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(candidate)
+    return merged
+
+
+def evaluate_candidate_issues(candidates: list[V2CandidateIssue]) -> list[V2CandidateIssue]:
+    """Attach V2 self-check text to candidates. Input is candidate issues; output is candidates ready for human approval."""
+    return [
+        candidate.model_copy(update={"self_check": candidate.self_check or "已完成候选问题自检，等待编辑确认。"})
+        for candidate in candidates
+    ]
+
+
 proofread_tools = [
     StructuredTool.from_function(
         split_text,
@@ -155,6 +211,42 @@ proofread_tools = [
         name="write_docx_output",
         description=write_docx_output.__doc__ or "",
         args_schema=WriteDocxInput,
+    ),
+    StructuredTool.from_function(
+        build_document_map,
+        name="build_document_map",
+        description=build_document_map.__doc__ or "",
+        args_schema=BuildDocumentMapInput,
+    ),
+    StructuredTool.from_function(
+        create_review_plan,
+        name="create_review_plan",
+        description=create_review_plan.__doc__ or "",
+        args_schema=CreateReviewPlanInput,
+    ),
+    StructuredTool.from_function(
+        check_terminology_consistency,
+        name="check_terminology_consistency",
+        description=check_terminology_consistency.__doc__ or "",
+        args_schema=CandidateIssuesInput,
+    ),
+    StructuredTool.from_function(
+        check_style_rules,
+        name="check_style_rules",
+        description=check_style_rules.__doc__ or "",
+        args_schema=CandidateIssuesInput,
+    ),
+    StructuredTool.from_function(
+        merge_candidate_issues,
+        name="merge_candidate_issues",
+        description=merge_candidate_issues.__doc__ or "",
+        args_schema=CandidateIssuesInput,
+    ),
+    StructuredTool.from_function(
+        evaluate_candidate_issues,
+        name="evaluate_candidate_issues",
+        description=evaluate_candidate_issues.__doc__ or "",
+        args_schema=CandidateIssuesInput,
     ),
 ]
 

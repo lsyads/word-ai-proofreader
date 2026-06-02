@@ -124,6 +124,179 @@ export interface AgentRunTrace {
   chunks: AgentChunkTrace[];
 }
 
+export type V2ProjectStatus =
+  | "created"
+  | "running"
+  | "waiting_for_approval"
+  | "written"
+  | "failed"
+  | "cancelled";
+export type V2RunStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_approval"
+  | "succeeded"
+  | "partial_succeeded"
+  | "failed"
+  | "cancelled";
+export type V2CandidateStatus = "pending" | "approved" | "rejected" | "deferred" | "written";
+
+export interface V2Project {
+  project_id: string;
+  source_type: "selection" | "docx";
+  status: V2ProjectStatus;
+  source_filename: string;
+  text_preview?: string | null;
+  book: BookInfo;
+  review_goal: string;
+  created_at: string;
+  updated_at: string;
+  run_count: number;
+  candidate_count: number;
+  pending_count: number;
+  approved_count: number;
+  output_filename?: string | null;
+  download_url?: string | null;
+}
+
+export interface V2DocumentBlock {
+  index: number;
+  start: number;
+  end: number;
+  text_preview: string;
+  style?: string | null;
+  in_textbox: boolean;
+}
+
+export interface V2DocumentChunk {
+  index: number;
+  start: number;
+  end: number;
+  chunk_len: number;
+  text_preview: string;
+}
+
+export interface V2DocumentMap {
+  project_id: string;
+  text_len: number;
+  block_count: number;
+  chunk_count: number;
+  blocks: V2DocumentBlock[];
+  chunks: V2DocumentChunk[];
+}
+
+export interface V2ReviewPlanStep {
+  step_id: string;
+  title: string;
+  tool_name: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  description: string;
+}
+
+export interface V2ReviewPlan {
+  project_id: string;
+  run_id?: string | null;
+  steps: V2ReviewPlanStep[];
+}
+
+export interface V2Run {
+  project_id: string;
+  run_id: string;
+  status: V2RunStatus;
+  stage: string;
+  total_chunks: number;
+  completed_chunks: number;
+  failed_chunks: number;
+  candidate_count: number;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface V2CandidateIssue {
+  candidate_id: string;
+  project_id: string;
+  run_id: string;
+  status: V2CandidateStatus;
+  category: string;
+  severity: "low" | "medium" | "high";
+  original: string;
+  replacement?: string | null;
+  suggestion: string;
+  evidence: string;
+  chunk_index: number;
+  global_start?: number | null;
+  global_end?: number | null;
+  locator?: ProofreadLocator | null;
+  self_check?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface V2CandidateList {
+  project_id: string;
+  candidates: V2CandidateIssue[];
+}
+
+export interface V2ApprovalDecision {
+  candidate_id: string;
+  status: "approved" | "rejected" | "deferred";
+}
+
+export interface V2ApprovalDecisionResponse {
+  project_id: string;
+  updated_count: number;
+  candidates: V2CandidateIssue[];
+}
+
+export interface V2MarkWrittenResponse {
+  project_id: string;
+  updated_count: number;
+  candidates: V2CandidateIssue[];
+}
+
+export interface V2WritebackResponse {
+  project_id: string;
+  output_filename: string;
+  download_url: string;
+  comment_count: number;
+  revision_count: number;
+  fallback_count: number;
+  failed_count: number;
+  written_count: number;
+}
+
+export interface V2RunEvent {
+  event: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface V2RunTrace {
+  project_id: string;
+  run_id: string;
+  status: V2RunStatus;
+  events: V2RunEvent[];
+}
+
+export interface V2ReviewReport {
+  project_id: string;
+  status: V2ProjectStatus;
+  source_filename: string;
+  book: BookInfo;
+  review_goal: string;
+  issue_count: number;
+  pending_count: number;
+  approved_count: number;
+  rejected_count: number;
+  deferred_count: number;
+  written_count: number;
+  severity_counts: Record<string, number>;
+  category_counts: Record<string, number>;
+  unresolved_items: string[];
+  generated_at: string;
+}
+
 export interface SessionResponse {
   session_id: string;
   created_at: string;

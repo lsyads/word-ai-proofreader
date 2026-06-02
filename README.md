@@ -51,6 +51,8 @@ V2 路线图：
 4. 复核与确认队列：将候选问题归并、证据绑定、自检后进入编辑确认队列。
 5. 写回与报告：按编辑决策生成 Word 批注/修订，并输出可复查的审校报告。
 
+当前代码已实现 V2 插件主界面和工作台闭环：创建当前选区或 DOCX 审校项目、建立文档地图、同步运行 Agent 审校、生成候选问题、批量批准/拒绝/暂缓、写回已批准问题、下载 DOCX 结果、查询审校报告和脱敏 run event trace。插件 UI 不再提供 V1 独立入口；当前选区写回由 Office.js 完成，DOCX 写回由后端完成。V2 第一版不迁移 V1 历史、trace、任务状态或 DOCX result index。
+
 ## 环境变量
 
 复制模板后按需填写：
@@ -78,6 +80,7 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 DOCX_OUTPUT_DIR=var/docx-results
 DOCX_RETENTION_DAYS=7
 AGENT_TRACE_DIR=var/agent-traces
+AGENT_WORKSPACE_DIR=var/agent-workspace
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
@@ -97,6 +100,7 @@ AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_
 默认 SQLite 文件位置：
 
 - Agent trace：`backend/var/agent-traces/traces.sqlite3`，由 `AGENT_TRACE_DIR` 控制。
+- V2 工作台：`backend/var/agent-workspace/projects.sqlite3`，由 `AGENT_WORKSPACE_DIR` 控制。
 - DOCX 下载索引：`backend/var/docx-results/results.sqlite3`，由 `DOCX_OUTPUT_DIR` 控制，记录下载恢复所需元数据和新任务的 `run_id`。
 
 这两个目录都在 `backend/var/` 下，默认不提交到 Git。

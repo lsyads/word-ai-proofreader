@@ -22,13 +22,30 @@ from app.schemas import (
     ProofreadRequest,
     ProofreadResponse,
     SessionResponse,
+    V2ApprovalDecisionRequest,
+    V2ApprovalDecisionResponse,
+    V2CandidateListResponse,
+    V2DocumentMapResponse,
+    V2MarkWrittenRequest,
+    V2MarkWrittenResponse,
+    V2ProjectResponse,
+    V2ReviewReportResponse,
+    V2RunCreateRequest,
+    V2RunResponse,
+    V2RunTraceResponse,
+    V2SelectionProjectCreateRequest,
+    V2WritebackRequest,
+    V2WritebackResponse,
 )
 from app.agents import trace as agent_trace
 from app.agents.service import AgentOptions, agent_runner
+from app.agents.workspace import V2WorkspaceConflict, workspace_runner
 import app.services.proofread as proofread_service
 from app.services import chunking
 from app.services import docx as docx_service
 from app.services import docx_tasks as docx_task_service
+from app.services import project_store
+from app.services import report_service
 from app.services import tasks as task_service
 from app.services.ai_client import AIClientError
 from app.services.ai_profiles import AIProfileError, list_public_ai_profiles
@@ -237,6 +254,224 @@ async def get_agent_run_trace(run_id: str) -> AgentRunTraceResponse:
         return AgentRunTraceResponse.model_validate(agent_trace.get_trace(run_id).model_dump())
     except agent_trace.AgentTraceNotFound as exc:
         raise HTTPException(status_code=404, detail="Agent run trace not found") from exc
+
+
+@app.post("/api/v2/projects", response_model=V2ProjectResponse)
+async def create_v2_project(
+    request: Request,
+    filename: str = Query(..., min_length=1),
+    book: str = Query(..., min_length=1),
+    review_goal: str = Query(default="完成全书出版审校，输出候选问题、证据、写回结果和审校报告。", min_length=1),
+) -> V2ProjectResponse:
+    if Path(filename).suffix.lower() == ".doc":
+        raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
+    if Path(filename).suffix.lower() != ".docx":
+        raise HTTPException(status_code=400, detail="V2 审校项目当前仅支持 .docx。")
+    try:
+        book_info = BookInfo.model_validate(json.loads(book))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="book 参数必须是有效的书籍信息 JSON。") from exc
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
+    try:
+        return workspace_runner.create_project(
+            source_filename=filename,
+            source_bytes=content,
+            book=book_info,
+            review_goal=review_goal,
+        )
+    except docx_service.DocxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v2/projects/selection", response_model=V2ProjectResponse)
+async def create_v2_selection_project(request: V2SelectionProjectCreateRequest) -> V2ProjectResponse:
+    return workspace_runner.create_selection_project(
+        text=request.text,
+        book=request.book,
+        review_goal=request.review_goal,
+    )
+
+
+@app.get("/api/v2/projects/{project_id}", response_model=V2ProjectResponse)
+async def get_v2_project(project_id: str) -> V2ProjectResponse:
+    try:
+        return project_store.project_response(project_id)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.get("/api/v2/projects/{project_id}/document-map", response_model=V2DocumentMapResponse)
+async def get_v2_document_map(project_id: str) -> V2DocumentMapResponse:
+    try:
+        return project_store.get_document_map(project_id)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 document map not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/runs", response_model=V2RunResponse)
+async def create_v2_run(project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
+    try:
+        proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
+        return await workspace_runner.run_project(project_id, request)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except docx_service.DocxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v2/projects/{project_id}/runs/{run_id}", response_model=V2RunResponse)
+async def get_v2_run(project_id: str, run_id: str) -> V2RunResponse:
+    try:
+        return project_store.require_run(project_id, run_id)
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
+
+
+@app.get("/api/v2/projects/{project_id}/runs/{run_id}/trace", response_model=V2RunTraceResponse)
+async def get_v2_run_trace(project_id: str, run_id: str) -> V2RunTraceResponse:
+    try:
+        run = project_store.require_run(project_id, run_id)
+        return V2RunTraceResponse(
+            project_id=project_id,
+            run_id=run_id,
+            status=run.status,
+            events=project_store.list_run_events(project_id, run_id),
+        )
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
+
+
+@app.get("/api/v2/projects/{project_id}/runs/{run_id}/events")
+async def v2_run_events(project_id: str, run_id: str) -> StreamingResponse:
+    try:
+        project_store.require_run(project_id, run_id)
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
+    return StreamingResponse(
+        _v2_event_stream(project_store.list_run_events(project_id, run_id)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/v2/projects/{project_id}/candidates", response_model=V2CandidateListResponse)
+async def get_v2_candidates(project_id: str) -> V2CandidateListResponse:
+    try:
+        project_store.require_project(project_id)
+        return V2CandidateListResponse(project_id=project_id, candidates=project_store.list_candidates(project_id))
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/candidates/decisions", response_model=V2ApprovalDecisionResponse)
+async def decide_v2_candidates(project_id: str, request: V2ApprovalDecisionRequest) -> V2ApprovalDecisionResponse:
+    try:
+        updated_count = project_store.update_candidate_statuses(
+            project_id,
+            {decision.candidate_id: decision.status for decision in request.decisions},
+        )
+        return V2ApprovalDecisionResponse(
+            project_id=project_id,
+            updated_count=updated_count,
+            candidates=project_store.list_candidates(project_id),
+        )
+    except project_store.V2CandidateNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/candidates/mark-written", response_model=V2MarkWrittenResponse)
+async def mark_v2_candidates_written(project_id: str, request: V2MarkWrittenRequest) -> V2MarkWrittenResponse:
+    try:
+        updated_count = project_store.mark_candidates_written(project_id, request.candidate_ids)
+        project_store.update_project_status(project_id, "written")
+        project = project_store.require_project(project_id)
+        report = report_service.build_review_report(
+            project_id=project_id,
+            status=project.status,
+            source_filename=project.source_filename,
+            book=project.book,
+            review_goal=project.review_goal,
+            candidates=project_store.list_candidates(project_id),
+        )
+        project_store.save_report(report)
+        return V2MarkWrittenResponse(
+            project_id=project_id,
+            updated_count=updated_count,
+            candidates=project_store.list_candidates(project_id),
+        )
+    except project_store.V2CandidateNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/writeback", response_model=V2WritebackResponse)
+async def writeback_v2_project(project_id: str, request: V2WritebackRequest) -> V2WritebackResponse:
+    try:
+        response = workspace_runner.write_approved(project_id, request)
+        project = project_store.require_project(project_id)
+        project_store.add_run_event(
+            project_id,
+            "writeback",
+            "writeback_completed",
+            {"output_filename": response.output_filename, "written_count": response.written_count},
+        )
+        report = report_service.build_review_report(
+            project_id=project_id,
+            status=project.status,
+            source_filename=project.source_filename,
+            book=project.book,
+            review_goal=project.review_goal,
+            candidates=project_store.list_candidates(project_id),
+        )
+        project_store.save_report(report)
+        return response
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except V2WorkspaceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/v2/projects/{project_id}/report", response_model=V2ReviewReportResponse)
+async def get_v2_report(project_id: str) -> V2ReviewReportResponse:
+    try:
+        project = project_store.require_project(project_id)
+        report = project_store.get_report(project_id)
+        if report:
+            return report
+        return report_service.build_review_report(
+            project_id=project_id,
+            status=project.status,
+            source_filename=project.source_filename,
+            book=project.book,
+            review_goal=project.review_goal,
+            candidates=project_store.list_candidates(project_id),
+        )
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.get("/api/v2/projects/{project_id}/download")
+async def download_v2_project_output(project_id: str) -> FileResponse:
+    try:
+        output_path, output_filename = project_store.output_download_path(project_id)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project output not found") from exc
+    return FileResponse(
+        output_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=output_filename,
+    )
 
 
 @app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
@@ -522,6 +757,11 @@ async def _proofread_event_stream(request: ProofreadRequest, run_id: str) -> Asy
 
 async def _task_event_stream(events: AsyncIterator[Any]) -> AsyncIterator[str]:
     async for event in events:
+        yield _format_sse(event.event, event.data)
+
+
+async def _v2_event_stream(events: list[Any]) -> AsyncIterator[str]:
+    for event in events:
         yield _format_sse(event.event, event.data)
 
 

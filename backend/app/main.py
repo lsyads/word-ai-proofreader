@@ -30,6 +30,7 @@ from app.schemas import (
     V2MemoryListResponse,
     V2MarkWrittenRequest,
     V2MarkWrittenResponse,
+    V2ProjectDeleteResponse,
     V2ProjectListResponse,
     V2ProjectResponse,
     V2ReviewPlanResponse,
@@ -308,6 +309,15 @@ async def list_v2_projects(limit: int = Query(default=20, ge=1, le=100)) -> V2Pr
 async def get_v2_project(project_id: str) -> V2ProjectResponse:
     try:
         return project_store.project_response(project_id)
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.delete("/api/v2/projects/{project_id}", response_model=V2ProjectDeleteResponse)
+async def delete_v2_project(project_id: str) -> V2ProjectDeleteResponse:
+    try:
+        project_store.delete_project(project_id)
+        return V2ProjectDeleteResponse(project_id=project_id)
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
 

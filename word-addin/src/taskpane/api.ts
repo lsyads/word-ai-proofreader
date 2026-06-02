@@ -14,6 +14,7 @@ import {
   V2MemoryList,
   V2MarkWrittenResponse,
   V2Project,
+  V2ProjectDeleteResponse,
   V2ProjectList,
   V2ReviewPlan,
   V2ReviewReport,
@@ -114,6 +115,22 @@ export async function listV2Projects(signal: AbortSignal): Promise<V2ProjectList
   }
 
   return (await response.json()) as V2ProjectList;
+}
+
+export async function deleteV2Project(
+  projectId: string,
+  signal: AbortSignal
+): Promise<V2ProjectDeleteResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ProjectDeleteResponse;
 }
 
 export async function getV2Project(projectId: string, signal: AbortSignal): Promise<V2Project> {

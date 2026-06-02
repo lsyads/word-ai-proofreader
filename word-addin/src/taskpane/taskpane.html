@@ -17,19 +17,19 @@
         <img width="44" height="44" src="../../assets/logo-filled.png" alt="DocPilot" />
         <div>
             <h1 class="ms-font-xl">DocPilot V2</h1>
-            <p class="ms-font-s">出版审校 Agent 工作台</p>
+            <p class="ms-font-s">出版审校工作台</p>
         </div>
     </header>
 
     <main id="app-body" class="app-main">
         <section class="status-panel" aria-live="polite">
-            <p id="message" class="message">创建当前选区或 DOCX 审校项目，然后运行 Agent。</p>
+            <p id="message" class="message">选择审校来源，填写书名，然后开始审校。</p>
         </section>
 
         <section class="workspace-panel">
             <div class="panel-heading">
-                <h2 class="ms-font-m">项目创建</h2>
-                <span id="project-badge" class="status-badge">未创建</span>
+                <h2 class="ms-font-m">审校设置</h2>
+                <span id="project-badge" class="status-badge">未开始</span>
             </div>
 
             <label class="field-label" for="source-type">审校来源</label>
@@ -53,60 +53,54 @@
             <label class="field-label" for="review-goal">审校目标</label>
             <textarea id="review-goal" class="control-textarea compact" rows="3">完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。</textarea>
 
-            <div class="control-grid">
-                <label>
-                    <span class="field-label">AI 配置</span>
-                    <select id="ai-profile" class="control-select">
-                        <option value="default">Default AI (.env)</option>
-                    </select>
+            <details class="details-panel">
+                <summary>高级设置</summary>
+                <div class="control-grid">
+                    <label>
+                        <span class="field-label">AI 配置</span>
+                        <select id="ai-profile" class="control-select">
+                            <option value="default">Default AI (.env)</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span class="field-label">AI API</span>
+                        <select id="provider-api" class="control-select">
+                            <option value="responses">Responses</option>
+                            <option value="chat">Chat</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span class="field-label">审校模式</span>
+                        <select id="proofread-mode" class="control-select">
+                            <option value="fast">快速审校</option>
+                            <option value="thinking">深度审校</option>
+                        </select>
+                    </label>
+                    <label>
+                        <span class="field-label">Temperature</span>
+                        <input id="temperature" class="control-input" type="number" min="0" max="1.5" step="0.1" value="0.6" />
+                    </label>
+                    <label>
+                        <span class="field-label">写回模式</span>
+                        <select id="application-mode" class="control-select">
+                            <option value="comment">批注模式</option>
+                            <option value="revision">修订+批注</option>
+                        </select>
+                    </label>
+                    <label class="checkbox-field inline-checkbox">
+                        <input id="fallback-summary-truncate-enabled" type="checkbox" />
+                        <span>截断汇总批注</span>
+                    </label>
+                </div>
+                <label class="checkbox-field">
+                    <input id="reasoning-enabled" type="checkbox" />
+                    <span>启用模型深度思考</span>
                 </label>
-                <label>
-                    <span class="field-label">AI API</span>
-                    <select id="provider-api" class="control-select">
-                        <option value="responses">Responses</option>
-                        <option value="chat">Chat</option>
-                    </select>
-                </label>
-                <label>
-                    <span class="field-label">审校模式</span>
-                    <select id="proofread-mode" class="control-select">
-                        <option value="fast">快速审校</option>
-                        <option value="thinking">深度审校</option>
-                    </select>
-                </label>
-                <label>
-                    <span class="field-label">Temperature</span>
-                    <input id="temperature" class="control-input" type="number" min="0" max="1.5" step="0.1" value="0.2" />
-                </label>
-            </div>
+            </details>
 
-            <label class="checkbox-field">
-                <input id="reasoning-enabled" type="checkbox" />
-                <span>启用模型深度思考</span>
-            </label>
-
-            <div class="control-grid">
-                <label>
-                    <span class="field-label">写回模式</span>
-                    <select id="application-mode" class="control-select">
-                        <option value="comment">批注模式</option>
-                        <option value="revision">修订+批注</option>
-                    </select>
-                </label>
-                <label class="checkbox-field inline-checkbox">
-                    <input id="fallback-summary-truncate-enabled" type="checkbox" checked />
-                    <span>截断汇总批注</span>
-                </label>
-            </div>
-
-            <div class="button-row">
-                <button id="create-project" class="ms-Button ms-Button--primary" type="button">
-                    <span class="ms-Button-label">创建项目</span>
-                </button>
-                <button id="run-agent" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">运行 Agent</span>
-                </button>
-            </div>
+            <button id="start-review" class="ms-Button ms-Button--primary full-width-button" type="button">
+                <span class="ms-Button-label">开始审校</span>
+            </button>
         </section>
 
         <section class="workspace-panel">
@@ -119,34 +113,8 @@
             <div id="recent-projects" class="workspace-empty">暂无最近项目。</div>
         </section>
 
-        <section class="workspace-panel">
-            <div class="panel-heading">
-                <h2 class="ms-font-m">项目概览</h2>
-                <button id="refresh-workspace" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">刷新</span>
-                </button>
-            </div>
-            <div id="project-summary" class="workspace-empty">暂无项目。</div>
-        </section>
-
-        <section class="workspace-panel">
-            <h2 class="ms-font-m">文档地图</h2>
-            <div id="document-map" class="workspace-empty">创建项目后显示文档地图。</div>
-        </section>
-
-        <section class="workspace-panel">
-            <h2 class="ms-font-m">审校计划</h2>
-            <div id="review-plan" class="workspace-empty">运行 Agent 后显示审校计划。</div>
-        </section>
-
-        <section class="workspace-panel">
-            <div class="panel-heading">
-                <h2 class="ms-font-m">运行过程</h2>
-                <button id="refresh-trace" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">刷新 Trace</span>
-                </button>
-            </div>
-            <div id="run-trace" class="workspace-empty">暂无运行记录。</div>
+        <section class="workspace-panel compact-panel">
+            <div id="project-summary" class="workspace-empty">暂无审校项目。</div>
         </section>
 
         <section class="workspace-panel">
@@ -157,46 +125,58 @@
                     <option value="pending">待确认</option>
                     <option value="approved">已批准</option>
                     <option value="rejected">已拒绝</option>
-                    <option value="deferred">暂缓</option>
                     <option value="written">已写回</option>
                 </select>
-                <select id="candidate-pass-filter" class="control-select narrow">
+                <select id="candidate-pass-filter" class="control-select narrow" hidden>
                     <option value="all">全部阶段</option>
                 </select>
             </div>
+            <div id="candidate-summary" class="summary-line">暂无候选问题。</div>
+            <div id="candidates" class="workspace-empty">开始审校后显示候选问题。</div>
             <div class="button-row">
                 <button id="approve-all" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">批准全部待确认</span>
+                    <span class="ms-Button-label">批准全部</span>
                 </button>
                 <button id="reject-all" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">拒绝全部待确认</span>
-                </button>
-            </div>
-            <div id="candidate-summary" class="summary-line">暂无候选问题。</div>
-            <div id="candidates" class="workspace-empty">运行 Agent 后显示候选问题。</div>
-        </section>
-
-        <section class="workspace-panel">
-            <h2 class="ms-font-m">项目记忆</h2>
-            <div id="project-memory" class="workspace-empty">暂无项目记忆。</div>
-        </section>
-
-        <section class="workspace-panel">
-            <div class="panel-heading">
-                <h2 class="ms-font-m">写回与报告</h2>
-                <button id="download-docx" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">下载 DOCX</span>
+                    <span class="ms-Button-label">拒绝全部</span>
                 </button>
             </div>
             <div class="button-row">
                 <button id="writeback" class="ms-Button ms-Button--primary" type="button" disabled>
                     <span class="ms-Button-label">写回已批准</span>
                 </button>
-                <button id="refresh-report" class="ms-Button" type="button" disabled>
-                    <span class="ms-Button-label">刷新报告</span>
+                <button id="download-docx" class="ms-Button" type="button" disabled>
+                    <span class="ms-Button-label">下载结果 DOCX</span>
                 </button>
             </div>
-            <div id="report" class="workspace-empty">暂无审校报告。</div>
+            <div id="report" class="workspace-empty compact-report">暂无写回报告。</div>
+        </section>
+
+        <section class="workspace-panel">
+            <details class="details-panel">
+                <summary>高级信息</summary>
+                <div class="advanced-section">
+                    <h3 class="ms-font-s">文档地图</h3>
+                    <div id="document-map" class="workspace-empty">暂无文档地图。</div>
+                </div>
+                <div class="advanced-section">
+                    <h3 class="ms-font-s">审校计划</h3>
+                    <div id="review-plan" class="workspace-empty">暂无审校计划。</div>
+                </div>
+                <div class="advanced-section">
+                    <div class="panel-heading">
+                        <h3 class="ms-font-s">运行过程</h3>
+                        <button id="refresh-trace" class="ms-Button" type="button" disabled>
+                            <span class="ms-Button-label">刷新</span>
+                        </button>
+                    </div>
+                    <div id="run-trace" class="workspace-empty">暂无运行记录。</div>
+                </div>
+                <div class="advanced-section">
+                    <h3 class="ms-font-s">本书规则</h3>
+                    <div id="project-memory" class="workspace-empty">暂无本书规则。</div>
+                </div>
+            </details>
         </section>
 
         <section class="workspace-panel debug-panel">

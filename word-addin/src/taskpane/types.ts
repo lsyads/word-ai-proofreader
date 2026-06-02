@@ -166,6 +166,11 @@ export interface V2ProjectList {
   projects: V2Project[];
 }
 
+export interface V2ProjectDeleteResponse {
+  project_id: string;
+  deleted: boolean;
+}
+
 export interface V2DocumentBlock {
   index: number;
   start: number;

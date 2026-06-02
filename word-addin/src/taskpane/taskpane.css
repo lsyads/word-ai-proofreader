@@ -168,6 +168,11 @@ body {
   margin-top: 10px;
 }
 
+.full-width-button {
+  margin-top: 12px;
+  width: 100%;
+}
+
 .ms-Button {
   min-height: 34px;
   min-width: 0;
@@ -186,6 +191,7 @@ body {
 .workspace-empty,
 .workspace-list,
 .workspace-summary,
+.compact-status,
 .debug-log {
   background: #fafafa;
   border: 1px solid #edebe9;
@@ -208,6 +214,27 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.compact-panel {
+  padding: 0;
+}
+
+.compact-status {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: auto;
+}
+
+.compact-status span {
+  background: #ffffff;
+  border: 1px solid #edebe9;
+  border-radius: 999px;
+  color: #323130;
+  font-size: 12px;
+  padding: 3px 8px;
 }
 
 .summary-grid {
@@ -250,18 +277,58 @@ body {
 }
 
 .project-item {
+  align-items: center;
+  color: inherit;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.project-open-button {
+  background: transparent;
+  border: 0;
   color: inherit;
   cursor: pointer;
   font: inherit;
+  min-width: 0;
+  padding: 0;
   text-align: left;
+}
+
+.project-open-button span {
+  display: block;
 }
 
 .project-item:hover {
   border-color: #0078d4;
 }
 
+.danger-button {
+  color: #a4262c;
+}
+
 .plan-item.is-disabled {
   opacity: 0.58;
+}
+
+.details-panel {
+  margin-top: 12px;
+}
+
+.details-panel summary,
+.candidate-detail summary {
+  color: #605e5c;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.advanced-section {
+  margin-top: 12px;
+}
+
+.advanced-section h3 {
+  margin: 0 0 6px;
 }
 
 .item-title {
@@ -314,6 +381,15 @@ body {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.candidate-detail {
+  margin-top: 2px;
+}
+
+.compact-report {
+  margin-top: 10px;
+  min-height: auto;
 }
 
 .summary-line {

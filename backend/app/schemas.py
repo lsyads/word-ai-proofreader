@@ -262,6 +262,11 @@ class V2ProjectListResponse(BaseModel):
     projects: list[V2ProjectResponse]
 
 
+class V2ProjectDeleteResponse(BaseModel):
+    project_id: str
+    deleted: bool = True
+
+
 class V2DocumentBlock(BaseModel):
     index: int
     start: int

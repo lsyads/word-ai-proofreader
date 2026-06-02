@@ -140,6 +140,28 @@ def list_projects(limit: int = 20, settings: Settings | None = None) -> list[V2P
     return [project_response(row[0], settings) for row in rows]
 
 
+def delete_project(project_id: str, settings: Settings | None = None) -> None:
+    _ensure_schema(settings)
+    require_project(project_id, settings)
+    with _connect(settings) as connection:
+        for table in (
+            "v2_document_maps",
+            "v2_review_plans",
+            "v2_run_events",
+            "v2_runs",
+            "v2_candidate_issues",
+            "v2_reports",
+            "v2_memory_items",
+        ):
+            connection.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
+        connection.execute("DELETE FROM v2_projects WHERE project_id = ?", (project_id,))
+        connection.commit()
+
+    output_dir = project_output_path(project_id, "placeholder", settings).parent
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+
 def update_project_status(project_id: str, status: str, settings: Settings | None = None) -> None:
     _ensure_schema(settings)
     with _connect(settings) as connection:

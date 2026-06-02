@@ -2,7 +2,7 @@
 
 本文是当前 V1 基线和已实现 V2.1 Agent 工作台的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.1 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为一个开始审校按钮和候选问题工作区。
 
 ## 范围
 
@@ -124,7 +124,7 @@ Response:
 
 ## V2 Agent 工作台 API
 
-V2 API 以审校项目为核心，V2.1 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.1 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。
+V2 API 以审校项目为核心，V2.2 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。插件 UI 默认收敛为一个开始审校按钮和候选问题工作区，Agent 内部 trace/plan/memory 默认放入高级信息。
 
 ### `POST /api/v2/projects`
 
@@ -164,6 +164,19 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 ### `GET /api/v2/projects/{project_id}`
 
 查询 V2 项目摘要。项目不存在返回 404。
+
+### `DELETE /api/v2/projects/{project_id}`
+
+删除 V2 项目及关联工作台数据。后端会清理 project、document map、review plan、runs、run events、candidates、report、memory 和该项目的 DOCX output 目录。项目不存在返回 404。
+
+Response:
+
+```json
+{
+  "project_id": "project_xxx",
+  "deleted": true
+}
+```
 
 ### `GET /api/v2/projects/{project_id}/document-map`
 
@@ -207,7 +220,7 @@ Request:
 }
 ```
 
-`status` 仅允许 `approved`、`rejected`、`deferred`。
+`status` 允许 `approved`、`rejected`、`deferred`。V2.2 插件默认只暴露批准和拒绝；`deferred` 保留给 API 兼容和后续更清晰的“稍后处理”设计。
 
 编辑决策会派生轻量项目记忆，例如已批准的问题类别；不会把完整正文写入长期记忆。
 

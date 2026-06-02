@@ -205,3 +205,76 @@ def test_v2_selection_project_run_writeback_conflict_and_mark_written():
 
     report = client.get(f"/api/v2/projects/{project_id}/report").json()
     assert report["written_count"] == 1
+
+
+def test_v2_delete_selection_project_removes_related_workspace_data():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run = client.post(f"/api/v2/projects/{project_id}/runs", json={}).json()
+    run = get_completed_run(project_id, run["run_id"])
+    candidate = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]
+    client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": candidate["candidate_id"], "status": "approved"}]},
+    )
+    memory_response = client.get(f"/api/v2/projects/{project_id}/memory")
+    assert memory_response.status_code == 200
+    assert memory_response.json()["memory"]
+
+    delete_response = client.delete(f"/api/v2/projects/{project_id}")
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"project_id": project_id, "deleted": True}
+
+    assert client.get(f"/api/v2/projects/{project_id}").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/document-map").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/plan").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/candidates").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/report").status_code == 404
+    assert client.get(f"/api/v2/projects/{project_id}/memory").status_code == 404
+    assert project_id not in [project["project_id"] for project in client.get("/api/v2/projects").json()["projects"]]
+
+
+def test_v2_delete_docx_project_removes_output_file_and_download():
+    source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查明显出版审校问题。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    run = client.post(f"/api/v2/projects/{project_id}/runs", json={}).json()
+    get_completed_run(project_id, run["run_id"])
+    candidate = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]
+    client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": candidate["candidate_id"], "status": "approved"}]},
+    )
+    writeback_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "comment"})
+    assert writeback_response.status_code == 200
+    output_path, _ = project_store.output_download_path(project_id)
+    assert output_path.exists()
+
+    delete_response = client.delete(f"/api/v2/projects/{project_id}")
+    assert delete_response.status_code == 200
+    assert not output_path.exists()
+    assert client.get(f"/api/v2/projects/{project_id}/download").status_code == 404
+
+
+def test_v2_delete_missing_project_returns_404():
+    response = client.delete("/api/v2/projects/project_missing")
+    assert response.status_code == 404

@@ -1,6 +1,8 @@
 # Word AI 审校助手 API 契约与验收标准
 
-本文是项目的唯一 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
+本文是当前 V1 基线的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
+
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。正式 V2 API、状态机和数据结构必须在实现前补充到本文；在未补充前，下文仍只描述当前已实现的 V1/current API，不代表 V2 已发布接口。
 
 ## 范围
 

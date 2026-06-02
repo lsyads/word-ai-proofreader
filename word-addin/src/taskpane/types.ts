@@ -22,6 +22,7 @@ export interface ProofreadIssue {
 
 export interface ProofreadResponse {
   issues: ProofreadIssue[];
+  run_id?: string | null;
 }
 
 export interface ChunkedProofreadIssue extends ProofreadIssue {
@@ -32,6 +33,7 @@ export interface ChunkedProofreadIssue extends ProofreadIssue {
 
 export interface ChunkedProofreadResponse {
   task_id?: string | null;
+  run_id?: string | null;
   scope: ProofreadScope;
   status: TaskState;
   total_chunks: number;
@@ -43,6 +45,7 @@ export interface ChunkedProofreadResponse {
 
 export interface DocxProofreadResponse {
   task_id: string;
+  run_id?: string | null;
   status: TaskState;
   total_chunks: number;
   completed_chunks: number;
@@ -61,6 +64,7 @@ export interface ProofreadStatusEvent {
   stage: string;
   message: string;
   task_id?: string;
+  run_id?: string | null;
   status?: TaskState;
   scope?: ProofreadScope;
   total_chunks?: number;
@@ -78,6 +82,46 @@ export interface ProofreadStatusEvent {
   chunk_len?: number;
   elapsed_seconds?: number;
   error_message?: string;
+}
+
+export interface AgentNodeTrace {
+  node_name: string;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  ended_at?: string | null;
+  elapsed_seconds?: number | null;
+  error_message?: string | null;
+}
+
+export interface AgentChunkTrace {
+  chunk_index: number;
+  chunk_start: number;
+  chunk_end: number;
+  chunk_len: number;
+  status: "running" | "succeeded" | "failed";
+  issue_count: number;
+  retry_count: number;
+  error_message?: string | null;
+  started_at: string;
+  ended_at?: string | null;
+  elapsed_seconds?: number | null;
+}
+
+export interface AgentRunTrace {
+  run_id: string;
+  flow: string;
+  task_id?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  total_chunks: number;
+  completed_chunks: number;
+  failed_chunks: number;
+  issue_count: number;
+  error_message?: string | null;
+  metadata: Record<string, unknown>;
+  nodes: AgentNodeTrace[];
+  chunks: AgentChunkTrace[];
 }
 
 export interface SessionResponse {

@@ -21,7 +21,24 @@ Word 插件任务窗格
 
 未配置 `AI_API_KEY` 时，后端走 mock 审校结果，不调用 AI provider。
 
+V1 Agent 化后，后端在现有 FastAPI 契约下新增 LangGraph 编排层：当前选区、长选区分块任务和全书 DOCX 任务都会生成 `run_id`，并通过 `backend/app/agents/` 记录节点与 chunk trace。业务能力仍复用原有解析、分块、AI 调用、定位和 OOXML 写回服务，LangChain tools 只做薄封装，不把正文或密钥写入 trace。
+
 V2 支持两条范围链路：当前选区不超过 7000 字时使用单段链路，超过 7000 字时创建文本分块任务；“全书正文”上传 `.docx`，后端抽取目录可见文本、正文、表格和常见文本框文字，先按章拆分，再按节拆分，仍超过 7000 字时用可提取的目录小标题辅助拆分，最后按段落/句末规则分块，并生成新的 `.docx`。运行中任务状态仍以内存为主；已生成的 DOCX 结果文件写入稳定目录和 SQLite 索引，默认至少保留 7 天，服务重启后未过期结果仍可下载。
+
+## Agent 编排与运行数据
+
+`backend/app/agents/` 是 V1 Agent 化边界：
+
+- `graph.py` 编译 LangGraph `StateGraph`。
+- `state.py` 定义 Agent state、node trace、chunk trace 的结构。
+- `nodes.py` 实现图节点；节点只编排，不复制 DOCX、AI provider 或定位业务逻辑。
+- `tools.py` 暴露 LangChain tools，封装现有解析、分块、审校、定位、写回服务。
+- `service.py` 是 FastAPI 和任务服务调用 Agent 的入口。
+- `trace.py` 写入并读取 Agent trace。
+
+每次审校生成一个 `run_id`。普通 JSON 响应、任务快照和任务 SSE 事件都会携带该 ID；拿到后可调用 `GET /api/agent/runs/{run_id}/trace` 查询节点、chunk、耗时、状态、错误和重试次数。trace 的默认 SQLite 文件是 `backend/var/agent-traces/traces.sqlite3`，由 `AGENT_TRACE_DIR` 控制。
+
+DOCX 结果文件索引是另一份 SQLite：`backend/var/docx-results/results.sqlite3`，由 `DOCX_OUTPUT_DIR` 控制。它只记录下载恢复需要的文件索引和任务统计，真实 `.docx` 结果文件保存在同一个 `DOCX_OUTPUT_DIR` 下的任务子目录。
 
 ## Word 插件到后端
 

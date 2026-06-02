@@ -193,6 +193,7 @@ Response:
 
 ```json
 {
+  "run_id": "agent_run_xxx",
   "issues": []
 }
 ```
@@ -231,6 +232,8 @@ event: error
 data: {"message":"AI provider returned HTTP 500"}
 ```
 
+流式事件的 `data` 会附带本次审校的 `run_id`，用于查询 Agent trace。
+
 ### `POST /api/proofread/chunked`
 
 同步分块审校接口，用于测试、调试和较小分块任务。产品主链路使用 `/api/proofread/tasks`。
@@ -252,6 +255,7 @@ Response:
 ```json
 {
   "task_id": null,
+  "run_id": "agent_run_xxx",
   "scope": "document",
   "status": "succeeded",
   "total_chunks": 2,
@@ -283,7 +287,7 @@ Response:
 
 创建内存异步分块任务。请求与 `/api/proofread/chunked` 相同。
 
-Response 为 `ChunkedProofreadResult`，`task_id` 必填，初始 `status` 为 `queued`。
+Response 为 `ChunkedProofreadResult`，`task_id` 必填，初始 `status` 为 `queued`，并包含本次 Agent 编排的 `run_id`。
 
 任务只保存在后端内存中；服务重启后不可恢复。
 
@@ -317,7 +321,7 @@ cancelled
 error
 ```
 
-事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`；失败事件包含 `error_message`。
+事件数据包含 `task_id`、`run_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`；失败事件包含 `error_message`。
 
 ### `DELETE /api/proofread/tasks/{task_id}`
 
@@ -353,6 +357,7 @@ Response:
 ```json
 {
   "task_id": "docx_task_xxx",
+  "run_id": "agent_run_xxx",
   "status": "queued",
   "total_chunks": 12,
   "completed_chunks": 0,
@@ -392,6 +397,59 @@ Response:
 
 下载后端生成的审校后 `.docx` 文件。结果尚未生成、已过期或文件丢失时返回明确错误；未过期结果即使后端重启也可通过持久化索引下载。
 
+### `GET /api/agent/runs/{run_id}/trace`
+
+查询一次 Agent 审校 run 的可观测 trace。`run_id` 会随普通审校响应、分块任务响应、DOCX 任务响应和任务 SSE 事件返回。trace 只记录节点和 chunk 元数据，不记录完整正文、API Key、Authorization 或 Bearer token。
+
+trace 默认保存到 `backend/var/agent-traces/traces.sqlite3`，可通过 `AGENT_TRACE_DIR` 修改目录。DOCX 下载索引使用独立 SQLite：`backend/var/docx-results/results.sqlite3`，可通过 `DOCX_OUTPUT_DIR` 修改目录。
+
+Response:
+
+```json
+{
+  "run_id": "agent_run_xxx",
+  "flow": "chunked_task",
+  "task_id": "task_xxx",
+  "status": "succeeded",
+  "created_at": "2026-05-16T00:00:00+00:00",
+  "updated_at": "2026-05-16T00:00:03+00:00",
+  "total_chunks": 2,
+  "completed_chunks": 2,
+  "failed_chunks": 0,
+  "issue_count": 3,
+  "error_message": null,
+  "metadata": {
+    "scope": "document",
+    "proofread_mode": "fast"
+  },
+  "nodes": [
+    {
+      "node_name": "proofread_chunk",
+      "status": "succeeded",
+      "started_at": "2026-05-16T00:00:01+00:00",
+      "ended_at": "2026-05-16T00:00:02+00:00",
+      "elapsed_seconds": 1.0,
+      "error_message": null
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_index": 0,
+      "chunk_start": 0,
+      "chunk_end": 5000,
+      "chunk_len": 5000,
+      "status": "succeeded",
+      "issue_count": 2,
+      "retry_count": 0,
+      "error_message": null,
+      "started_at": "2026-05-16T00:00:01+00:00",
+      "ended_at": "2026-05-16T00:00:02+00:00",
+      "elapsed_seconds": 1.0
+    }
+  ]
+}
+```
+
 ## Word 写回规则
 
 - 当前选区：插件拿到 `issues` 后先展示结果，不立即写回 Word。
@@ -420,6 +478,9 @@ BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
+DOCX_OUTPUT_DIR=var/docx-results
+DOCX_RETENTION_DAYS=7
+AGENT_TRACE_DIR=var/agent-traces
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
@@ -429,6 +490,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
 - `temperature` 是请求级参数，插件默认 `0.2`，不需要环境变量。
+- `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
 
 ## 验收标准
@@ -439,6 +501,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
 - `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
 - 普通审校、流式审校、分块任务和 DOCX 全书任务都接受 `temperature`；越界返回 422，合法值会传给 AI provider。
+- 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。

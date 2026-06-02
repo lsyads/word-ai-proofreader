@@ -80,6 +80,7 @@ class ProofreadIssue(BaseModel):
 
 class ProofreadResponse(BaseModel):
     issues: list[ProofreadIssue]
+    run_id: str | None = None
 
 
 ProofreadScope = Literal["selection", "document"]
@@ -114,6 +115,7 @@ class ChunkedProofreadRequest(ProofreadRequest):
 
 class ChunkedProofreadResult(BaseModel):
     task_id: str | None = None
+    run_id: str | None = None
     scope: ProofreadScope
     status: ChunkedTaskStatus
     total_chunks: int
@@ -125,6 +127,7 @@ class ChunkedProofreadResult(BaseModel):
 
 class DocxProofreadResult(BaseModel):
     task_id: str
+    run_id: str | None = None
     status: ChunkedTaskStatus
     total_chunks: int
     completed_chunks: int
@@ -151,3 +154,43 @@ class AIProfileResponse(BaseModel):
     default_api: Literal["responses", "chat"]
     supported_apis: list[Literal["responses", "chat"]]
     configured: bool
+
+
+class AgentNodeTraceResponse(BaseModel):
+    node_name: str
+    status: Literal["running", "succeeded", "failed"]
+    started_at: str
+    ended_at: str | None = None
+    elapsed_seconds: float | None = None
+    error_message: str | None = None
+
+
+class AgentChunkTraceResponse(BaseModel):
+    chunk_index: int
+    chunk_start: int
+    chunk_end: int
+    chunk_len: int
+    status: Literal["running", "succeeded", "failed"]
+    issue_count: int
+    retry_count: int
+    error_message: str | None = None
+    started_at: str
+    ended_at: str | None = None
+    elapsed_seconds: float | None = None
+
+
+class AgentRunTraceResponse(BaseModel):
+    run_id: str
+    flow: str
+    task_id: str | None = None
+    status: str
+    created_at: str
+    updated_at: str
+    total_chunks: int
+    completed_chunks: int
+    failed_chunks: int
+    issue_count: int
+    error_message: str | None = None
+    metadata: dict[str, Any]
+    nodes: list[AgentNodeTraceResponse]
+    chunks: list[AgentChunkTraceResponse]

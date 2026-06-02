@@ -16,6 +16,8 @@ from app.schemas import (
     ChunkedProofreadResult,
     ChunkedTaskStatus,
 )
+from app.agents import trace as agent_trace
+from app.agents.service import AgentOptions, agent_runner, metadata_from_options
 from app.services import chunking
 from app.services.ai_client import AIClientError, AIStreamEvent, DEFAULT_TEMPERATURE
 from app.services.proofread import proofread_text
@@ -37,6 +39,7 @@ class ProofreadTaskConflict(RuntimeError):
 class ProofreadTask:
     task_id: str
     request: ChunkedProofreadRequest
+    run_id: str = field(default_factory=lambda: f"agent_run_{uuid.uuid4().hex}")
     status: ChunkedTaskStatus = "queued"
     total_chunks: int = 0
     completed_chunks: int = 0
@@ -50,6 +53,7 @@ class ProofreadTask:
     runner_task: asyncio.Task[Any] | None = None
     completed_chunk_indices: set[int] = field(default_factory=set)
     failed_chunk_indices: set[int] = field(default_factory=set)
+    chunk_retry_counts: dict[int, int] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: _now_iso())
     updated_at: str = field(default_factory=lambda: _now_iso())
     events: list[AIStreamEvent] = field(default_factory=list)
@@ -62,8 +66,16 @@ _tasks: OrderedDict[str, ProofreadTask] = OrderedDict()
 def create_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
     chunks = chunking.split_text_into_chunks(request.text, request.scope, request.chunk_size)
     task_id = f"task_{uuid.uuid4().hex}"
+    options = _agent_options(request)
+    run_id = agent_runner.create_run(
+        "chunked_task",
+        task_id=task_id,
+        total_chunks=len(chunks),
+        metadata=metadata_from_options(options),
+    )
     task = ProofreadTask(
         task_id=task_id,
+        run_id=run_id,
         request=request,
         total_chunks=len(chunks),
     )
@@ -74,6 +86,7 @@ def create_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
         "queued",
         {
             "task_id": task_id,
+            "run_id": run_id,
             "scope": request.scope,
             "total_chunks": task.total_chunks,
             "message": "审校任务已创建。",
@@ -140,6 +153,8 @@ def retry_failed_chunks(task_id: str) -> ChunkedProofreadResult:
     task.cancel_requested = False
     task.error_message = None
     task.status = "queued"
+    for index in failed_indices:
+        task.chunk_retry_counts[index] = task.chunk_retry_counts.get(index, 0) + 1
     _touch(task)
     _emit(
         task,
@@ -194,6 +209,7 @@ async def _run_task(
     task.status = "running"
     task.runner_task = asyncio.current_task()
     _touch(task)
+    agent_trace.update_run(task.run_id, status="running", total_chunks=task.total_chunks)
     _emit(
         task,
         "running",
@@ -212,6 +228,14 @@ async def _run_task(
                 task.failed_chunk_indices.add(chunk.index)
                 _sync_chunk_counts(task)
                 _touch(task)
+                agent_trace.update_run(
+                    task.run_id,
+                    status=task.status,
+                    total_chunks=task.total_chunks,
+                    completed_chunks=task.completed_chunks,
+                    failed_chunks=task.failed_chunks,
+                    issue_count=len(task.issues),
+                )
                 elapsed_seconds = _elapsed_seconds_for_task(task)
                 logger.warning(
                     "chunked proofread chunk failed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s completed_chunks=%s failed_chunks=%s total_chunks=%s error_type=%s error_message=%s",
@@ -252,6 +276,14 @@ async def _run_task(
             task.issues = [issue for issue in task.issues if issue.chunk_index != chunk.index]
             task.issues.extend(chunking.globalize_issues(chunk, chunk_issues))
             _touch(task)
+            agent_trace.update_run(
+                task.run_id,
+                status=task.status,
+                total_chunks=task.total_chunks,
+                completed_chunks=task.completed_chunks,
+                failed_chunks=task.failed_chunks,
+                issue_count=len(task.issues),
+            )
             elapsed_seconds = _elapsed_seconds_for_task(task)
             logger.info(
                 "chunked proofread chunk completed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s issue_count=%s",
@@ -288,6 +320,15 @@ async def _run_task(
             task.status = "failed"
             task.error_message = "All chunks failed to proofread."
             _touch(task)
+            agent_trace.update_run(
+                task.run_id,
+                status=task.status,
+                total_chunks=task.total_chunks,
+                completed_chunks=task.completed_chunks,
+                failed_chunks=task.failed_chunks,
+                issue_count=len(task.issues),
+                error_message=task.error_message,
+            )
             logger.warning(
                 "chunked proofread task failed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_message=%s",
                 task.task_id,
@@ -301,6 +342,14 @@ async def _run_task(
 
         task.status = "partial_succeeded" if task.failed_chunks > 0 else "succeeded"
         _touch(task)
+        agent_trace.update_run(
+            task.run_id,
+            status=task.status,
+            total_chunks=task.total_chunks,
+            completed_chunks=task.completed_chunks,
+            failed_chunks=task.failed_chunks,
+            issue_count=len(task.issues),
+        )
         message = "审校任务部分完成。" if task.status == "partial_succeeded" else "审校任务完成。"
         if task.status == "partial_succeeded":
             logger.warning(
@@ -316,6 +365,15 @@ async def _run_task(
         task.status = "failed"
         task.error_message = str(exc)
         _touch(task)
+        agent_trace.update_run(
+            task.run_id,
+            status=task.status,
+            total_chunks=task.total_chunks,
+            completed_chunks=task.completed_chunks,
+            failed_chunks=task.failed_chunks,
+            issue_count=len(task.issues),
+            error_message=task.error_message,
+        )
         logger.exception(
             "chunked proofread task crashed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_type=%s error_message=%s",
             task.task_id,
@@ -364,6 +422,7 @@ async def _proofread_chunk_with_manual_retry(
         except asyncio.CancelledError:
             if task.retry_current_requested:
                 task.retry_current_requested = False
+                task.chunk_retry_counts[chunk.index] = task.chunk_retry_counts.get(chunk.index, 0) + 1
                 _emit(
                     task,
                     "chunk_retrying",
@@ -406,12 +465,20 @@ async def _proofread_chunk(
     if task.request.temperature != DEFAULT_TEMPERATURE:
         proofread_kwargs["temperature"] = task.request.temperature
 
-    return await proofread_text(chunk.text, task.request.book, **proofread_kwargs)
+    return await agent_runner.proofread_task_chunk(
+        run_id=task.run_id,
+        chunk=chunk,
+        book=task.request.book,
+        options=_agent_options(task.request),
+        retry_count=task.chunk_retry_counts.get(chunk.index, 0),
+        proofread_callable=proofread_text,
+    )
 
 
 def snapshot_task(task: ProofreadTask) -> ChunkedProofreadResult:
     return ChunkedProofreadResult(
         task_id=task.task_id,
+        run_id=task.run_id,
         scope=task.request.scope,
         status=task.status,
         total_chunks=task.total_chunks,
@@ -444,6 +511,7 @@ def _progress_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": task.task_id,
+        "run_id": task.run_id,
         "scope": task.request.scope,
         "status": task.status,
         "total_chunks": task.total_chunks,
@@ -462,6 +530,14 @@ def _progress_payload(
 def _mark_cancelled(task: ProofreadTask) -> None:
     task.status = "cancelled"
     _touch(task)
+    agent_trace.update_run(
+        task.run_id,
+        status=task.status,
+        total_chunks=task.total_chunks,
+        completed_chunks=task.completed_chunks,
+        failed_chunks=task.failed_chunks,
+        issue_count=len(task.issues),
+    )
     _emit(task, "cancelled", _progress_payload(task, "审校任务已停止。"))
 
 
@@ -525,3 +601,16 @@ def _is_terminal(status: ChunkedTaskStatus) -> bool:
 def _trim_tasks() -> None:
     while len(_tasks) > MAX_TASKS:
         _tasks.popitem(last=False)
+
+
+def _agent_options(request: ChunkedProofreadRequest) -> AgentOptions:
+    return AgentOptions(
+        session_id=request.session_id,
+        ai_profile_id=request.ai_profile_id,
+        provider_api=request.provider_api,
+        proofread_mode=request.proofread_mode,
+        reasoning_enabled=request.reasoning_enabled,
+        temperature=request.temperature,
+        scope=request.scope,
+        chunk_size=request.chunk_size,
+    )

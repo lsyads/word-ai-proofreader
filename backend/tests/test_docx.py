@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from fastapi.testclient import TestClient
+from app.agents import trace as agent_trace
 from app.main import app
 from app.schemas import ProofreadIssue
 from app.services import docx as docx_service
@@ -20,6 +21,7 @@ ParagraphSpec: TypeAlias = str | tuple[str, str]
 
 def setup_function():
     docx_task_service.clear_tasks_for_tests()
+    agent_trace.clear_traces_for_tests()
 
 
 def make_docx(

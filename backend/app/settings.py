@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_DOCX_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "var" / "docx-results"
+DEFAULT_AGENT_TRACE_DIR = Path(__file__).resolve().parents[1] / "var" / "agent-traces"
 
 
 class Settings(BaseSettings):
@@ -28,10 +29,16 @@ class Settings(BaseSettings):
     backend_log_level: str = Field(default="INFO", alias="BACKEND_LOG_LEVEL")
     docx_output_dir: Path = Field(default=DEFAULT_DOCX_OUTPUT_DIR, alias="DOCX_OUTPUT_DIR")
     docx_retention_days: int = Field(default=7, alias="DOCX_RETENTION_DAYS")
+    agent_trace_dir: Path = Field(default=DEFAULT_AGENT_TRACE_DIR, alias="AGENT_TRACE_DIR")
 
     @field_validator("docx_output_dir")
     @classmethod
     def relative_docx_output_dir_uses_backend_root(cls, value: Path) -> Path:
+        return value if value.is_absolute() else Path(__file__).resolve().parents[1] / value
+
+    @field_validator("agent_trace_dir")
+    @classmethod
+    def relative_agent_trace_dir_uses_backend_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else Path(__file__).resolve().parents[1] / value
 
     @field_validator("docx_retention_days")

@@ -16,6 +16,7 @@ def test_settings_defaults():
     assert settings.backend_log_level == "INFO"
     assert settings.docx_output_dir.name == "docx-results"
     assert settings.docx_retention_days == 7
+    assert settings.agent_trace_dir.name == "agent-traces"
 
 
 def test_settings_parses_comma_separated_cors_origins():
@@ -44,3 +45,11 @@ def test_settings_resolves_relative_docx_output_dir_from_backend_root():
     assert settings.docx_output_dir.is_absolute()
     assert settings.docx_output_dir.name == "docx-results"
     assert settings.docx_output_dir.parent.name == "var"
+
+
+def test_settings_resolves_relative_agent_trace_dir_from_backend_root():
+    settings = Settings(AGENT_TRACE_DIR="var/agent-traces")
+
+    assert settings.agent_trace_dir.is_absolute()
+    assert settings.agent_trace_dir.name == "agent-traces"
+    assert settings.agent_trace_dir.parent.name == "var"

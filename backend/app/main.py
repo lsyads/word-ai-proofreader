@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.schemas import (
+    AgentRunTraceResponse,
     AIProfileResponse,
     ApplicationMode,
     BookInfo,
@@ -22,6 +23,8 @@ from app.schemas import (
     ProofreadResponse,
     SessionResponse,
 )
+from app.agents import trace as agent_trace
+from app.agents.service import AgentOptions, agent_runner
 import app.services.proofread as proofread_service
 from app.services import chunking
 from app.services import docx as docx_service
@@ -111,15 +114,20 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
     )
     _debug_log_json("proofread request body", request.model_dump())
     try:
-        issues = await proofread_service.proofread_text(
+        response = await agent_runner.proofread_selection(
             request.text,
             request.book,
-            session_id=request.session_id,
-            ai_profile_id=request.ai_profile_id,
-            provider_api=request.provider_api,
-            proofread_mode=request.proofread_mode,
-            reasoning_enabled=request.reasoning_enabled,
-            temperature=request.temperature,
+            options=AgentOptions(
+                session_id=request.session_id,
+                ai_profile_id=request.ai_profile_id,
+                provider_api=request.provider_api,
+                proofread_mode=request.proofread_mode,
+                reasoning_enabled=request.reasoning_enabled,
+                temperature=request.temperature,
+                scope="selection",
+                chunk_size=chunking.DEFAULT_CHUNK_SIZE,
+            ),
+            proofread_callable=proofread_service.proofread_text,
         )
     except AIProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -135,10 +143,9 @@ async def proofread(request: ProofreadRequest) -> ProofreadResponse:
 
     logger.info(
         "proofread request completed issue_count=%s located_issue_count=%s",
-        len(issues),
-        _count_located_issues(issues),
+        len(response.issues),
+        _count_located_issues(response.issues),
     )
-    response = ProofreadResponse(issues=issues)
     _debug_log_json("proofread response body", response.model_dump())
     return response
 
@@ -166,8 +173,21 @@ async def proofread_stream(request: ProofreadRequest) -> StreamingResponse:
         request.temperature,
     )
     _debug_log_json("proofread stream request body", request.model_dump())
+    run_id = agent_trace.create_run(
+        "selection_stream",
+        total_chunks=1,
+        metadata={
+            "session_id_suffix": request.session_id[-8:] if request.session_id else None,
+            "ai_profile_id": request.ai_profile_id or "default",
+            "provider_api": provider_api,
+            "proofread_mode": request.proofread_mode,
+            "reasoning_enabled": request.reasoning_enabled,
+            "temperature": request.temperature,
+            "scope": "selection",
+        },
+    )
     return StreamingResponse(
-        _proofread_event_stream(request),
+        _proofread_event_stream(request, run_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -196,7 +216,10 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
         proofread_service.resolve_provider_api(request.provider_api, request.ai_profile_id)
     except AIProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    response = await chunking.proofread_chunked(request)
+    response = await agent_runner.proofread_chunked_request(
+        request,
+        proofread_callable=proofread_service.proofread_text,
+    )
     logger.info(
         "chunked proofread request completed total_chunks=%s completed_chunks=%s failed_chunks=%s issue_count=%s",
         response.total_chunks,
@@ -206,6 +229,14 @@ async def proofread_chunked(request: ChunkedProofreadRequest) -> ChunkedProofrea
     )
     _debug_log_json("chunked proofread response body", response.model_dump())
     return response
+
+
+@app.get("/api/agent/runs/{run_id}/trace", response_model=AgentRunTraceResponse)
+async def get_agent_run_trace(run_id: str) -> AgentRunTraceResponse:
+    try:
+        return AgentRunTraceResponse.model_validate(agent_trace.get_trace(run_id).model_dump())
+    except agent_trace.AgentTraceNotFound as exc:
+        raise HTTPException(status_code=404, detail="Agent run trace not found") from exc
 
 
 @app.post("/api/proofread/tasks", response_model=ChunkedProofreadResult)
@@ -417,7 +448,15 @@ async def download_docx_proofread_result(task_id: str) -> FileResponse:
     )
 
 
-async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[str]:
+async def _proofread_event_stream(request: ProofreadRequest, run_id: str) -> AsyncIterator[str]:
+    node_id = agent_trace.start_node(run_id, "stream_proofread")
+    agent_trace.start_chunk(
+        run_id,
+        chunk_index=0,
+        chunk_start=0,
+        chunk_end=len(request.text),
+        chunk_len=len(request.text),
+    )
     try:
         stream_kwargs = {
             "session_id": request.session_id,
@@ -436,6 +475,7 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
             request.book,
             **stream_kwargs,
         ):
+            event.data["run_id"] = run_id
             if event.event == "result":
                 issues = event.data.get("issues", [])
                 logger.info(
@@ -444,7 +484,18 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
                     _count_located_issue_dicts(issues) if isinstance(issues, list) else 0,
                 )
                 _debug_log_json("proofread stream result body", event.data)
+                issue_count = len(issues) if isinstance(issues, list) else 0
+                agent_trace.finish_chunk(run_id, 0, status="succeeded", issue_count=issue_count)
+                agent_trace.update_run(
+                    run_id,
+                    status="succeeded",
+                    total_chunks=1,
+                    completed_chunks=1,
+                    failed_chunks=0,
+                    issue_count=issue_count,
+                )
             yield _format_sse(event.event, event.data)
+        agent_trace.finish_node(node_id, "succeeded")
     except (AIClientError, AIProfileError) as exc:
         logger.warning(
             "proofread stream failed text_len=%s session_id=%s error=%s",
@@ -453,7 +504,18 @@ async def _proofread_event_stream(request: ProofreadRequest) -> AsyncIterator[st
             exc,
             exc_info=True,
         )
-        error_data = {"message": str(exc)}
+        agent_trace.finish_chunk(run_id, 0, status="failed", issue_count=0, error_message=str(exc))
+        agent_trace.update_run(
+            run_id,
+            status="failed",
+            total_chunks=1,
+            completed_chunks=0,
+            failed_chunks=1,
+            issue_count=0,
+            error_message=str(exc),
+        )
+        agent_trace.finish_node(node_id, "failed", str(exc))
+        error_data = {"message": str(exc), "run_id": run_id}
         _debug_log_json("proofread stream error body", error_data)
         yield _format_sse("error", error_data)
 

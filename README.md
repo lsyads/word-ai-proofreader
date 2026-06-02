@@ -23,6 +23,7 @@
 - 结果处理：后端把 AI 输出转换为结构化 `issues[]`，过滤纯空白差异，并按 `original` 计算 `start/end/locator`。
 - Word 写回：当前选区审校完成后先展示结果，编辑筛选、勾选并确认后由插件写回批注或修订+批注；全书 `.docx` 由后端直接生成带批注或修订+批注的新文件，插件展示新文件名、保留期限和下载入口。
 - 结果保留：全书 `.docx` 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；历史记录里的下载入口在文件未过期且未被外部清理时可继续下载。
+- Agent trace：后端用 LangGraph 编排审校流程，普通审校、分块任务和 DOCX 任务都会生成 `run_id`；可通过 `/api/agent/runs/{run_id}/trace` 查看节点、chunk、耗时、错误和重试次数。
 - 历史记录：插件在本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；历史不保存完整正文或原始 DOCX。
 
 完整 API 契约见 [spec.md](spec.md)，通讯链路见 [docs/architecture.md](docs/architecture.md)。
@@ -53,6 +54,7 @@ BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 DOCX_OUTPUT_DIR=var/docx-results
 DOCX_RETENTION_DAYS=7
+AGENT_TRACE_DIR=var/agent-traces
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
@@ -68,6 +70,13 @@ AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_
 ```
 
 后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。Xiaomi MiMo 当前按官方 OpenAI-compatible Chat Completions 接入，profile 只声明 `supported_apis=["chat"]`，不启用 Responses。
+
+默认 SQLite 文件位置：
+
+- Agent trace：`backend/var/agent-traces/traces.sqlite3`，由 `AGENT_TRACE_DIR` 控制。
+- DOCX 下载索引：`backend/var/docx-results/results.sqlite3`，由 `DOCX_OUTPUT_DIR` 控制。
+
+这两个目录都在 `backend/var/` 下，默认不提交到 Git。
 
 ## 启动 oMLX 本地 AI 服务
 

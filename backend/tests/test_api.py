@@ -4,6 +4,7 @@ import asyncio
 from fastapi.testclient import TestClient
 
 import app.services.proofread as proofread_service
+from app.agents import trace as agent_trace
 from app.services import tasks as task_service
 from app.main import app
 from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
@@ -20,6 +21,7 @@ def setup_function():
     clear_sessions_for_tests()
     task_service.clear_tasks_for_tests()
     docx_task_service.clear_tasks_for_tests()
+    agent_trace.clear_traces_for_tests()
 
 
 def parse_sse_events(body: str):
@@ -152,6 +154,16 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
     assert issue["suggestion"]
     assert issue["start"] == 0
     assert isinstance(issue["end"], int)
+    assert payload["run_id"].startswith("agent_run_")
+
+    trace_response = client.get(f"/api/agent/runs/{payload['run_id']}/trace")
+    assert trace_response.status_code == 200
+    trace_payload = trace_response.json()
+    assert trace_payload["run_id"] == payload["run_id"]
+    assert trace_payload["status"] == "succeeded"
+    assert trace_payload["nodes"]
+    assert trace_payload["chunks"][0]["issue_count"] == 1
+    assert "这是一段需要审校的文本。" not in json.dumps(trace_payload, ensure_ascii=False)
 
 
 def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
@@ -683,7 +695,8 @@ def test_proofread_stream_does_not_require_session(monkeypatch):
     assert response.status_code == 200
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == ["status", "status", "result"]
-    assert events[2]["data"] == {"issues": []}
+    assert events[2]["data"]["issues"] == []
+    assert events[2]["data"]["run_id"].startswith("agent_run_")
 
 
 def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
@@ -706,7 +719,8 @@ def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
 
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == ["status", "status", "error"]
-    assert events[-1]["data"] == {"message": "AI provider returned HTTP 500"}
+    assert events[-1]["data"]["message"] == "AI provider returned HTTP 500"
+    assert events[-1]["data"]["run_id"].startswith("agent_run_")
 
 
 def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):

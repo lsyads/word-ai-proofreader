@@ -188,7 +188,7 @@ Response:
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
-启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后状态进入 `waiting_for_approval`，候选问题进入编辑确认队列。
+启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -196,7 +196,7 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
 
-以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`report_ready` 和 `error`。
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`report_ready` 和 `error`。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
 

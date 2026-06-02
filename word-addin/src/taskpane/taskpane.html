@@ -189,6 +189,21 @@
             <div id="debug-log" class="debug-log" aria-live="polite"></div>
         </section>
     </main>
+
+    <div id="confirm-dialog" class="confirm-dialog-overlay" hidden>
+        <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+            <h2 id="confirm-dialog-title" class="ms-font-m">请确认</h2>
+            <p id="confirm-dialog-description" class="confirm-dialog-description"></p>
+            <div class="confirm-dialog-actions">
+                <button id="confirm-dialog-cancel" class="ms-Button" type="button">
+                    <span class="ms-Button-label">取消</span>
+                </button>
+                <button id="confirm-dialog-submit" class="ms-Button ms-Button--primary" type="button">
+                    <span class="ms-Button-label">确认</span>
+                </button>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>

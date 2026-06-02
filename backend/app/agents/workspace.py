@@ -202,7 +202,12 @@ class AgentWorkspaceRunner:
 
             project_store.save_candidates(candidates)
             self._save_safe_memory(project_id, run_id, candidates)
-            status = "waiting_for_approval" if completed_chunks > 0 else "failed"
+            if completed_chunks == 0:
+                status = "failed"
+            elif candidates:
+                status = "waiting_for_approval"
+            else:
+                status = "succeeded"
             error_message = "All chunks failed to proofread." if status == "failed" else None
             project_store.update_run(
                 project_id,
@@ -215,14 +220,20 @@ class AgentWorkspaceRunner:
                 error_message=error_message,
             )
             project_store.update_project_status(project_id, status)
+            if status == "waiting_for_approval":
+                completion_event = "waiting_for_approval"
+                completion_message = "候选问题已进入编辑确认队列。"
+            elif status == "succeeded":
+                completion_event = "review_completed"
+                completion_message = "审校完成，未发现需要确认的问题。"
+            else:
+                completion_event = "error"
+                completion_message = error_message
             project_store.add_run_event(
                 project_id,
                 run_id,
-                "waiting_for_approval" if status == "waiting_for_approval" else "error",
-                {
-                    "candidate_count": len(candidates),
-                    "message": "候选问题已进入编辑确认队列。" if status == "waiting_for_approval" else error_message,
-                },
+                completion_event,
+                {"candidate_count": len(candidates), "message": completion_message},
             )
             refreshed_project = project_store.require_project(project_id)
             report = report_service.build_review_report(

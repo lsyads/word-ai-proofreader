@@ -196,7 +196,7 @@ class AgentRunTraceResponse(BaseModel):
     chunks: list[AgentChunkTraceResponse]
 
 
-V2ProjectStatus = Literal["created", "running", "waiting_for_approval", "written", "failed", "cancelled"]
+V2ProjectStatus = Literal["created", "running", "waiting_for_approval", "succeeded", "written", "failed", "cancelled"]
 V2RunStatus = Literal["queued", "running", "waiting_for_approval", "succeeded", "partial_succeeded", "failed", "cancelled"]
 V2CandidateStatus = Literal["pending", "approved", "rejected", "deferred", "written"]
 V2ProjectSourceType = Literal["selection", "docx"]
@@ -212,6 +212,7 @@ V2RunEventName = Literal[
     "candidate_merged",
     "candidate_evaluated",
     "waiting_for_approval",
+    "review_completed",
     "memory_updated",
     "writeback_completed",
     "report_ready",

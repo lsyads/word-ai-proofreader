@@ -80,6 +80,7 @@ let currentMemory: V2MemoryItem[] = [];
 let currentReport: V2ReviewReport | null = null;
 let currentSelectionText = "";
 let isBusy = false;
+let confirmDialogResolver: ((confirmed: boolean) => void) | null = null;
 
 Office.onReady((info) => {
   if (info.host !== Office.HostType.Word) {
@@ -109,6 +110,18 @@ function bindEvents() {
   getSelect("candidate-filter").onchange = renderCandidates;
   getSelect("candidate-pass-filter").onchange = renderCandidates;
   getInput("docx-file").onchange = updateDocxFileSummary;
+  getButton("confirm-dialog-cancel").onclick = () => resolveConfirmDialog(false);
+  getButton("confirm-dialog-submit").onclick = () => resolveConfirmDialog(true);
+  getElement("confirm-dialog").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      resolveConfirmDialog(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !getElement("confirm-dialog").hidden) {
+      resolveConfirmDialog(false);
+    }
+  });
 }
 
 function initializeDefaults() {
@@ -277,7 +290,11 @@ async function openRecentProject(projectId: string) {
 }
 
 async function deleteProject(projectId: string) {
-  if (!window.confirm("删除后会清理该项目的候选问题、报告和生成的 DOCX 文件。确认删除？")) {
+  const confirmed = await confirmAction(
+    "确认删除项目",
+    "删除后会清理该项目的候选问题、报告和生成的 DOCX 文件。这个操作不能撤销。"
+  );
+  if (!confirmed) {
     return;
   }
   const abortController = startBusy();
@@ -519,12 +536,15 @@ function renderWorkspace() {
 
 function renderProjectBadge() {
   const badge = getElement("project-badge");
-  const status = currentRun?.status || currentProject?.status || "not_started";
+  const status = getDisplayStatus(
+    currentRun?.status || currentProject?.status || "not_started",
+    currentCandidates.length
+  );
   badge.textContent = translateStatus(status);
   badge.className = "status-badge";
   if (status === "queued" || status === "running" || status === "waiting_for_approval") {
     badge.classList.add("is-running");
-  } else if (status === "written" || status === "succeeded") {
+  } else if (status === "written" || status === "succeeded" || status === "no_candidates") {
     badge.classList.add("is-success");
   } else if (status === "failed" || status === "cancelled") {
     badge.classList.add("is-error");
@@ -547,7 +567,9 @@ function renderProjectSummary() {
   container.innerHTML = `
     <span>${currentProject.source_type === "selection" ? "当前选区" : "全书 DOCX"}</span>
     <span>${escapeHtml(currentProject.book.title)}</span>
-    <span>${translateStatus(currentRun?.status || currentProject.status)}</span>
+    <span>${translateStatus(
+      getDisplayStatus(currentRun?.status || currentProject.status, currentCandidates.length)
+    )}</span>
     <span>候选 ${currentCandidates.length}</span>
     <span>已批准 ${approvedCount}</span>
     <span>${writtenCount > 0 ? `已写回 ${writtenCount}` : "未写回"}</span>
@@ -567,7 +589,9 @@ function renderRecentProjects() {
         <div class="project-item">
           <button class="project-open-button" data-open-project-id="${escapeHtml(project.project_id)}" type="button">
             <span class="item-title">${escapeHtml(project.book.title || project.source_filename)}</span>
-            <span class="item-meta">${translateStatus(project.source_type)} · ${translateStatus(project.status)} · 候选 ${project.candidate_count}</span>
+            <span class="item-meta">${translateStatus(project.source_type)} · ${translateStatus(
+              getDisplayStatus(project.status, project.candidate_count)
+            )} · 候选 ${project.candidate_count}</span>
           </button>
           <button class="ms-Button danger-button" data-delete-project-id="${escapeHtml(project.project_id)}" type="button">删除</button>
         </div>
@@ -645,7 +669,8 @@ function getPlanStepDisplayStatus(stepId: string, fallback: string): string {
     stepId === "human_approval" &&
     currentRun &&
     TERMINAL_RUN_STATUSES.has(currentRun.status) &&
-    currentRun.status !== "failed"
+    currentRun.status !== "failed" &&
+    currentCandidates.length > 0
   ) {
     return "running";
   }
@@ -703,7 +728,11 @@ function renderCandidates() {
   if (visible.length === 0) {
     renderEmpty(
       container,
-      currentCandidates.length === 0 ? "开始审校后显示候选问题。" : "当前筛选下没有候选问题。"
+      currentCandidates.length === 0 && isCompletedWithoutCandidates()
+        ? "审校完成，未发现需要确认的问题。"
+        : currentCandidates.length === 0
+          ? "开始审校后显示候选问题。"
+          : "当前筛选下没有候选问题。"
     );
     return;
   }
@@ -939,6 +968,9 @@ function candidateToProofreadIssue(candidate: V2CandidateIssue): ProofreadIssue 
 }
 
 function formatCandidateSummary(candidates: V2CandidateIssue[]): string {
+  if (candidates.length === 0 && isCompletedWithoutCandidates()) {
+    return "总数 0，未发现需要确认的问题。";
+  }
   const count = (status: V2CandidateStatus) =>
     candidates.filter((candidate) => candidate.status === status).length;
   return `总数 ${candidates.length}，待确认 ${count("pending")}，已批准 ${count("approved")}，已拒绝 ${count("rejected")}，已写回 ${count("written")}`;
@@ -966,6 +998,7 @@ function translateStatus(status: string): string {
     deferred: "暂缓",
     docx: "DOCX",
     failed: "失败",
+    no_candidates: "未发现问题",
     not_started: "未开始",
     partial_succeeded: "部分成功",
     pending: "待确认",
@@ -978,6 +1011,21 @@ function translateStatus(status: string): string {
     written: "已写回",
   };
   return labels[status] || status;
+}
+
+function getDisplayStatus(status: string, candidateCount: number): string {
+  if (
+    candidateCount === 0 &&
+    (status === "waiting_for_approval" || status === "succeeded" || status === "partial_succeeded")
+  ) {
+    return "no_candidates";
+  }
+  return status;
+}
+
+function isCompletedWithoutCandidates(): boolean {
+  const status = currentRun?.status || currentProject?.status;
+  return Boolean(status && getDisplayStatus(status, currentCandidates.length) === "no_candidates");
 }
 
 function translateMemoryKind(kind: string): string {
@@ -995,6 +1043,34 @@ function showMessage(message: string, type: "default" | "error" | "success" = "d
   const element = getElement("message");
   element.textContent = message;
   element.className = type === "default" ? "message" : `message is-${type}`;
+}
+
+function confirmAction(
+  title: string,
+  description: string,
+  confirmLabel = "确认"
+): Promise<boolean> {
+  if (confirmDialogResolver) {
+    confirmDialogResolver(false);
+  }
+  getElement("confirm-dialog-title").textContent = title;
+  getElement("confirm-dialog-description").textContent = description;
+  getButton("confirm-dialog-submit").textContent = confirmLabel;
+  const dialog = getElement("confirm-dialog");
+  dialog.hidden = false;
+  getButton("confirm-dialog-submit").focus();
+  return new Promise((resolve) => {
+    confirmDialogResolver = resolve;
+  });
+}
+
+function resolveConfirmDialog(confirmed: boolean) {
+  const resolver = confirmDialogResolver;
+  confirmDialogResolver = null;
+  getElement("confirm-dialog").hidden = true;
+  if (resolver) {
+    resolver(confirmed);
+  }
 }
 
 function getButton(id: string): HTMLButtonElement {

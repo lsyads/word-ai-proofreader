@@ -128,6 +128,7 @@ export type V2ProjectStatus =
   | "created"
   | "running"
   | "waiting_for_approval"
+  | "succeeded"
   | "written"
   | "failed"
   | "cancelled";

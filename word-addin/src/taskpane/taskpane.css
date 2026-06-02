@@ -428,3 +428,45 @@ body {
 .debug-log-item.is-error {
   border-left-color: #a4262c;
 }
+
+.confirm-dialog-overlay {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 16px;
+  position: fixed;
+  z-index: 1000;
+}
+
+.confirm-dialog-overlay[hidden] {
+  display: none;
+}
+
+.confirm-dialog {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  box-sizing: border-box;
+  max-width: 360px;
+  padding: 18px;
+  width: 100%;
+}
+
+.confirm-dialog h2 {
+  margin: 0;
+}
+
+.confirm-dialog-description {
+  color: #444;
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 18px;
+}

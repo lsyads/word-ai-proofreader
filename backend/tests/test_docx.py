@@ -655,6 +655,8 @@ def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Pa
     )
     assert response.status_code == 200
     task_id = response.json()["task_id"]
+    run_id = response.json()["run_id"]
+    assert run_id.startswith("agent_run_")
 
     with client.stream("GET", f"/api/proofread/docx/tasks/{task_id}/events") as stream:
         assert "completed" in stream.read().decode()
@@ -663,12 +665,88 @@ def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Pa
 
     final = client.get(f"/api/proofread/docx/tasks/{task_id}")
     assert final.status_code == 200
-    assert final.json()["output_filename"].endswith(".docx")
+    final_payload = final.json()
+    assert final_payload["run_id"] == run_id
+    assert final_payload["output_filename"].endswith(".docx")
+
+    trace_response = client.get(f"/api/agent/runs/{run_id}/trace")
+    assert trace_response.status_code == 200
+    trace_payload = trace_response.json()
+    assert trace_payload["run_id"] == run_id
+    assert any(node["node_name"] == "proofread_chunk" for node in trace_payload["nodes"])
+    assert any(node["node_name"] == "write_docx_output" for node in trace_payload["nodes"])
+    assert trace_payload["chunks"]
 
     download = client.get(f"/api/proofread/docx/tasks/{task_id}/download")
     assert download.status_code == 200
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert "word/document.xml" in archive.namelist()
+
+
+def test_docx_store_migrates_legacy_results_without_run_id(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "docx-results"))
+    root = docx_store.output_dir()
+    root.mkdir(parents=True)
+    legacy_file = root / "legacy-task" / "legacy.docx"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_bytes(b"legacy")
+    db_path = root / "results.sqlite3"
+    now = datetime.now(UTC)
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE docx_results (
+                task_id TEXT PRIMARY KEY,
+                source_filename TEXT NOT NULL,
+                output_filename TEXT NOT NULL,
+                application_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_chunks INTEGER NOT NULL,
+                completed_chunks INTEGER NOT NULL,
+                failed_chunks INTEGER NOT NULL,
+                issue_count INTEGER NOT NULL,
+                relative_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO docx_results (
+                task_id, source_filename, output_filename, application_mode, status,
+                total_chunks, completed_chunks, failed_chunks, issue_count,
+                relative_path, created_at, updated_at, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-task",
+                "源.docx",
+                "legacy.docx",
+                "comment",
+                "succeeded",
+                1,
+                1,
+                0,
+                0,
+                "legacy-task/legacy.docx",
+                now.isoformat(),
+                now.isoformat(),
+                (now + timedelta(days=7)).isoformat(),
+            ),
+        )
+        connection.commit()
+
+    stored = docx_store.get_result("legacy-task")
+
+    assert stored is not None
+    assert stored.run_id is None
+    assert docx_store.resolve_download("legacy-task")[1].run_id is None
 
 
 def test_docx_store_cleanup_deletes_only_expired_results(monkeypatch, tmp_path: Path):

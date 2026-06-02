@@ -2,6 +2,7 @@
 
 import {
   ApplicationMode,
+  AgentRunTrace,
   AIProfile,
   BookInfo,
   ChunkedProofreadIssue,
@@ -116,7 +117,7 @@ export async function requestChunkedProofreadTask(
   reasoningEnabled: boolean,
   temperature: number,
   onStatus: (status: ProofreadStatusEvent) => void,
-  onTaskCreated: (taskId: string | null) => void,
+  onTaskCreated: (taskId: string | null, runId: string | null) => void,
   signal: AbortSignal
 ): Promise<ChunkedProofreadResponse> {
   onStatus({
@@ -139,7 +140,7 @@ export async function requestChunkedProofreadTask(
     temperature,
     signal
   );
-  onTaskCreated(createdTask.task_id || null);
+  onTaskCreated(createdTask.task_id || null, createdTask.run_id || null);
   onStatus(taskSnapshotToStatus("queued", createdTask, "审校任务已创建。"));
 
   return waitForProofreadTask(createdTask.task_id as string, onStatus, signal);
@@ -163,7 +164,7 @@ export async function requestDocxProofreadTask(
   applicationMode: ApplicationMode,
   fallbackSummaryTruncateEnabled: boolean,
   onStatus: (status: ProofreadStatusEvent) => void,
-  onTaskCreated: (taskId: string | null) => void,
+  onTaskCreated: (taskId: string | null, runId: string | null) => void,
   signal: AbortSignal
 ): Promise<DocxProofreadResponse> {
   onStatus({ stage: "task", message: "正在上传 DOCX 并创建全书审校任务。" });
@@ -180,7 +181,7 @@ export async function requestDocxProofreadTask(
     fallbackSummaryTruncateEnabled,
     signal
   );
-  onTaskCreated(createdTask.task_id || null);
+  onTaskCreated(createdTask.task_id || null, createdTask.run_id || null);
   onStatus(docxTaskSnapshotToStatus("queued", createdTask, "DOCX 审校任务已创建。"));
   return waitForDocxProofreadTask(createdTask.task_id, onStatus, signal);
 }
@@ -261,6 +262,25 @@ export function getDocxDownloadUrl(taskId: string): string {
   return `${API_BASE_URL}/api/proofread/docx/tasks/${taskId}/download`;
 }
 
+export async function getAgentRunTrace(
+  runId: string,
+  signal: AbortSignal
+): Promise<AgentRunTrace> {
+  const response = await fetch(`${API_BASE_URL}/api/agent/runs/${encodeURIComponent(runId)}/trace`, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error("Trace 不存在或已清理。");
+    }
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as AgentRunTrace;
+}
+
 export function normalizeChunkedIssuesForScope(issues: ChunkedProofreadIssue[]): ProofreadIssue[] {
   return issues.map((issue) => ({
     ...issue,
@@ -279,6 +299,7 @@ export function taskSnapshotToStatus(
     stage,
     message,
     task_id: task.task_id || undefined,
+    run_id: task.run_id || undefined,
     status: task.status,
     scope: task.scope,
     total_chunks: task.total_chunks,
@@ -298,6 +319,7 @@ export function docxTaskSnapshotToStatus(
     stage,
     message,
     task_id: task.task_id,
+    run_id: task.run_id || undefined,
     status: task.status,
     scope: "document",
     total_chunks: task.total_chunks,
@@ -803,6 +825,12 @@ function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
     stage,
     message,
     task_id: typeof payload.task_id === "string" ? payload.task_id : undefined,
+    run_id:
+      typeof payload.run_id === "string"
+        ? payload.run_id
+        : payload.run_id === null
+          ? null
+          : undefined,
     status: isTaskState(payload.status) ? payload.status : undefined,
     scope: isProofreadScope(payload.scope) ? payload.scope : undefined,
     total_chunks: typeof payload.total_chunks === "number" ? payload.total_chunks : undefined,

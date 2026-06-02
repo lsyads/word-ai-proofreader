@@ -6,6 +6,7 @@ import {
   createSession,
   formatProgressResult,
   getAIProfiles,
+  getAgentRunTrace,
   getDocxDownloadUrl,
   getProofreadTask,
   isAbortError,
@@ -50,6 +51,7 @@ import {
 } from "./render";
 import {
   ApplicationMode,
+  AgentRunTrace,
   AIProfile,
   BookInfo,
   ControlsState,
@@ -108,6 +110,11 @@ let activeChunkStartedAtMs = 0;
 let activeChunkProgress: ProofreadStatusEvent | null = null;
 let currentTaskKind: "text" | "docx" = "text";
 let aiProfiles: AIProfile[] = [];
+let currentRunId: string | null = null;
+let currentTrace: AgentRunTrace | null = null;
+let currentTraceError: string | null = null;
+let isRefreshingTrace = false;
+let pendingTraceRefresh = false;
 
 Office.onReady((info) => {
   if (info.host === Office.HostType.Word) {
@@ -121,6 +128,8 @@ Office.onReady((info) => {
     getButton("clear-history").onclick = clearHistory;
     getButton("export-history").onclick = exportHistory;
     getButton("import-history").onclick = () => getInput("history-file").click();
+    getButton("refresh-trace").onclick = refreshCurrentTrace;
+    getButton("copy-run-id").onclick = copyCurrentRunId;
     getInput("history-file").onchange = importHistory;
     getInput("book-title").oninput = persistBookInfo;
     getTextArea("book-introduction").oninput = persistBookInfo;
@@ -165,6 +174,8 @@ async function clearCurrentResult() {
   await clearTrackedSelectionRange();
   pendingResult = null;
   issueReviewState = null;
+  setCurrentRunId(null);
+  renderAgentTraceSummary();
   stopChunkElapsedTimer();
   setBusy(false);
   resetProgress();
@@ -213,6 +224,8 @@ export async function proofreadSelection() {
   const abortController = new AbortController();
   currentAbortController = abortController;
   currentTaskId = null;
+  setCurrentRunId(null);
+  renderAgentTraceSummary();
   currentTaskKind = controls.scope === "document" ? "docx" : "text";
   pendingResult = null;
   issueReviewState = null;
@@ -257,11 +270,14 @@ export async function proofreadSelection() {
         controls.reasoningEnabled,
         controls.temperature,
         renderChunkedProgress,
-        (createdTaskId) => {
+        (createdTaskId, createdRunId) => {
           currentTaskId = createdTaskId;
+          setCurrentRunId(createdRunId);
+          void refreshCurrentTrace({ silent: true });
         },
         abortController.signal
       );
+      setCurrentRunId(chunkedResult.run_id || currentRunId);
       taskId = chunkedResult.task_id || null;
       totalChunks = chunkedResult.total_chunks;
       completedChunks = chunkedResult.completed_chunks;
@@ -285,6 +301,7 @@ export async function proofreadSelection() {
         },
         abortController.signal
       );
+      setCurrentRunId(proofreadResult.run_id || null);
       issues = proofreadResult.issues;
     }
 
@@ -294,6 +311,7 @@ export async function proofreadSelection() {
       book,
       scope: controls.scope,
       taskId,
+      runId: currentRunId,
       totalChunks,
       completedChunks,
       failedChunks,
@@ -318,6 +336,7 @@ export async function proofreadSelection() {
       applicationMode: controls.applicationMode,
       status,
     });
+    await refreshCurrentTrace({ silent: true });
     refreshHistory();
     updateActionButtons();
 
@@ -409,12 +428,15 @@ async function proofreadDocxFile(
     controls.applicationMode,
     controls.fallbackSummaryTruncateEnabled,
     renderChunkedProgress,
-    (createdTaskId) => {
+    (createdTaskId, createdRunId) => {
       currentTaskId = createdTaskId;
+      setCurrentRunId(createdRunId);
+      void refreshCurrentTrace({ silent: true });
       currentTaskKind = "docx";
     },
     abortController.signal
   );
+  setCurrentRunId(docxResult.run_id || currentRunId);
 
   pendingResult = {
     sessionId: currentSessionId || "",
@@ -424,6 +446,7 @@ async function proofreadDocxFile(
     book,
     scope: "document",
     taskId: docxResult.task_id,
+    runId: currentRunId,
     totalChunks: docxResult.total_chunks,
     completedChunks: docxResult.completed_chunks,
     failedChunks: docxResult.failed_chunks,
@@ -448,6 +471,7 @@ async function proofreadDocxFile(
     applicationMode: controls.applicationMode,
     status: docxResult.status,
   });
+  await refreshCurrentTrace({ silent: true });
   refreshHistory();
   updateActionButtons();
 
@@ -526,8 +550,10 @@ async function retryFailedChunks() {
         renderChunkedProgress,
         abortController.signal
       );
+      setCurrentRunId(retryResult.run_id || pendingResult.runId || currentRunId);
       pendingResult = {
         ...pendingResult,
+        runId: retryResult.run_id || pendingResult.runId,
         totalChunks: retryResult.total_chunks,
         completedChunks: retryResult.completed_chunks,
         failedChunks: retryResult.failed_chunks,
@@ -548,9 +574,11 @@ async function retryFailedChunks() {
         renderChunkedProgress,
         abortController.signal
       );
+      setCurrentRunId(retryResult.run_id || pendingResult.runId || currentRunId);
       const issues = normalizeChunkedIssuesForScope(retryResult.issues);
       pendingResult = {
         ...pendingResult,
+        runId: retryResult.run_id || pendingResult.runId,
         totalChunks: retryResult.total_chunks,
         completedChunks: retryResult.completed_chunks,
         failedChunks: retryResult.failed_chunks,
@@ -569,6 +597,7 @@ async function retryFailedChunks() {
       applicationMode: getApplicationMode(),
       status: taskState,
     });
+    await refreshCurrentTrace({ silent: true });
     refreshHistory();
     showMessage(
       remainingFailedChunks > 0
@@ -872,9 +901,201 @@ function cancelCurrentProofread() {
 }
 
 function renderChunkedProgress(progress: ProofreadStatusEvent) {
+  if (progress.run_id) {
+    setCurrentRunId(progress.run_id);
+  }
   showMessage(progress.message, "default");
   appendProgressStatus(progress);
   renderEmptyResult(formatProgressResult(updateChunkElapsedTimer(progress)));
+}
+
+function setCurrentRunId(runId: string | null | undefined) {
+  const normalizedRunId = runId || null;
+  if (currentRunId === normalizedRunId) {
+    updateTraceButtons();
+    return;
+  }
+
+  currentRunId = normalizedRunId;
+  currentTrace = null;
+  currentTraceError = null;
+  renderAgentTraceSummary();
+}
+
+async function refreshCurrentTrace(options: { silent?: boolean } = {}) {
+  if (!currentRunId) {
+    renderAgentTraceSummary();
+    return;
+  }
+
+  if (isRefreshingTrace) {
+    pendingTraceRefresh = true;
+    return;
+  }
+
+  isRefreshingTrace = true;
+  const requestedRunId = currentRunId;
+  updateTraceButtons();
+  if (!options.silent) {
+    showMessage("正在刷新 Agent trace。", "default");
+  }
+
+  try {
+    const trace = await getAgentRunTrace(requestedRunId, new AbortController().signal);
+    if (currentRunId !== requestedRunId) {
+      pendingTraceRefresh = true;
+      return;
+    }
+    currentTrace = trace;
+    currentTraceError = null;
+    renderAgentTraceSummary();
+    if (!options.silent) {
+      showMessage("Agent trace 已刷新。", "success");
+    }
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    if (currentRunId !== requestedRunId) {
+      pendingTraceRefresh = true;
+      return;
+    }
+    currentTrace = null;
+    currentTraceError = getErrorMessage(error);
+    renderAgentTraceSummary();
+    if (!options.silent) {
+      showMessage(`刷新 Agent trace 失败：${currentTraceError}`, "error");
+    }
+  } finally {
+    isRefreshingTrace = false;
+    updateTraceButtons();
+    if (pendingTraceRefresh) {
+      pendingTraceRefresh = false;
+      void refreshCurrentTrace({ silent: true });
+    }
+  }
+}
+
+function renderAgentTraceSummary() {
+  const container = getElement("agent-trace");
+  container.innerHTML = "";
+
+  if (!currentRunId) {
+    container.className = "trace-empty";
+    container.textContent = "暂无 Agent trace";
+    updateTraceButtons();
+    return;
+  }
+
+  if (currentTraceError) {
+    container.className = "trace-empty";
+    container.textContent = `${formatShortRunId(currentRunId)}：${currentTraceError}`;
+    updateTraceButtons();
+    return;
+  }
+
+  if (!currentTrace) {
+    container.className = "trace-empty";
+    container.textContent = `${formatShortRunId(currentRunId)}：尚未加载 Agent trace`;
+    updateTraceButtons();
+    return;
+  }
+
+  container.className = "trace-summary";
+  appendTraceLine(container, "trace-overview", formatTraceOverview(currentTrace));
+  appendTraceLine(container, "trace-detail", formatTraceChunkSummary(currentTrace));
+
+  const recentNodes = currentTrace.nodes.slice(-4);
+  if (recentNodes.length > 0) {
+    const list = document.createElement("div");
+    list.className = "trace-node-list";
+    recentNodes.forEach((node) => {
+      appendTraceLine(
+        list,
+        `trace-node ${node.status === "failed" ? "is-failed" : ""}`,
+        `${node.node_name} / ${formatTraceStatus(node.status)} / ${formatNullableElapsed(node.elapsed_seconds)}`
+      );
+    });
+    container.appendChild(list);
+  }
+
+  const failedChunks = currentTrace.chunks.filter((chunk) => chunk.status === "failed").slice(0, 3);
+  if (failedChunks.length > 0) {
+    const errors = document.createElement("div");
+    errors.className = "trace-error-list";
+    failedChunks.forEach((chunk) => {
+      appendTraceLine(
+        errors,
+        "trace-chunk-error",
+        `chunk ${chunk.chunk_index + 1} 失败：${chunk.error_message || "未返回失败原因"}`
+      );
+    });
+    container.appendChild(errors);
+  }
+
+  updateTraceButtons();
+}
+
+function appendTraceLine(parent: HTMLElement, className: string, text: string) {
+  const line = document.createElement("div");
+  line.className = className.trim();
+  line.textContent = text;
+  parent.appendChild(line);
+}
+
+function formatTraceOverview(trace: AgentRunTrace): string {
+  return `${formatShortRunId(trace.run_id)} / ${trace.flow} / ${formatTraceStatus(trace.status)} / 节点 ${trace.nodes.length} 个`;
+}
+
+function formatTraceChunkSummary(trace: AgentRunTrace): string {
+  const retryCount = trace.chunks.reduce((total, chunk) => total + chunk.retry_count, 0);
+  return `chunk ${trace.completed_chunks}/${trace.total_chunks}，失败 ${trace.failed_chunks}，重试 ${retryCount}，问题 ${trace.issue_count}`;
+}
+
+function formatShortRunId(runId: string): string {
+  return `run_id ...${runId.slice(-8)}`;
+}
+
+function formatTraceStatus(status: string): string {
+  const labels: Record<string, string> = {
+    queued: "排队中",
+    running: "运行中",
+    succeeded: "成功",
+    partial_succeeded: "部分成功",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return labels[status] || status;
+}
+
+function formatNullableElapsed(seconds?: number | null): string {
+  return typeof seconds === "number" ? `${seconds.toFixed(2)} 秒` : "耗时待定";
+}
+
+function updateTraceButtons() {
+  const hasRunId = Boolean(currentRunId);
+  getButton("refresh-trace").disabled = !hasRunId || isRefreshingTrace;
+  getButton("refresh-trace").querySelector(".ms-Button-label").textContent = isRefreshingTrace
+    ? "刷新中"
+    : "刷新 Trace";
+  getButton("copy-run-id").disabled = !hasRunId;
+}
+
+function copyCurrentRunId() {
+  if (!currentRunId) {
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = currentRunId;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  showMessage(copied ? "run_id 已复制。" : currentRunId, copied ? "success" : "default");
 }
 
 function updateChunkElapsedTimer(progress: ProofreadStatusEvent): ProofreadStatusEvent {
@@ -968,6 +1189,7 @@ function saveStoppedOrFailedHistory(input: {
     fallbackCount: 0,
     scope: input.controls.scope,
     taskId: currentTaskId,
+    runId: currentRunId,
     totalChunks: 0,
     completedChunks: 0,
     failedChunks: 0,
@@ -997,6 +1219,7 @@ async function preserveCurrentTaskSnapshotAfterStop(input: {
 
   try {
     const task = await getProofreadTask(currentTaskId, new AbortController().signal);
+    setCurrentRunId(task.run_id || currentRunId);
     const issues = normalizeChunkedIssuesForScope(task.issues);
     if (issues.length === 0) {
       return false;
@@ -1008,6 +1231,7 @@ async function preserveCurrentTaskSnapshotAfterStop(input: {
       book: input.book,
       scope: task.scope,
       taskId: task.task_id || currentTaskId,
+      runId: task.run_id || currentRunId,
       totalChunks: task.total_chunks,
       completedChunks: task.completed_chunks,
       failedChunks: task.failed_chunks,
@@ -1041,6 +1265,7 @@ function refreshHistory() {
 }
 
 function openHistoryEntry(entry: ProofreadHistoryEntry) {
+  setCurrentRunId(entry.runId || null);
   issueReviewState = {
     selectedIssueIds: entry.selectedIssueIds,
     filter: createDefaultFilterState(),
@@ -1058,6 +1283,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       },
       scope: "document",
       taskId: entry.taskId || null,
+      runId: entry.runId || null,
       totalChunks: entry.totalChunks,
       completedChunks: entry.completedChunks,
       failedChunks: entry.failedChunks,
@@ -1096,6 +1322,7 @@ function openHistoryEntry(entry: ProofreadHistoryEntry) {
       },
       scope: entry.scope,
       taskId: entry.taskId || null,
+      runId: entry.runId || null,
       totalChunks: entry.totalChunks,
       completedChunks: entry.completedChunks,
       failedChunks: entry.failedChunks,
@@ -1622,4 +1849,5 @@ function updateActionButtons() {
     : "下载审校后 Word";
   retryCurrentButton.disabled = !canRetryCurrent;
   retryFailedButton.disabled = !canRetryFailed;
+  updateTraceButtons();
 }

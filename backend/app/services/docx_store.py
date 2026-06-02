@@ -13,6 +13,7 @@ from app.settings import Settings, get_settings
 @dataclass(frozen=True)
 class StoredDocxResult:
     task_id: str
+    run_id: str | None
     source_filename: str
     output_filename: str
     application_mode: ApplicationMode
@@ -61,6 +62,7 @@ def build_expires_at(settings: Settings | None = None, now: datetime | None = No
 def save_result(
     *,
     task_id: str,
+    run_id: str | None = None,
     source_filename: str,
     output_filename: str,
     application_mode: ApplicationMode,
@@ -80,12 +82,13 @@ def save_result(
         connection.execute(
             """
             INSERT INTO docx_results (
-                task_id, source_filename, output_filename, application_mode, status,
+                task_id, run_id, source_filename, output_filename, application_mode, status,
                 total_chunks, completed_chunks, failed_chunks, issue_count,
                 relative_path, created_at, updated_at, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
+                run_id = excluded.run_id,
                 source_filename = excluded.source_filename,
                 output_filename = excluded.output_filename,
                 application_mode = excluded.application_mode,
@@ -100,6 +103,7 @@ def save_result(
             """,
             (
                 task_id,
+                run_id,
                 source_filename,
                 output_filename,
                 application_mode,
@@ -122,7 +126,7 @@ def get_result(task_id: str, settings: Settings | None = None) -> StoredDocxResu
     with _connect(settings) as connection:
         row = connection.execute(
             """
-            SELECT task_id, source_filename, output_filename, application_mode, status,
+            SELECT task_id, run_id, source_filename, output_filename, application_mode, status,
                    total_chunks, completed_chunks, failed_chunks, issue_count,
                    relative_path, created_at, updated_at, expires_at
             FROM docx_results
@@ -185,6 +189,7 @@ def _ensure_schema(settings: Settings | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS docx_results (
                 task_id TEXT PRIMARY KEY,
+                run_id TEXT,
                 source_filename TEXT NOT NULL,
                 output_filename TEXT NOT NULL,
                 application_mode TEXT NOT NULL,
@@ -200,24 +205,31 @@ def _ensure_schema(settings: Settings | None = None) -> None:
             )
             """
         )
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(docx_results)").fetchall()
+        }
+        if "run_id" not in columns:
+            connection.execute("ALTER TABLE docx_results ADD COLUMN run_id TEXT")
         connection.commit()
 
 
 def _row_to_result(row: tuple) -> StoredDocxResult:
     return StoredDocxResult(
         task_id=row[0],
-        source_filename=row[1],
-        output_filename=row[2],
-        application_mode=row[3],
-        status=row[4],
-        total_chunks=row[5],
-        completed_chunks=row[6],
-        failed_chunks=row[7],
-        issue_count=row[8],
-        relative_path=row[9],
-        created_at=row[10],
-        updated_at=row[11],
-        expires_at=row[12],
+        run_id=row[1],
+        source_filename=row[2],
+        output_filename=row[3],
+        application_mode=row[4],
+        status=row[5],
+        total_chunks=row[6],
+        completed_chunks=row[7],
+        failed_chunks=row[8],
+        issue_count=row[9],
+        relative_path=row[10],
+        created_at=row[11],
+        updated_at=row[12],
+        expires_at=row[13],
     )
 
 

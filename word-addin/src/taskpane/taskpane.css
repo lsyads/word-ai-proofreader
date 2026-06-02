@@ -144,6 +144,17 @@ body {
   margin-bottom: 10px;
 }
 
+.trace-actions {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 220px;
+}
+
+.trace-actions .ms-Button {
+  min-height: 30px;
+}
+
 .ms-Button {
   min-height: 36px;
 }
@@ -158,6 +169,8 @@ body {
 .progress-log,
 .history-empty,
 .history-list,
+.trace-empty,
+.trace-summary,
 .result-empty,
 .result-list {
   background: #fafafa;
@@ -174,9 +187,45 @@ body {
 }
 
 .progress-empty,
+.trace-empty,
 .history-empty,
 .result-empty {
   color: #616161;
+}
+
+.trace-empty,
+.trace-summary {
+  margin-top: 8px;
+  min-height: 52px;
+}
+
+.trace-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trace-overview {
+  color: #323130;
+  font-weight: 600;
+}
+
+.trace-detail,
+.trace-node,
+.trace-chunk-error {
+  color: #605e5c;
+}
+
+.trace-node-list,
+.trace-error-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trace-node.is-failed,
+.trace-chunk-error {
+  color: #a4262c;
 }
 
 .debug-log {

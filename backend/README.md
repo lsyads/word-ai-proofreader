@@ -114,11 +114,11 @@ AGENT_TRACE_DIR=var/agent-traces
 - `app/agents/service.py` 提供 `agent_runner`，供普通审校、同步分块、异步任务和 DOCX 任务调用。
 - `app/agents/trace.py` 负责 run/node/chunk trace 的 SQLite 记录和查询。
 
-V1 不是让 LLM 自主选择工具，也不是多 Agent 框架。现阶段的重点是把原有审校链路变成显式、可观测、可测试的单图工作流；业务逻辑仍在 `services/` 中复用。
+V1 不是让 LLM 自主选择工具，也不是多 Agent 框架。现阶段的重点是把原有审校链路变成显式、可观测、可测试的单图工作流；业务逻辑仍在 `services/` 中复用。异步文本任务和 DOCX 任务的内存队列、SSE、取消和重试仍由 task service 管理，chunk 审校、DOCX 写回和 trace 记录通过 `agent_runner` 进入 Agent 层。
 
 ### 查看一次审校 trace
 
-任意审校响应或 SSE 事件里拿到 `run_id` 后，可以查询：
+任意审校响应、任务快照或 SSE 事件里拿到 `run_id` 后，可以查询；Word 插件也会在“运行过程”面板内嵌展示 trace 摘要：
 
 ```bash
 curl --noproxy 127.0.0.1 \
@@ -139,7 +139,7 @@ trace 不保存完整正文、API Key、Authorization header 或 Bearer token。
 
 ```text
 backend/var/agent-traces/traces.sqlite3   # Agent run/node/chunk trace
-backend/var/docx-results/results.sqlite3  # DOCX 结果文件索引
+backend/var/docx-results/results.sqlite3  # DOCX 结果文件索引，含新任务 run_id
 ```
 
 对应环境变量：

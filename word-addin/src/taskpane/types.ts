@@ -178,6 +178,7 @@ export interface ProofreadHistoryEntry {
   applicationMode: ApplicationMode;
   scope: ProofreadScope;
   taskId?: string | null;
+  runId?: string | null;
   totalChunks: number;
   completedChunks: number;
   failedChunks: number;
@@ -221,6 +222,7 @@ export interface PendingProofreadResult {
   book: BookInfo;
   scope: ProofreadScope;
   taskId: string | null;
+  runId?: string | null;
   totalChunks: number;
   completedChunks: number;
   failedChunks: number;

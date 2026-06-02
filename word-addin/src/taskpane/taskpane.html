@@ -107,8 +107,19 @@
         </section>
 
         <section class="progress-panel">
-            <h2 class="ms-font-m">运行过程</h2>
+            <div class="panel-heading">
+                <h2 class="ms-font-m">运行过程</h2>
+                <div class="trace-actions">
+                    <button id="refresh-trace" class="ms-Button" type="button" disabled>
+                        <span class="ms-Button-label">刷新 Trace</span>
+                    </button>
+                    <button id="copy-run-id" class="ms-Button" type="button" disabled>
+                        <span class="ms-Button-label">复制 run_id</span>
+                    </button>
+                </div>
+            </div>
             <div id="progress" class="progress-empty">尚未开始审校</div>
+            <div id="agent-trace" class="trace-empty">暂无 Agent trace</div>
         </section>
 
         <section class="debug-panel">

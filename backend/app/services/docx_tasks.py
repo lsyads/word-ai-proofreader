@@ -501,6 +501,7 @@ def _save_output_file(task: DocxProofreadTask) -> None:
     task.expires_at = docx_store.build_expires_at()
     docx_store.save_result(
         task_id=task.task_id,
+        run_id=task.run_id,
         source_filename=task.request.filename,
         output_filename=output_filename,
         application_mode=task.request.application_mode,
@@ -538,7 +539,7 @@ def snapshot_task(task: DocxProofreadTask) -> DocxProofreadResult:
 def snapshot_stored_result(stored: docx_store.StoredDocxResult) -> DocxProofreadResult:
     return DocxProofreadResult(
         task_id=stored.task_id,
-        run_id=None,
+        run_id=stored.run_id,
         status=stored.status,
         total_chunks=stored.total_chunks,
         completed_chunks=stored.completed_chunks,

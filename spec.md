@@ -375,7 +375,7 @@ Response:
 
 ### `GET /api/proofread/docx/tasks/{task_id}`
 
-查询 DOCX 任务状态。终态成功或部分成功时，`output_filename`、`download_url`、`expires_at` 和 `retention_days` 非空。后端重启后，如果结果索引和文件仍未过期，该接口仍可返回终态快照。
+查询 DOCX 任务状态。终态成功或部分成功时，`output_filename`、`download_url`、`expires_at` 和 `retention_days` 非空。后端重启后，如果结果索引和文件仍未过期，该接口仍可返回终态快照；新生成的持久化结果会保留并返回 `run_id`，旧索引记录可能返回 `run_id: null`。
 
 ### `GET /api/proofread/docx/tasks/{task_id}/events`
 
@@ -399,7 +399,7 @@ Response:
 
 ### `GET /api/agent/runs/{run_id}/trace`
 
-查询一次 Agent 审校 run 的可观测 trace。`run_id` 会随普通审校响应、分块任务响应、DOCX 任务响应和任务 SSE 事件返回。trace 只记录节点和 chunk 元数据，不记录完整正文、API Key、Authorization 或 Bearer token。
+查询一次 Agent 审校 run 的可观测 trace。`run_id` 会随普通审校响应、分块任务响应、DOCX 任务响应和任务 SSE 事件返回；Word 插件可用该接口在“运行过程”面板展示 Agent trace 摘要。trace 只记录节点和 chunk 元数据，不记录完整正文、API Key、Authorization 或 Bearer token。若旧 DOCX 结果没有 `run_id`，或 trace SQLite 已被清理，该接口可能无法查询并返回 404。
 
 trace 默认保存到 `backend/var/agent-traces/traces.sqlite3`，可通过 `AGENT_TRACE_DIR` 修改目录。DOCX 下载索引使用独立 SQLite：`backend/var/docx-results/results.sqlite3`，可通过 `DOCX_OUTPUT_DIR` 修改目录。
 
@@ -501,7 +501,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
 - `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
 - 普通审校、流式审校、分块任务和 DOCX 全书任务都接受 `temperature`；越界返回 422，合法值会传给 AI provider。
-- 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
+- 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；新生成的 DOCX 持久化结果在服务重启后仍返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。

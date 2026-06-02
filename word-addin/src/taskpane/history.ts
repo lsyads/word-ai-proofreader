@@ -16,7 +16,7 @@ import {
 } from "./types";
 
 const HISTORY_STORAGE_KEY = "word-ai-proofreader-history-v2";
-const HISTORY_SCHEMA_VERSION = 6;
+const HISTORY_SCHEMA_VERSION = 7;
 const MAX_HISTORY_ENTRIES = 20;
 const MIN_ORIGINAL_LOCATOR_LENGTH = 6;
 const MAX_LOCATOR_OCCURRENCES = 3;
@@ -35,6 +35,7 @@ export function saveHistoryEntry(input: {
   failedCount?: number;
   scope: ProofreadScope;
   taskId?: string | null;
+  runId?: string | null;
   totalChunks: number;
   completedChunks: number;
   failedChunks: number;
@@ -83,6 +84,7 @@ export function saveHistoryEntry(input: {
     applicationMode: input.applicationMode,
     scope: input.scope,
     taskId: input.taskId,
+    runId: input.runId || null,
     totalChunks: input.totalChunks,
     completedChunks: input.completedChunks,
     failedChunks: input.failedChunks,
@@ -134,6 +136,7 @@ export function savePendingResultHistory(input: {
     failedCount: 0,
     scope: input.result.scope,
     taskId: input.result.taskId,
+    runId: input.result.runId,
     totalChunks: input.result.totalChunks,
     completedChunks: input.result.completedChunks,
     failedChunks: input.result.failedChunks,
@@ -182,6 +185,7 @@ export function saveAppliedResultHistory(input: {
     failedCount: input.summary.failedCount,
     scope: input.result.scope,
     taskId: input.result.taskId,
+    runId: input.result.runId,
     totalChunks: input.result.totalChunks,
     completedChunks: input.result.completedChunks,
     failedChunks: input.result.failedChunks,
@@ -452,6 +456,9 @@ function isHistoryEntry(value: unknown): value is ProofreadHistoryEntry {
     (typeof value.sourceFilename === "undefined" ||
       value.sourceFilename === null ||
       typeof value.sourceFilename === "string") &&
+    (typeof value.runId === "undefined" ||
+      value.runId === null ||
+      typeof value.runId === "string") &&
     (typeof value.outputFilename === "undefined" ||
       value.outputFilename === null ||
       typeof value.outputFilename === "string") &&

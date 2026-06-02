@@ -33,6 +33,7 @@ word-addin/
 - Responses 模式优先走 `/api/proofread/stream`，不可用时回退 `/api/proofread`；Chat 模式直接走 `/api/proofread`。
 - 当前选区审校结果先展示在任务窗格，不自动写回 Word；全书 `.docx` 完成后显示后端生成的新文件名和下载按钮。
 - 支持筛选、逐条勾选、批量选择、单条定位、批注模式和修订模式。
+- “运行过程”面板展示 SSE 进度，并可刷新 Agent trace 摘要、复制本次审校的 `run_id`。
 - 本地保存最近 20 条新 schema 历史，支持清空、导出 JSON 和导入 JSON。
 
 ## 本地运行

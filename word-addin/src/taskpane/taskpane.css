@@ -168,6 +168,20 @@ body {
   margin-top: 10px;
 }
 
+.pagination-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  margin-top: 10px;
+}
+
+.pagination-summary {
+  color: #605e5c;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .full-width-button {
   margin-top: 12px;
   width: 100%;

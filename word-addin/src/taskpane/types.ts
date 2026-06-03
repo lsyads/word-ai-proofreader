@@ -255,6 +255,12 @@ export interface V2CandidateIssue {
 export interface V2CandidateList {
   project_id: string;
   candidates: V2CandidateIssue[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  has_previous: boolean;
+  has_next: boolean;
 }
 
 export interface V2ApprovalDecision {

@@ -1,4 +1,4 @@
-/* global AbortSignal, File, Response, URLSearchParams, fetch */
+/* global AbortSignal, Blob, File, Response, URL, URLSearchParams, document, fetch, setTimeout */
 
 import {
   AIProfile,
@@ -298,10 +298,26 @@ export async function deleteV2Memory(
 
 export async function getV2Candidates(
   projectId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    passName?: string;
+  } = {}
 ): Promise<V2CandidateList> {
+  const params = new URLSearchParams({
+    page: String(options.page || 1),
+    page_size: String(options.pageSize || 20),
+  });
+  if (options.status && options.status !== "all") {
+    params.set("status", options.status);
+  }
+  if (options.passName && options.passName !== "all") {
+    params.set("pass_name", options.passName);
+  }
   const response = await fetch(
-    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates`,
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates?${params.toString()}`,
     {
       method: "GET",
       signal,
@@ -313,6 +329,30 @@ export async function getV2Candidates(
   }
 
   return (await response.json()) as V2CandidateList;
+}
+
+export async function decideAllPendingV2Candidates(
+  projectId: string,
+  status: "approved" | "rejected" | "deferred",
+  signal: AbortSignal
+): Promise<V2ApprovalDecisionResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates/bulk-decisions`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ApprovalDecisionResponse;
 }
 
 export async function decideV2Candidates(
@@ -412,6 +452,36 @@ export async function getV2ReviewReport(
 
 export function getV2DownloadUrl(projectId: string): string {
   return `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/download`;
+}
+
+export async function downloadV2ProjectDocx(
+  projectId: string,
+  filename: string,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetch(getV2DownloadUrl(projectId), {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  const blob = await response.blob();
+  triggerBlobDownload(blob, filename);
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {

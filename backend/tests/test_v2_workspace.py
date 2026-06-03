@@ -5,7 +5,9 @@ import zipfile
 from fastapi.testclient import TestClient
 
 from app.agents import workspace as workspace_agent
+from app.agents import local_rules
 from app.main import app
+from app.schemas import V2CandidateIssue
 from app.services import project_store
 
 
@@ -66,6 +68,37 @@ def get_completed_run(project_id: str, run_id: str) -> dict:
     assert run["status"] == "waiting_for_approval"
     assert run["candidate_count"] >= 1
     return run
+
+
+def make_candidate(
+    project_id: str,
+    index: int,
+    *,
+    status: str = "pending",
+    pass_name: str = "proofread_pass",
+) -> V2CandidateIssue:
+    now = f"2026-06-02T00:00:{index:02d}+00:00"
+    return V2CandidateIssue(
+        candidate_id=f"candidate_test_{index:02d}",
+        project_id=project_id,
+        run_id="v2_run_test",
+        status=status,
+        category="typo",
+        severity="medium",
+        original=f"原文{index}",
+        replacement=f"替换{index}",
+        suggestion=f"建议{index}",
+        evidence=f"证据{index}",
+        chunk_index=0,
+        global_start=index,
+        global_end=index + 2,
+        pass_name=pass_name,
+        confidence=0.8,
+        evidence_kind="locator",
+        needs_human_review=True,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def test_v2_project_run_approval_writeback_report_and_download():
@@ -151,6 +184,131 @@ def test_v2_project_run_approval_writeback_report_and_download():
     download_response = client.get(f"/api/v2/projects/{project_id}/download")
     assert download_response.status_code == 200
     assert download_response.content.startswith(b"PK")
+
+
+def test_v2_candidates_endpoint_paginates_and_filters():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    candidates = [
+        make_candidate(project_id, index, status="pending", pass_name="proofread_pass")
+        for index in range(1, 26)
+    ]
+    candidates.extend(
+        [
+            make_candidate(project_id, 26, status="approved", pass_name="style_rule_pass"),
+            make_candidate(project_id, 27, status="pending", pass_name="style_rule_pass"),
+        ]
+    )
+    project_store.save_candidates(candidates)
+
+    first_page = client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10})
+    assert first_page.status_code == 200
+    payload = first_page.json()
+    assert payload["page"] == 1
+    assert payload["page_size"] == 10
+    assert payload["total"] == 27
+    assert payload["total_pages"] == 3
+    assert payload["has_previous"] is False
+    assert payload["has_next"] is True
+    assert [item["candidate_id"] for item in payload["candidates"][:2]] == [
+        "candidate_test_01",
+        "candidate_test_02",
+    ]
+
+    second_page = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"page": 2, "page_size": 10},
+    ).json()
+    assert second_page["has_previous"] is True
+    assert second_page["candidates"][0]["candidate_id"] == "candidate_test_11"
+
+    filtered = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"status": "pending", "pass_name": "style_rule_pass"},
+    )
+    assert filtered.status_code == 200
+    filtered_payload = filtered.json()
+    assert filtered_payload["total"] == 1
+    assert filtered_payload["candidates"][0]["candidate_id"] == "candidate_test_27"
+
+
+def test_v2_bulk_decision_updates_all_pending_candidates():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 1, status="pending"),
+            make_candidate(project_id, 2, status="pending"),
+            make_candidate(project_id, 3, status="approved"),
+        ]
+    )
+
+    response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/bulk-decisions",
+        json={"status": "rejected"},
+    )
+    assert response.status_code == 200
+    assert response.json()["updated_count"] == 2
+    statuses = {
+        item["candidate_id"]: item["status"]
+        for item in client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10}).json()[
+            "candidates"
+        ]
+    }
+    assert statuses == {
+        "candidate_test_01": "rejected",
+        "candidate_test_02": "rejected",
+        "candidate_test_03": "approved",
+    }
+
+
+def test_local_rule_table_finds_all_matches_with_rule_metadata():
+    text = "AI 与人工智能并用。人工智能再次出现。这里有中文,逗号。还有中文,逗号！！中文(括号)。"
+    terminology = local_rules.run_terminology_rules(text)
+    style = local_rules.run_style_rules(text)
+
+    assert [match.original for match in terminology] == ["人工智能", "人工智能"]
+    assert all(match.rule_id == "terminology_variant_pair" for match in terminology)
+    assert all(match.pass_name == "terminology_pass" for match in terminology)
+    assert all(match.confidence == 0.68 for match in terminology)
+    assert all(match.evidence_kind == "rule" for match in terminology)
+    assert all(match.start < match.end for match in terminology)
+
+    style_rule_ids = [match.rule_id for match in style]
+    assert style_rule_ids.count("style_ascii_comma") == 2
+    assert "style_consecutive_punctuation" in style_rule_ids
+    assert "style_halfwidth_parenthesis" in style_rule_ids
+    assert all(match.pass_name == "style_rule_pass" for match in style)
+
+
+def test_local_consistency_rule_is_docx_scoped():
+    text = "第1章统计10页。第2章仍为10页。第3章记录20页。"
+    selection_matches = local_rules.run_consistency_rules(text, source_type="selection")
+    docx_matches = local_rules.run_consistency_rules(text, source_type="docx")
+
+    assert selection_matches == []
+    assert docx_matches
+    assert docx_matches[0].rule_id == "cross_chapter_numeric_consistency"
+    assert docx_matches[0].pass_name == "consistency_pass"
+    assert docx_matches[0].evidence_kind == "document_map"
+    assert docx_matches[0].start >= 0
+    assert docx_matches[0].start < docx_matches[0].end
 
 
 def test_v2_selection_project_run_writeback_conflict_and_mark_written():

@@ -362,6 +362,12 @@ class V2CandidateIssue(BaseModel):
 class V2CandidateListResponse(BaseModel):
     project_id: str
     candidates: list[V2CandidateIssue]
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1)
+    total: int = Field(default=0, ge=0)
+    total_pages: int = Field(default=0, ge=0)
+    has_previous: bool = False
+    has_next: bool = False
 
 
 class V2ApprovalDecision(BaseModel):
@@ -371,6 +377,10 @@ class V2ApprovalDecision(BaseModel):
 
 class V2ApprovalDecisionRequest(BaseModel):
     decisions: list[V2ApprovalDecision] = Field(..., min_length=1)
+
+
+class V2BulkApprovalDecisionRequest(BaseModel):
+    status: Literal["approved", "rejected", "deferred"]
 
 
 class V2ApprovalDecisionResponse(BaseModel):

@@ -413,19 +413,60 @@ def save_candidates(candidates: list[V2CandidateIssue], settings: Settings | Non
         connection.commit()
 
 
-def list_candidates(project_id: str, settings: Settings | None = None) -> list[V2CandidateIssue]:
+def list_candidates(
+    project_id: str,
+    settings: Settings | None = None,
+    *,
+    status: str | None = None,
+    pass_name: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[V2CandidateIssue]:
     _ensure_schema(settings)
-    with _connect(settings) as connection:
-        rows = connection.execute(
-            """
+    where = ["project_id = ?"]
+    params: list[Any] = [project_id]
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if pass_name:
+        where.append("json_extract(issue_json, '$.pass_name') = ?")
+        params.append(pass_name)
+    sql = f"""
             SELECT issue_json
             FROM v2_candidate_issues
-            WHERE project_id = ?
+            WHERE {" AND ".join(where)}
             ORDER BY created_at, candidate_id
-            """,
-            (project_id,),
-        ).fetchall()
+            """
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    with _connect(settings) as connection:
+        rows = connection.execute(sql, tuple(params)).fetchall()
     return [V2CandidateIssue.model_validate_json(row[0]) for row in rows]
+
+
+def count_candidates(
+    project_id: str,
+    settings: Settings | None = None,
+    *,
+    status: str | None = None,
+    pass_name: str | None = None,
+) -> int:
+    _ensure_schema(settings)
+    where = ["project_id = ?"]
+    params: list[Any] = [project_id]
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if pass_name:
+        where.append("json_extract(issue_json, '$.pass_name') = ?")
+        params.append(pass_name)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            f"SELECT COUNT(*) FROM v2_candidate_issues WHERE {' AND '.join(where)}",
+            tuple(params),
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def update_candidate_statuses(
@@ -459,6 +500,23 @@ def update_candidate_statuses(
 
 def mark_candidates_written(project_id: str, candidate_ids: list[str], settings: Settings | None = None) -> int:
     return update_candidate_statuses(project_id, {candidate_id: "written" for candidate_id in candidate_ids}, settings)
+
+
+def update_all_pending_candidates(
+    project_id: str,
+    status: str,
+    settings: Settings | None = None,
+) -> int:
+    _ensure_schema(settings)
+    require_project(project_id, settings)
+    pending = list_candidates(project_id, settings, status="pending")
+    if not pending:
+        return 0
+    return update_candidate_statuses(
+        project_id,
+        {candidate.candidate_id: status for candidate in pending},
+        settings,
+    )
 
 
 def save_memory_item(

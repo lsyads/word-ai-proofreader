@@ -186,6 +186,10 @@ Response:
 
 返回 V2.1 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。
 
+### 本地 pass 规则
+
+V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入完整正文记忆。默认规则包括：`terminology_variant_pair` 检查 `AI/人工智能`、`责任编辑/责编`、`DOCX/docx` 并用；`style_consecutive_punctuation` 检查连续标点；`style_ascii_comma` 检查中文语境英文逗号；`style_halfwidth_parenthesis` 检查中文正文半角括号；`cross_chapter_numeric_consistency` 仅在 DOCX 项目中提示重复数字/时间表达的一致性风险。规则候选必须携带 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end`，同一规则的多处非重叠命中都应生成候选，再由归并阶段去重。
+
 ### `POST /api/v2/projects/{project_id}/runs`
 
 启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
@@ -204,7 +208,7 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-查询候选问题队列。候选状态支持 `pending`、`approved`、`rejected`、`deferred`、`written`。V2.1 候选增加 `pass_name/confidence/evidence_kind/rule_id/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型和 evaluator 复核意见。
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.1 候选增加 `pass_name/confidence/evidence_kind/rule_id/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型和 evaluator 复核意见。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
@@ -223,6 +227,20 @@ Request:
 `status` 允许 `approved`、`rejected`、`deferred`。V2.2 插件默认只暴露批准和拒绝；`deferred` 保留给 API 兼容和后续更清晰的“稍后处理”设计。
 
 编辑决策会派生轻量项目记忆，例如已批准的问题类别；不会把完整正文写入长期记忆。
+
+### `POST /api/v2/projects/{project_id}/candidates/bulk-decisions`
+
+批量更新该项目所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“批准全部/拒绝全部”调用该接口，语义是处理所有待确认候选，而不是当前页。
+
+Request:
+
+```json
+{
+  "status": "approved"
+}
+```
+
+`status` 允许 `approved`、`rejected`、`deferred`。编辑决策会派生轻量项目记忆；不会把完整正文写入长期记忆。
 
 ### `GET /api/v2/projects/{project_id}/memory`
 

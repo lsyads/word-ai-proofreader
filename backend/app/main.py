@@ -24,7 +24,9 @@ from app.schemas import (
     SessionResponse,
     V2ApprovalDecisionRequest,
     V2ApprovalDecisionResponse,
+    V2BulkApprovalDecisionRequest,
     V2CandidateListResponse,
+    V2CandidateStatus,
     V2DocumentMapResponse,
     V2MemoryCreateRequest,
     V2MemoryListResponse,
@@ -397,10 +399,35 @@ async def v2_run_events(project_id: str, run_id: str) -> StreamingResponse:
 
 
 @app.get("/api/v2/projects/{project_id}/candidates", response_model=V2CandidateListResponse)
-async def get_v2_candidates(project_id: str) -> V2CandidateListResponse:
+async def get_v2_candidates(
+    project_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    status: V2CandidateStatus | None = Query(default=None),
+    pass_name: str | None = Query(default=None, min_length=1),
+) -> V2CandidateListResponse:
     try:
         project_store.require_project(project_id)
-        return V2CandidateListResponse(project_id=project_id, candidates=project_store.list_candidates(project_id))
+        total = project_store.count_candidates(project_id, status=status, pass_name=pass_name)
+        total_pages = (total + page_size - 1) // page_size if total else 0
+        offset = (page - 1) * page_size
+        candidates = project_store.list_candidates(
+            project_id,
+            status=status,
+            pass_name=pass_name,
+            limit=page_size,
+            offset=offset,
+        )
+        return V2CandidateListResponse(
+            project_id=project_id,
+            candidates=candidates,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages,
+            has_previous=page > 1 and total > 0,
+            has_next=page < total_pages,
+        )
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
 
@@ -420,6 +447,24 @@ async def decide_v2_candidates(project_id: str, request: V2ApprovalDecisionReque
         )
     except project_store.V2CandidateNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/candidates/bulk-decisions", response_model=V2ApprovalDecisionResponse)
+async def decide_all_pending_v2_candidates(
+    project_id: str,
+    request: V2BulkApprovalDecisionRequest,
+) -> V2ApprovalDecisionResponse:
+    try:
+        updated_count = project_store.update_all_pending_candidates(project_id, request.status)
+        if updated_count > 0:
+            _refresh_v2_memory_from_decisions(project_id)
+        return V2ApprovalDecisionResponse(
+            project_id=project_id,
+            updated_count=updated_count,
+            candidates=project_store.list_candidates(project_id),
+        )
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
 

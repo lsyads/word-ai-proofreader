@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from dataclasses import dataclass
 
-from app.agents import memory, planner
+from app.agents import local_rules, memory, planner
 from app.schemas import (
     BookInfo,
     ChunkedProofreadIssue,
@@ -350,32 +349,10 @@ class AgentWorkspaceRunner:
     ) -> list[V2CandidateIssue]:
         project_store.update_run(project.project_id, run_id, status="running", stage="terminology_pass")
         project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "terminology_pass"})
-        candidates: list[V2CandidateIssue] = []
-        pairs = [("AI", "人工智能"), ("责任编辑", "责编"), ("DOCX", "docx")]
-        for left, right in pairs:
-            if left in prepared.source_text and right in prepared.source_text:
-                original = right
-                start = prepared.source_text.find(original)
-                issue = _rule_issue(
-                    category="consistency",
-                    severity="medium",
-                    original=original,
-                    suggestion=f"发现“{left}”与“{right}”并用，请确认本书术语或称谓是否统一。",
-                    start=start,
-                    rule_id="terminology_variant_pair",
-                )
-                candidates.append(
-                    _candidate_from_issue(
-                        project.project_id,
-                        run_id,
-                        issue,
-                        prepared.source_text,
-                        pass_name="terminology_pass",
-                        confidence=0.68,
-                        evidence_kind="rule",
-                        rule_id="terminology_variant_pair",
-                    )
-                )
+        candidates = [
+            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
+            for match in local_rules.run_terminology_rules(prepared.source_text)
+        ]
         for candidate in candidates:
             self._add_candidate_found_event(candidate)
         project_store.add_run_event(
@@ -394,37 +371,10 @@ class AgentWorkspaceRunner:
     ) -> list[V2CandidateIssue]:
         project_store.update_run(project.project_id, run_id, status="running", stage="style_rule_pass")
         project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "style_rule_pass"})
-        rules = [
-            ("style_consecutive_punctuation", re.compile(r"[。！？!?]{2,}"), "连续标点可能不符合出版体例，请核对。"),
-            ("style_ascii_comma", re.compile(r"[\u4e00-\u9fff],[\u4e00-\u9fff]"), "中文语境中出现英文逗号，请确认是否应改为中文逗号。"),
-            ("style_halfwidth_parenthesis", re.compile(r"[\u4e00-\u9fff]\([^)]+\)"), "中文正文中的半角括号可能不符合体例，请核对。"),
+        candidates = [
+            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
+            for match in local_rules.run_style_rules(prepared.source_text)
         ]
-        candidates: list[V2CandidateIssue] = []
-        for rule_id, pattern, suggestion in rules:
-            match = pattern.search(prepared.source_text)
-            if not match:
-                continue
-            original = match.group(0)
-            issue = _rule_issue(
-                category="style",
-                severity="low",
-                original=original,
-                suggestion=suggestion,
-                start=match.start(),
-                rule_id=rule_id,
-            )
-            candidates.append(
-                _candidate_from_issue(
-                    project.project_id,
-                    run_id,
-                    issue,
-                    prepared.source_text,
-                    pass_name="style_rule_pass",
-                    confidence=0.74,
-                    evidence_kind="rule",
-                    rule_id=rule_id,
-                )
-            )
         for candidate in candidates:
             self._add_candidate_found_event(candidate)
         project_store.add_run_event(
@@ -448,32 +398,13 @@ class AgentWorkspaceRunner:
             "pass_started",
             {"pass_name": "consistency_pass", "scope": project.source_type},
         )
-        candidates: list[V2CandidateIssue] = []
-        numeric_tokens = re.findall(r"\d+(?:\.\d+)?(?:年|月|日|%|％|页|章|节)?", prepared.source_text)
-        repeated_numbers = sorted({token for token in numeric_tokens if numeric_tokens.count(token) > 1})
-        if project.source_type == "docx" and len(numeric_tokens) >= 3 and repeated_numbers:
-            original = repeated_numbers[0]
-            start = prepared.source_text.find(original)
-            issue = _rule_issue(
-                category="consistency",
-                severity="medium",
-                original=original,
-                suggestion="全书出现多个数字/时间表达，请结合上下文核对统计口径、单位和前后一致性。",
-                start=start,
-                rule_id="cross_chapter_numeric_consistency",
+        candidates = [
+            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
+            for match in local_rules.run_consistency_rules(
+                prepared.source_text,
+                source_type=project.source_type,
             )
-            candidates.append(
-                _candidate_from_issue(
-                    project.project_id,
-                    run_id,
-                    issue,
-                    prepared.source_text,
-                    pass_name="consistency_pass",
-                    confidence=0.62,
-                    evidence_kind="document_map",
-                    rule_id="cross_chapter_numeric_consistency",
-                )
-            )
+        ]
         project_store.add_run_event(
             project.project_id,
             run_id,
@@ -635,6 +566,33 @@ def _candidate_from_issue(
         evaluation_note=None,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _candidate_from_local_rule(
+    project_id: str,
+    run_id: str,
+    match: local_rules.LocalRuleMatch,
+    document_text: str,
+) -> V2CandidateIssue:
+    issue = _rule_issue(
+        category=match.category,
+        severity=match.severity,
+        original=match.original,
+        suggestion=match.suggestion,
+        start=match.start,
+        rule_id=match.rule_id,
+    )
+    issue.global_end = match.end
+    return _candidate_from_issue(
+        project_id,
+        run_id,
+        issue,
+        document_text,
+        pass_name=match.pass_name,
+        confidence=match.confidence,
+        evidence_kind=match.evidence_kind,
+        rule_id=match.rule_id,
     )
 
 

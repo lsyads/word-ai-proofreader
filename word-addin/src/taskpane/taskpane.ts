@@ -1,1058 +1,1273 @@
-/* global AbortController, Office, clearInterval, clearTimeout, localStorage, setInterval, setTimeout */
+/* global AbortController, AbortSignal, File, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Office, document, localStorage, window */
 
 import {
-  cancelProofreadTask,
   createSession,
-  formatProgressResult,
-  getProofreadTask,
-  isAbortError,
-  normalizeChunkedIssuesForScope,
-  requestChunkedProofreadTask,
-  requestProofread,
-  retryCurrentProofreadChunk,
-  retryFailedProofreadChunks,
+  createV2Project,
+  createV2SelectionProject,
+  decideAllPendingV2Candidates,
+  decideV2Candidates,
+  deleteV2Project,
+  downloadV2ProjectDocx,
+  getAIProfiles,
+  getV2Candidates,
+  getV2DocumentMap,
+  getV2Memory,
+  getV2Project,
+  getV2ReviewPlan,
+  getV2ReviewReport,
+  getV2Run,
+  getV2RunTrace,
+  listV2Projects,
+  markV2CandidatesWritten,
+  runV2Project,
+  writebackV2Project,
 } from "./api";
 import { appendDebugLog, clearDebugLog } from "./debug";
 import {
-  clearHistoryEntries,
-  exportHistoryEntries,
-  getHistoryEntries,
-  importHistoryEntries,
-  saveAppliedResultHistory,
-  saveHistoryEntry,
-  savePendingResultHistory,
-} from "./history";
-import {
-  appendProgressStatus,
-  BulkSelectionAction,
-  createDefaultFilterState,
-  formatApplyButtonLabel,
-  formatComment,
-  formatCompletionMessage,
-  getButton,
-  getErrorMessage,
-  getInput,
-  getSelect,
-  getTextArea,
-  renderEmptyResult,
-  renderHistory,
-  renderHistoryEntry,
-  renderResult,
-  resetProgress,
-  showMessage,
-} from "./render";
-import {
+  AIProfile,
   ApplicationMode,
   BookInfo,
-  ControlsState,
-  IssueFilterState,
-  IssueReviewState,
-  PendingProofreadResult,
-  ProofreadHistoryEntry,
   ProofreadIssue,
-  ProofreadStatusEvent,
-  ProofreadMode,
-  ProofreadScope,
   ProviderAPI,
-  SELECTION_CHUNK_THRESHOLD,
-  TaskState,
+  V2ApprovalDecision,
+  V2CandidateIssue,
+  V2CandidateStatus,
+  V2DocumentMap,
+  V2MemoryItem,
+  V2Project,
+  V2ReviewPlan,
+  V2ReviewReport,
+  V2Run,
+  V2RunTrace,
 } from "./types";
 import {
   applyIssuesToScope,
+  clearTrackedSelectionRange,
   ensureWordCommentSupport,
-  getDocumentBodyText,
   getSelectedText,
   selectIssueInScope,
 } from "./word";
 
-const PROVIDER_API_STORAGE_KEY = "word-ai-proofreader-provider-api-v2";
-const PROOFREAD_MODE_STORAGE_KEY = "word-ai-proofreader-mode-v2";
-const REASONING_ENABLED_STORAGE_KEY = "word-ai-proofreader-reasoning-enabled-v2";
-const APPLICATION_MODE_STORAGE_KEY = "word-ai-proofreader-application-mode-v2";
-const PROOFREAD_SCOPE_STORAGE_KEY = "word-ai-proofreader-scope-v2";
-const BOOK_TITLE_STORAGE_KEY = "word-ai-proofreader-book-title-v2";
-const BOOK_INTRODUCTION_STORAGE_KEY = "word-ai-proofreader-book-introduction-v2";
-const CLEAR_HISTORY_CONFIRM_MS = 4000;
-const CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS = 120;
+type SourceType = "selection" | "docx";
+
+const DEFAULT_REVIEW_GOAL = "完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。";
+const DEFAULT_V2_TEMPERATURE = 0.6;
+const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
+const LAST_PROJECT_ID_KEY = "docpilot_v2_last_project_id";
+const TERMINAL_RUN_STATUSES = new Set([
+  "waiting_for_approval",
+  "succeeded",
+  "partial_succeeded",
+  "failed",
+  "cancelled",
+]);
+const INTERNAL_MEMORY_KEYS = new Set([
+  "observed_categories",
+  "observed_passes",
+  "observed_severities",
+]);
 
 let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
-let currentTaskId: string | null = null;
-let pendingResult: PendingProofreadResult | null = null;
-let issueReviewState: IssueReviewState | null = null;
-let clearHistoryConfirmTimer: number | null = null;
-let isClearHistoryArmed = false;
-let taskState: TaskState = "idle";
-let isApplyingToWord = false;
-let isRetryingCurrentChunk = false;
-let isRetryingFailedChunks = false;
-let activeChunkTimer: number | null = null;
-let activeChunkStartedAtMs = 0;
-let activeChunkProgress: ProofreadStatusEvent | null = null;
+let aiProfiles: AIProfile[] = [];
+let recentProjects: V2Project[] = [];
+let currentProject: V2Project | null = null;
+let currentDocumentMap: V2DocumentMap | null = null;
+let currentPlan: V2ReviewPlan | null = null;
+let currentRun: V2Run | null = null;
+let currentTrace: V2RunTrace | null = null;
+let currentCandidates: V2CandidateIssue[] = [];
+let currentMemory: V2MemoryItem[] = [];
+let currentReport: V2ReviewReport | null = null;
+let currentSelectionText = "";
+let isBusy = false;
+let isDownloadingDocx = false;
+let candidatePage = 1;
+const candidatePageSize = 20;
+let candidateTotal = 0;
+let candidateTotalPages = 0;
+let candidateHasPrevious = false;
+let candidateHasNext = false;
+let confirmDialogResolver: ((confirmed: boolean) => void) | null = null;
 
 Office.onReady((info) => {
-  if (info.host === Office.HostType.Word) {
-    getButton("proofread").onclick = proofreadSelection;
-    getButton("apply-to-word").onclick = applyPendingResultToWord;
-    getButton("retry-current-chunk").onclick = retryCurrentChunk;
-    getButton("retry-failed-chunks").onclick = retryFailedChunks;
-    getButton("new-conversation").onclick = clearCurrentResult;
-    getButton("clear-debug-log").onclick = clearDebugLog;
-    getButton("clear-history").onclick = clearHistory;
-    getButton("export-history").onclick = exportHistory;
-    getButton("import-history").onclick = () => getInput("history-file").click();
-    getInput("history-file").onchange = importHistory;
-    getInput("book-title").oninput = persistBookInfo;
-    getTextArea("book-introduction").oninput = persistBookInfo;
-    getSelect("provider-api").onchange = persistControls;
-    getSelect("proofread-mode").onchange = persistControls;
-    getInput("reasoning-enabled").onchange = persistControls;
-    getSelect("application-mode").onchange = persistControls;
-    getSelect("proofread-scope").onchange = persistControls;
-    initializeControls();
-    refreshHistory();
-    updateActionButtons();
-    initializeSession();
+  if (info.host !== Office.HostType.Word) {
+    getButton("start-review").disabled = true;
+    showMessage("请在 Microsoft Word 任务窗格中使用此插件。", "error");
     return;
   }
 
-  getButton("proofread").disabled = true;
-  getButton("new-conversation").disabled = true;
-  showMessage("请在 Microsoft Word 任务窗格中使用此插件。", "error");
+  bindEvents();
+  initializeDefaults();
+  initializeSession();
+  initializeAIProfiles();
+  initializeProjects();
+  renderWorkspace();
 });
+
+function bindEvents() {
+  getButton("start-review").onclick = startReview;
+  getButton("refresh-projects").onclick = refreshProjects;
+  getButton("refresh-trace").onclick = refreshTrace;
+  getButton("approve-all").onclick = () => decidePendingCandidates("approved");
+  getButton("reject-all").onclick = () => decidePendingCandidates("rejected");
+  getButton("writeback").onclick = writebackApproved;
+  getButton("download-docx").onclick = downloadDocx;
+  getButton("clear-debug-log").onclick = clearDebugLog;
+  getSelect("source-type").onchange = handleSourceTypeChange;
+  getSelect("candidate-filter").onchange = handleCandidateFilterChange;
+  getSelect("candidate-pass-filter").onchange = handleCandidateFilterChange;
+  getButton("candidate-prev-page").onclick = () => changeCandidatePage(candidatePage - 1);
+  getButton("candidate-next-page").onclick = () => changeCandidatePage(candidatePage + 1);
+  getInput("docx-file").onchange = updateDocxFileSummary;
+  getButton("confirm-dialog-cancel").onclick = () => resolveConfirmDialog(false);
+  getButton("confirm-dialog-submit").onclick = () => resolveConfirmDialog(true);
+  getElement("confirm-dialog").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      resolveConfirmDialog(false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !getElement("confirm-dialog").hidden) {
+      resolveConfirmDialog(false);
+    }
+  });
+}
+
+function initializeDefaults() {
+  getTextArea("review-goal").value = DEFAULT_REVIEW_GOAL;
+  getSelect("proofread-mode").value = "thinking";
+  getInput("temperature").value = String(DEFAULT_V2_TEMPERATURE);
+  getSelect("application-mode").value = "revision";
+  getInput("fallback-summary-truncate-enabled").checked = false;
+  handleSourceTypeChange();
+}
 
 async function initializeSession() {
   try {
     const session = await createSession();
     currentSessionId = session.session_id;
-    showMessage("已创建审校会话，请选择 Word 文本开始审校。", "default");
+    showMessage("已准备好审校会话。", "default");
   } catch (error) {
-    showMessage(`创建审校会话失败：${getErrorMessage(error)}`, "error");
+    showMessage(`创建会话失败：${getErrorMessage(error)}`, "error");
   }
 }
 
-async function clearCurrentResult() {
-  if (taskState === "running") {
-    cancelCurrentProofread();
-  }
-
-  pendingResult = null;
-  issueReviewState = null;
-  stopChunkElapsedTimer();
-  setBusy(false);
-  resetProgress();
-  renderEmptyResult("尚未开始审校");
-  updateActionButtons();
-
+async function initializeAIProfiles() {
   try {
-    const session = await createSession();
-    currentSessionId = session.session_id;
-    taskState = "idle";
-    showMessage("已清空当前结果，请选择 Word 文本开始审校。", "success");
+    aiProfiles = await getAIProfiles();
+    const select = getSelect("ai-profile");
+    select.innerHTML = aiProfiles
+      .map(
+        (profile) =>
+          `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)} · ${escapeHtml(profile.model)}</option>`
+      )
+      .join("");
+    const preferred = findPreferredAIProfile(aiProfiles);
+    if (preferred) {
+      select.value = preferred.id;
+      getSelect("provider-api").value = preferred.default_api;
+    }
   } catch (error) {
-    taskState = "failed";
-    showMessage(`清空当前结果失败：${getErrorMessage(error)}`, "error");
+    appendDebugLog("warn", "加载 AI 配置失败", { error: getErrorMessage(error) });
   }
 }
 
-export async function proofreadSelection() {
-  if (taskState === "running") {
-    showMessage("正在停止审校，当前分块完成后结束。", "default");
-    cancelCurrentProofread();
-    return;
-  }
+function findPreferredAIProfile(profiles: AIProfile[]): AIProfile | undefined {
+  const normalized = PREFERRED_AI_PROFILE.toLowerCase();
+  return (
+    profiles.find((profile) => profile.id.toLowerCase().includes(normalized)) ||
+    profiles.find((profile) => profile.model.toLowerCase().includes(normalized)) ||
+    profiles.find((profile) => profile.label.toLowerCase().includes(normalized)) ||
+    profiles.find((profile) => profile.configured) ||
+    profiles[0]
+  );
+}
 
+async function initializeProjects() {
+  const abortController = new AbortController();
+  try {
+    await loadRecentProjects(abortController.signal);
+    const lastProjectId = localStorage.getItem(LAST_PROJECT_ID_KEY);
+    if (lastProjectId && recentProjects.some((project) => project.project_id === lastProjectId)) {
+      await loadProject(lastProjectId, abortController.signal);
+      showMessage("已恢复最近审校项目。", "success");
+    }
+  } catch (error) {
+    appendDebugLog("warn", "加载最近项目失败", { error: getErrorMessage(error) });
+  } finally {
+    renderWorkspace();
+  }
+}
+
+async function startReview() {
+  const abortController = startBusy();
+  try {
+    if (!currentProject) {
+      await createProjectForCurrentInputs(abortController.signal);
+    }
+    if (!currentProject) {
+      throw new Error("审校项目创建失败。");
+    }
+    await runCurrentProject(abortController.signal);
+    showMessage("审校完成，请确认候选问题。", "success");
+  } catch (error) {
+    showMessage(`审校失败：${getErrorMessage(error)}`, "error");
+    appendDebugLog("error", "V2.2 审校失败", { error: getErrorMessage(error) });
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function createProjectForCurrentInputs(signal: AbortSignal) {
   const book = getValidatedBookInfo();
   if (!book) {
+    throw new Error("请先填写书名。");
+  }
+  const reviewGoal = getTextArea("review-goal").value.trim() || DEFAULT_REVIEW_GOAL;
+  const sourceType = getSourceType();
+  resetProjectState();
+  if (sourceType === "selection") {
+    currentSelectionText = await getSelectedText();
+    currentProject = await createV2SelectionProject(
+      currentSelectionText,
+      book,
+      reviewGoal,
+      currentSessionId,
+      signal
+    );
+  } else {
+    await clearTrackedSelectionRange();
+    const file = getDocxFile();
+    if (!file) {
+      throw new Error("请先选择一个 .docx 文件。");
+    }
+    currentProject = await createV2Project(file, book, reviewGoal, signal);
+    currentSelectionText = "";
+  }
+  currentDocumentMap = await getV2DocumentMap(currentProject.project_id, signal);
+  currentPlan = await getV2ReviewPlan(currentProject.project_id, signal);
+  localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
+  await loadRecentProjects(signal);
+}
+
+async function runCurrentProject(signal: AbortSignal) {
+  if (!currentProject) {
     return;
   }
-
-  if (!ensureWordCommentSupport()) {
-    showMessage("当前 Word 环境不支持批注 API，无法完成审校。", "error");
-    return;
-  }
-
-  if (!currentSessionId) {
-    await initializeSession();
-  }
-
-  if (!currentSessionId) {
-    return;
-  }
-
-  const controls = getControlsState();
-  const abortController = new AbortController();
-  currentAbortController = abortController;
-  currentTaskId = null;
-  pendingResult = null;
-  issueReviewState = null;
-  taskState = "running";
-  stopChunkElapsedTimer();
-  setBusy(true);
-  updateActionButtons();
-  showMessage(
-    controls.scope === "document" ? "正在审校全书正文..." : "正在审校当前选区...",
-    "default"
+  const controls = getRunControls();
+  currentRun = await runV2Project(
+    currentProject.project_id,
+    currentSessionId || "",
+    controls.aiProfileId,
+    controls.providerApi,
+    controls.proofreadMode,
+    controls.reasoningEnabled,
+    controls.temperature,
+    signal
   );
-  resetProgress();
-  renderEmptyResult("审校中...");
+  showMessage("正在审校，请稍候。", "default");
+  renderWorkspace();
+  await pollRunUntilFinished(currentRun.run_id, signal);
+  await refreshWorkspaceData(signal);
+}
 
-  let sourceText = "";
-
+async function refreshProjects() {
+  const abortController = startBusy();
   try {
-    sourceText =
-      controls.scope === "document" ? await getDocumentBodyText() : await getSelectedText();
-    const useChunkedFlow =
-      controls.scope === "document" || sourceText.length > SELECTION_CHUNK_THRESHOLD;
-    let issues = [];
-    let taskId: string | null = null;
-    let totalChunks = 1;
-    let completedChunks = 1;
-    let failedChunks = 0;
-    let status: TaskState = "succeeded";
-
-    if (useChunkedFlow) {
-      const chunkedResult = await requestChunkedProofreadTask(
-        sourceText,
-        book,
-        controls.scope,
-        currentSessionId,
-        controls.providerApi,
-        controls.proofreadMode,
-        controls.reasoningEnabled,
-        renderChunkedProgress,
-        (createdTaskId) => {
-          currentTaskId = createdTaskId;
-        },
-        abortController.signal
-      );
-      taskId = chunkedResult.task_id || null;
-      totalChunks = chunkedResult.total_chunks;
-      completedChunks = chunkedResult.completed_chunks;
-      failedChunks = chunkedResult.failed_chunks;
-      status = chunkedResult.status;
-      issues = normalizeChunkedIssuesForScope(chunkedResult.issues);
-    } else {
-      const proofreadResult = await requestProofread(
-        sourceText,
-        book,
-        currentSessionId,
-        controls.providerApi,
-        controls.proofreadMode,
-        controls.reasoningEnabled,
-        (progress) => {
-          showMessage(progress.message, "default");
-          appendProgressStatus(progress);
-          renderEmptyResult(progress.message);
-        },
-        abortController.signal
-      );
-      issues = proofreadResult.issues;
-    }
-
-    pendingResult = {
-      sessionId: currentSessionId,
-      sourceText,
-      book,
-      scope: controls.scope,
-      taskId,
-      totalChunks,
-      completedChunks,
-      failedChunks,
-      providerApi: controls.providerApi,
-      proofreadMode: controls.proofreadMode,
-      reasoningEnabled: controls.reasoningEnabled,
-      issues,
-    };
-    issueReviewState = {
-      selectedIssueIds: issues.map((issue) => issue.id),
-      filter: createDefaultFilterState(),
-    };
-    renderCurrentPendingResult();
-    if (status === "failed" && issues.length === 0) {
-      renderEmptyResult("分块审校失败，尚未收到可用问题。可重试失败分块。");
-    }
-    taskState = status;
-    savePendingResultHistory({
-      result: pendingResult,
-      applicationMode: controls.applicationMode,
-      status,
-    });
-    refreshHistory();
-    updateActionButtons();
-
-    const hasUnlocatedIssues = issues.some(
-      (issue) => typeof issue.start !== "number" || typeof issue.end !== "number"
-    );
-    if (status === "failed") {
-      showMessage("分块审校失败，可点击“重试失败分块”。", "error");
-    } else {
-      showMessage(
-        issues.length > 0
-          ? hasUnlocatedIssues
-            ? "审校完成，请确认结果后点击“应用到 Word”；未定位问题会合并为汇总批注。"
-            : "审校完成，请确认结果后点击“应用到 Word”。"
-          : "审校完成，未发现明显问题。",
-        status === "partial_succeeded" ? "default" : "success"
-      );
-    }
+    await loadRecentProjects(abortController.signal);
+    showMessage("最近项目已刷新。", "success");
   } catch (error) {
-    if (isAbortError(error)) {
-      taskState = "cancelled";
-      appendProgressStatus({ stage: "cancelled", message: "已停止当前审校。" });
-      const preserved = await preserveCurrentTaskSnapshotAfterStop({
-        status: taskState,
-        sourceText,
-        book,
-        controls,
-        errorMessage: "用户停止了当前审校。",
-      });
-      if (!preserved) {
-        renderEmptyResult("已停止审校");
-        saveStoppedOrFailedHistory({
-          status: taskState,
-          sourceText,
-          book,
-          controls,
-          errorMessage: "用户停止了当前审校。",
-        });
-      }
-      showMessage(
-        preserved
-          ? "已停止当前审校，已保留已完成分块的问题。"
-          : "已停止当前审校。",
-        "default"
-      );
+    showMessage(`刷新项目失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function openRecentProject(projectId: string) {
+  const abortController = startBusy();
+  try {
+    await loadProject(projectId, abortController.signal);
+    showMessage("已打开审校项目。", "success");
+  } catch (error) {
+    showMessage(`打开项目失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function deleteProject(projectId: string) {
+  const confirmed = await confirmAction(
+    "确认删除项目",
+    "删除后会清理该项目的候选问题、报告和生成的 DOCX 文件。这个操作不能撤销。"
+  );
+  if (!confirmed) {
+    return;
+  }
+  const abortController = startBusy();
+  try {
+    await deleteV2Project(projectId, abortController.signal);
+    if (currentProject?.project_id === projectId) {
+      resetProjectState();
+      localStorage.removeItem(LAST_PROJECT_ID_KEY);
+      await clearTrackedSelectionRange();
+    }
+    await loadRecentProjects(abortController.signal);
+    showMessage("项目已删除。", "success");
+  } catch (error) {
+    showMessage(`删除项目失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function refreshWorkspaceData(signal: AbortSignal) {
+  if (!currentProject) {
+    return;
+  }
+  currentProject = await getV2Project(currentProject.project_id, signal);
+  if (!currentRun && currentProject.latest_run_id) {
+    currentRun = await getV2Run(currentProject.project_id, currentProject.latest_run_id, signal);
+  } else if (currentRun) {
+    currentRun = await getV2Run(currentProject.project_id, currentRun.run_id, signal);
+  }
+  currentDocumentMap = await getV2DocumentMap(currentProject.project_id, signal);
+  currentPlan = await getV2ReviewPlan(currentProject.project_id, signal);
+  await loadCandidates(signal);
+  if (currentRun) {
+    currentTrace = await getV2RunTrace(currentProject.project_id, currentRun.run_id, signal);
+  }
+  currentMemory = (await getV2Memory(currentProject.project_id, signal)).memory;
+  currentReport = await getV2ReviewReport(currentProject.project_id, signal);
+  await loadRecentProjects(signal);
+}
+
+async function loadRecentProjects(signal: AbortSignal) {
+  recentProjects = (await listV2Projects(signal)).projects;
+}
+
+async function loadProject(projectId: string, signal: AbortSignal) {
+  resetProjectState();
+  currentProject = await getV2Project(projectId, signal);
+  if (currentProject.latest_run_id) {
+    currentRun = await getV2Run(currentProject.project_id, currentProject.latest_run_id, signal);
+  }
+  await refreshWorkspaceData(signal);
+  localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
+}
+
+async function pollRunUntilFinished(runId: string, signal: AbortSignal) {
+  if (!currentProject) {
+    return;
+  }
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    currentRun = await getV2Run(currentProject.project_id, runId, signal);
+    currentTrace = await getV2RunTrace(currentProject.project_id, runId, signal);
+    currentProject = await getV2Project(currentProject.project_id, signal);
+    await loadCandidates(signal);
+    renderWorkspace();
+    if (TERMINAL_RUN_STATUSES.has(currentRun.status)) {
       return;
     }
-
-    taskState = "failed";
-    appendProgressStatus({ stage: "failed", message: getErrorMessage(error) });
-    renderEmptyResult("审校失败");
-    saveStoppedOrFailedHistory({
-      status: taskState,
-      sourceText,
-      book,
-      controls,
-      errorMessage: getErrorMessage(error),
-    });
-    showMessage(`审校失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    stopChunkElapsedTimer();
-    currentAbortController = null;
-    currentTaskId = null;
-    setBusy(false);
-    refreshHistory();
-    updateActionButtons();
+    await delay(1000);
   }
+  throw new Error("审校仍在运行，请稍后刷新。");
 }
 
-async function retryCurrentChunk() {
-  if (!currentTaskId || isRetryingCurrentChunk) {
+async function loadCandidates(signal: AbortSignal) {
+  if (!currentProject) {
+    currentCandidates = [];
+    candidateTotal = 0;
+    candidateTotalPages = 0;
+    candidateHasPrevious = false;
+    candidateHasNext = false;
     return;
   }
-
-  const activeProgress = getActiveChunkProgress();
-  if (
-    !activeProgress ||
-    typeof activeProgress.elapsed_seconds !== "number" ||
-    activeProgress.elapsed_seconds < CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS
-  ) {
-    showMessage(
-      `当前分块审校超过 ${CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS} 秒后可手动重试。`,
-      "default"
-    );
-    return;
-  }
-
-  isRetryingCurrentChunk = true;
-  updateActionButtons();
-
-  try {
-    await retryCurrentProofreadChunk(currentTaskId);
-    appendProgressStatus({
-      stage: "chunk_retry_requested",
-      message: "已请求重试当前分块。",
-    });
-    showMessage("已请求重试当前分块，任务会继续向后处理。", "default");
-  } catch (error) {
-    showMessage(`重试当前分块失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    isRetryingCurrentChunk = false;
-    updateActionButtons();
-  }
-}
-
-async function retryFailedChunks() {
-  if (!pendingResult?.taskId || pendingResult.failedChunks <= 0 || isRetryingFailedChunks) {
-    return;
-  }
-
-  const abortController = new AbortController();
-  currentAbortController = abortController;
-  currentTaskId = pendingResult.taskId;
-  taskState = "running";
-  isRetryingFailedChunks = true;
-  stopChunkElapsedTimer();
-  setBusy(true);
-  updateActionButtons();
-  showMessage("正在重试失败分块...", "default");
-
-  try {
-    const retryResult = await retryFailedProofreadChunks(
-      pendingResult.taskId,
-      renderChunkedProgress,
-      abortController.signal
-    );
-    const issues = normalizeChunkedIssuesForScope(retryResult.issues);
-    pendingResult = {
-      ...pendingResult,
-      totalChunks: retryResult.total_chunks,
-      completedChunks: retryResult.completed_chunks,
-      failedChunks: retryResult.failed_chunks,
-      issues,
-    };
-    issueReviewState = {
-      selectedIssueIds: issues.map((issue) => issue.id),
-      filter: issueReviewState?.filter || createDefaultFilterState(),
-    };
-    taskState = retryResult.status;
-    renderCurrentPendingResult();
-    savePendingResultHistory({
-      result: pendingResult,
-      applicationMode: getApplicationMode(),
-      status: retryResult.status,
-    });
-    refreshHistory();
-    showMessage(
-      retryResult.failed_chunks > 0
-        ? "失败分块已重试，仍有分块失败，可稍后再次重试。"
-        : "失败分块已重试完成。",
-      retryResult.failed_chunks > 0 ? "default" : "success"
-    );
-  } catch (error) {
-    if (isAbortError(error)) {
-      taskState = "cancelled";
-      appendProgressStatus({ stage: "cancelled", message: "已停止失败分块重试。" });
-      showMessage("已停止失败分块重试。", "default");
-      return;
-    }
-
-    taskState = "failed";
-    showMessage(`重试失败分块失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    stopChunkElapsedTimer();
-    currentAbortController = null;
-    currentTaskId = null;
-    isRetryingFailedChunks = false;
-    setBusy(false);
-    refreshHistory();
-    updateActionButtons();
-  }
-}
-
-async function applyPendingResultToWord() {
-  const selectedIssues = getSelectedIssues();
-  if (!pendingResult || selectedIssues.length === 0 || isApplyingToWord) {
-    return;
-  }
-
-  isApplyingToWord = true;
-  setBusy(true, { applying: true });
-  updateActionButtons();
-  showMessage(`正在应用到 Word，${formatIssueApplicationPreview(selectedIssues)}。`, "default");
-
-  try {
-    const summary = await applyIssuesToScope(
-      pendingResult.sourceText,
-      selectedIssues,
-      pendingResult.scope,
-      getApplicationMode()
-    );
-    saveAppliedResultHistory({
-      result: pendingResult,
-      summary,
-      applicationMode: getApplicationMode(),
-      selectedIssueIds: selectedIssues.map((issue) => issue.id),
-    });
-    refreshHistory();
-    showMessage(formatCompletionMessage(summary), "success");
-  } catch (error) {
-    showMessage(`应用失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    isApplyingToWord = false;
-    setBusy(false);
-    updateActionButtons();
-  }
-}
-
-function renderCurrentPendingResult() {
-  if (!pendingResult || !issueReviewState) {
-    return;
-  }
-
-  renderResult(pendingResult.issues, formatComment(pendingResult.issues), {
-    sourceText: pendingResult.sourceText,
-    reviewState: issueReviewState,
-    applicationMode: getApplicationMode(),
-    onToggleIssue: updateIssueSelection,
-    onBulkSelect: updateBulkSelection,
-    onFilterChange: updateIssueFilter,
-    onLocateIssue: locateIssue,
+  const filter = getCandidateStatusFilter();
+  const passFilter = getSelect("candidate-pass-filter").value || "all";
+  const response = await getV2Candidates(currentProject.project_id, signal, {
+    page: candidatePage,
+    pageSize: candidatePageSize,
+    status: filter,
+    passName: passFilter,
   });
-  updateActionButtons();
+  currentCandidates = response.candidates;
+  candidatePage = response.page;
+  candidateTotal = response.total;
+  candidateTotalPages = response.total_pages;
+  candidateHasPrevious = response.has_previous;
+  candidateHasNext = response.has_next;
 }
 
-function updateIssueSelection(issueId: string, selected: boolean) {
-  if (!issueReviewState || !pendingResult) {
-    return;
-  }
-
-  const selectedIssueIds = issueReviewState.selectedIssueIds.filter((id) => id !== issueId);
-  if (selected && pendingResult.issues.some((issue) => issue.id === issueId)) {
-    selectedIssueIds.push(issueId);
-  }
-
-  issueReviewState = {
-    ...issueReviewState,
-    selectedIssueIds,
-  };
-  renderCurrentPendingResult();
-}
-
-function updateBulkSelection(action: BulkSelectionAction) {
-  if (!issueReviewState || !pendingResult) {
-    return;
-  }
-
-  let selectedIssueIds: string[] = [];
-  if (action === "all") {
-    selectedIssueIds = pendingResult.issues.map((issue) => issue.id);
-  }
-  if (action === "high-medium") {
-    selectedIssueIds = pendingResult.issues
-      .filter((issue) => issue.severity === "high" || issue.severity === "medium")
-      .map((issue) => issue.id);
-  }
-  if (action === "replaceable") {
-    selectedIssueIds = pendingResult.issues
-      .filter(
-        (issue) => typeof issue.replacement === "string" && issue.replacement.trim().length > 0
-      )
-      .map((issue) => issue.id);
-  }
-
-  issueReviewState = {
-    ...issueReviewState,
-    selectedIssueIds,
-  };
-  renderCurrentPendingResult();
-}
-
-function updateIssueFilter(filter: IssueFilterState) {
-  if (!issueReviewState) {
-    return;
-  }
-
-  issueReviewState = {
-    ...issueReviewState,
-    filter,
-  };
-  renderCurrentPendingResult();
-}
-
-async function locateIssue(issue: ProofreadIssue) {
-  if (!pendingResult) {
-    appendDebugLog("warn", "定位已跳过：当前没有待应用结果", {
-      issueId: issue.id,
-    });
-    return;
-  }
-
-  appendDebugLog("info", "开始定位 Word 原文", {
-    issueId: issue.id,
-    category: issue.category,
-    severity: issue.severity,
-    scope: pendingResult.scope,
-    start: issue.start,
-    end: issue.end,
-    originalLength: issue.original.length,
-    sourceTextLength: pendingResult.sourceText.length,
-  });
-
-  try {
-    await selectIssueInScope(pendingResult.sourceText, issue, pendingResult.scope);
-    appendDebugLog("info", "定位完成", {
-      issueId: issue.id,
-    });
-    showMessage("已定位到 Word 原文。", "success");
-  } catch (error) {
-    appendDebugLog("error", "定位失败", {
-      issueId: issue.id,
-      error,
-    });
-    showMessage(`定位失败：${getErrorMessage(error)}`, "error");
-  }
-}
-
-function getSelectedIssues(): ProofreadIssue[] {
-  if (!pendingResult || !issueReviewState) {
+async function loadAllCandidatesByStatus(
+  status: V2CandidateStatus,
+  signal: AbortSignal
+): Promise<V2CandidateIssue[]> {
+  if (!currentProject) {
     return [];
   }
-
-  const selectedIssueIdSet = new Set(issueReviewState.selectedIssueIds);
-  return pendingResult.issues.filter((issue) => selectedIssueIdSet.has(issue.id));
-}
-
-function formatIssueApplicationPreview(issues: ProofreadIssue[]): string {
-  const revisionCount =
-    getApplicationMode() === "revision"
-      ? issues.filter((issue) => isLocatedIssue(issue) && hasReplacement(issue)).length
-      : 0;
-  const commentCount = issues.filter((issue) => {
-    if (!isLocatedIssue(issue)) {
-      return false;
-    }
-
-    return getApplicationMode() === "comment" || !hasReplacement(issue);
-  }).length;
-  const fallbackCount = issues.filter((issue) => !isLocatedIssue(issue)).length;
-  const skippedCount = pendingResult ? pendingResult.issues.length - issues.length : 0;
-
-  return `预计精准批注 ${commentCount} 条，生成修订 ${revisionCount} 条，未定位汇总 ${fallbackCount} 条，跳过 ${skippedCount} 条`;
-}
-
-function isLocatedIssue(issue: ProofreadIssue): boolean {
-  return typeof issue.start === "number" && typeof issue.end === "number";
-}
-
-function hasReplacement(issue: ProofreadIssue): boolean {
-  return typeof issue.replacement === "string" && issue.replacement.trim().length > 0;
-}
-
-function cancelCurrentProofread() {
-  stopChunkElapsedTimer();
-
-  if (currentAbortController) {
-    currentAbortController.abort();
-  }
-
-  if (currentTaskId) {
-    cancelProofreadTask(currentTaskId).catch(() => {
-      // The local abort is enough for UI state; task cancellation is best effort.
+  const allCandidates: V2CandidateIssue[] = [];
+  let page = 1;
+  while (true) {
+    const response = await getV2Candidates(currentProject.project_id, signal, {
+      page,
+      pageSize: 100,
+      status,
     });
+    allCandidates.push(...response.candidates);
+    if (!response.has_next) {
+      return allCandidates;
+    }
+    page += 1;
   }
 }
 
-function renderChunkedProgress(progress: ProofreadStatusEvent) {
-  showMessage(progress.message, "default");
-  appendProgressStatus(progress);
-  renderEmptyResult(formatProgressResult(updateChunkElapsedTimer(progress)));
-}
-
-function updateChunkElapsedTimer(progress: ProofreadStatusEvent): ProofreadStatusEvent {
-  if (progress.stage === "chunk_started") {
-    startChunkElapsedTimer(progress);
-    return getActiveChunkProgress() || progress;
-  }
-
-  if (progress.stage === "heartbeat" && typeof progress.chunk_index === "number") {
-    syncChunkElapsedTimer(progress);
-    return getActiveChunkProgress() || progress;
-  }
-
-  if (isChunkElapsedTimerStopStage(progress.stage)) {
-    stopChunkElapsedTimer();
-  }
-
-  return progress;
-}
-
-function startChunkElapsedTimer(progress: ProofreadStatusEvent) {
-  stopChunkElapsedTimer();
-  activeChunkProgress = progress;
-  activeChunkStartedAtMs = Date.now() - (progress.elapsed_seconds || 0) * 1000;
-  activeChunkTimer = setInterval(renderActiveChunkElapsed, 1000);
-}
-
-function syncChunkElapsedTimer(progress: ProofreadStatusEvent) {
-  if (!activeChunkProgress || activeChunkProgress.chunk_index !== progress.chunk_index) {
-    startChunkElapsedTimer(progress);
+async function refreshTrace() {
+  if (!currentProject || !currentRun) {
     return;
   }
-
-  activeChunkProgress = progress;
-  if (typeof progress.elapsed_seconds === "number") {
-    activeChunkStartedAtMs = Date.now() - progress.elapsed_seconds * 1000;
+  const abortController = startBusy();
+  try {
+    currentTrace = await getV2RunTrace(
+      currentProject.project_id,
+      currentRun.run_id,
+      abortController.signal
+    );
+    showMessage("运行记录已刷新。", "success");
+  } catch (error) {
+    showMessage(`刷新运行记录失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
   }
 }
 
-function renderActiveChunkElapsed() {
-  const progress = getActiveChunkProgress();
-  if (progress) {
-    renderEmptyResult(formatProgressResult(progress));
-    updateActionButtons();
+async function decidePendingCandidates(status: "approved" | "rejected") {
+  if (!currentProject) {
+    return;
+  }
+  const abortController = startBusy();
+  try {
+    await decideAllPendingV2Candidates(currentProject.project_id, status, abortController.signal);
+    candidatePage = 1;
+    await refreshWorkspaceData(abortController.signal);
+    showMessage("所有待确认候选问题已更新。", "success");
+  } catch (error) {
+    showMessage(`批量更新候选问题失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
   }
 }
 
-function getActiveChunkProgress(): ProofreadStatusEvent | null {
-  if (!activeChunkProgress) {
-    return null;
-  }
-
-  return {
-    ...activeChunkProgress,
-    elapsed_seconds: Math.max(0, (Date.now() - activeChunkStartedAtMs) / 1000),
-  };
+async function decideCandidate(candidateId: string, status: "approved" | "rejected") {
+  await decideCandidates([{ candidate_id: candidateId, status }]);
 }
 
-function stopChunkElapsedTimer() {
-  if (activeChunkTimer !== null) {
-    clearInterval(activeChunkTimer);
+async function decideCandidates(decisions: V2ApprovalDecision[]) {
+  if (!currentProject || decisions.length === 0) {
+    return;
   }
-
-  activeChunkTimer = null;
-  activeChunkProgress = null;
-  activeChunkStartedAtMs = 0;
+  const abortController = startBusy();
+  try {
+    const response = await decideV2Candidates(
+      currentProject.project_id,
+      decisions,
+      abortController.signal
+    );
+    if (response.updated_count > 0 && currentCandidates.length === 1 && candidatePage > 1) {
+      candidatePage -= 1;
+    }
+    await loadCandidates(abortController.signal);
+    currentReport = await getV2ReviewReport(currentProject.project_id, abortController.signal);
+    currentProject = await getV2Project(currentProject.project_id, abortController.signal);
+    showMessage("候选问题已更新。", "success");
+  } catch (error) {
+    showMessage(`更新候选问题失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
 }
 
-function isChunkElapsedTimerStopStage(stage: string): boolean {
-  return ["chunk_completed", "chunk_failed", "completed", "cancelled", "error", "failed"].includes(
-    stage
+async function locateCandidate(candidateId: string) {
+  if (!currentProject) {
+    return;
+  }
+  const candidate = currentCandidates.find((item) => item.candidate_id === candidateId);
+  if (!candidate) {
+    return;
+  }
+  if (!canLocateCandidate(candidate)) {
+    showMessage("该候选问题缺少可定位原文，请写回后下载结果 DOCX 查看。", "default");
+    return;
+  }
+  if (currentProject.source_type === "selection" && !currentSelectionText) {
+    showMessage("当前选区缓存已丢失，请重新开始当前选区审校后再定位。", "error");
+    return;
+  }
+  startBusy();
+  try {
+    await selectIssueInScope(
+      currentProject.source_type === "selection" ? currentSelectionText : "",
+      candidateToProofreadIssue(candidate),
+      currentProject.source_type === "selection" ? "selection" : "document"
+    );
+    showMessage("已定位到 Word 原文。", "success");
+  } catch (error) {
+    const suffix =
+      currentProject.source_type === "docx" ? "。可写回后下载结果 DOCX 查看批注位置。" : "";
+    showMessage(`定位失败：${getErrorMessage(error)}${suffix}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function writebackApproved() {
+  if (!currentProject) {
+    return;
+  }
+  const abortController = startBusy();
+  try {
+    const approved = await loadAllCandidatesByStatus("approved", abortController.signal);
+    if (approved.length === 0) {
+      showMessage("没有已批准的候选问题可写回。", "error");
+      return;
+    }
+    if (currentProject.source_type === "selection") {
+      await writebackSelection(approved, abortController.signal);
+    } else {
+      await writebackDocx(abortController.signal);
+    }
+    await refreshWorkspaceData(abortController.signal);
+    showMessage("已写回已批准候选问题。", "success");
+  } catch (error) {
+    showMessage(`写回失败：${getErrorMessage(error)}`, "error");
+    appendDebugLog("error", "V2 写回失败", { error: getErrorMessage(error) });
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+async function writebackSelection(approved: V2CandidateIssue[], signal: AbortSignal) {
+  if (!currentProject) {
+    return;
+  }
+  if (!ensureWordCommentSupport()) {
+    throw new Error("当前 Word 环境不支持批注 API。");
+  }
+  if (!currentSelectionText) {
+    throw new Error("当前选区项目缺少缓存文本，请重新开始当前选区审校。");
+  }
+  const issues = approved.map(candidateToProofreadIssue);
+  await applyIssuesToScope(currentSelectionText, issues, "selection", getApplicationMode(), {
+    fallbackSummaryTruncateEnabled: getInput("fallback-summary-truncate-enabled").checked,
+  });
+  await markV2CandidatesWritten(
+    currentProject.project_id,
+    approved.map((candidate) => candidate.candidate_id),
+    signal
   );
 }
 
-function saveStoppedOrFailedHistory(input: {
-  status: TaskState;
-  sourceText: string;
-  book: BookInfo;
-  controls: ControlsState;
-  errorMessage: string;
-}) {
-  saveHistoryEntry({
-    status: input.status,
-    text: input.sourceText,
-    book: input.book,
-    issues: [],
-    insertedComment: false,
-    appliedToWord: false,
-    locatedIssueCount: 0,
-    revisionCount: 0,
-    fallbackCount: 0,
-    scope: input.controls.scope,
-    taskId: currentTaskId,
-    totalChunks: 0,
-    completedChunks: 0,
-    failedChunks: 0,
-    providerApi: input.controls.providerApi,
-    proofreadMode: input.controls.proofreadMode,
-    reasoningEnabled: input.controls.reasoningEnabled,
-    applicationMode: input.controls.applicationMode,
-    sessionId: currentSessionId || "",
-    selectedIssueIds: [],
-    skippedIssueCount: 0,
-    errorMessage: input.errorMessage,
+async function writebackDocx(signal: AbortSignal) {
+  if (!currentProject) {
+    return;
+  }
+  await writebackV2Project(
+    currentProject.project_id,
+    getApplicationMode(),
+    getInput("fallback-summary-truncate-enabled").checked,
+    signal
+  );
+}
+
+async function downloadDocx() {
+  if (!currentProject || currentProject.source_type !== "docx" || !currentProject.output_filename) {
+    return;
+  }
+  if (isDownloadingDocx) {
+    return;
+  }
+  const abortController = startBusy();
+  isDownloadingDocx = true;
+  updateButtons();
+  try {
+    await downloadV2ProjectDocx(
+      currentProject.project_id,
+      currentProject.output_filename,
+      abortController.signal
+    );
+    showMessage(`已开始下载：${currentProject.output_filename}`, "success");
+  } catch (error) {
+    showMessage(`下载失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    isDownloadingDocx = false;
+    stopBusy();
+    renderWorkspace();
+  }
+}
+
+function renderWorkspace() {
+  renderProjectBadge();
+  renderRecentProjects();
+  renderProjectSummary();
+  renderDocumentMap();
+  renderReviewPlan();
+  renderTrace();
+  renderCandidates();
+  renderMemory();
+  renderReport();
+  updateButtons();
+}
+
+function renderProjectBadge() {
+  const badge = getElement("project-badge");
+  const status = getDisplayStatus(
+    currentRun?.status || currentProject?.status || "not_started",
+    currentProject?.candidate_count || candidateTotal
+  );
+  badge.textContent = translateStatus(status);
+  badge.className = "status-badge";
+  if (status === "queued" || status === "running" || status === "waiting_for_approval") {
+    badge.classList.add("is-running");
+  } else if (status === "written" || status === "succeeded" || status === "no_candidates") {
+    badge.classList.add("is-success");
+  } else if (status === "failed" || status === "cancelled") {
+    badge.classList.add("is-error");
+  }
+}
+
+function renderProjectSummary() {
+  const container = getElement("project-summary");
+  if (!currentProject) {
+    renderEmpty(container, "暂无审校项目。");
+    return;
+  }
+  container.className = "compact-status";
+  const approvedCount = currentProject.approved_count;
+  const writtenCount = currentReport?.written_count || 0;
+  container.innerHTML = `
+    <span>${currentProject.source_type === "selection" ? "当前选区" : "全书 DOCX"}</span>
+    <span>${escapeHtml(currentProject.book.title)}</span>
+    <span>${translateStatus(
+      getDisplayStatus(currentRun?.status || currentProject.status, currentProject.candidate_count)
+    )}</span>
+    <span>候选 ${currentProject.candidate_count}</span>
+    <span>已批准 ${approvedCount}</span>
+    <span>${writtenCount > 0 ? `已写回 ${writtenCount}` : "未写回"}</span>
+  `;
+}
+
+function renderRecentProjects() {
+  const container = getElement("recent-projects");
+  if (recentProjects.length === 0) {
+    renderEmpty(container, "暂无最近项目。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = recentProjects
+    .map(
+      (project) => `
+        <div class="project-item">
+          <button class="project-open-button" data-open-project-id="${escapeHtml(project.project_id)}" type="button">
+            <span class="item-title">${escapeHtml(project.book.title || project.source_filename)}</span>
+            <span class="item-meta">${translateStatus(project.source_type)} · ${translateStatus(
+              getDisplayStatus(project.status, project.candidate_count)
+            )} · 候选 ${project.candidate_count}</span>
+          </button>
+          <button class="ms-Button danger-button" data-delete-project-id="${escapeHtml(project.project_id)}" type="button">删除</button>
+        </div>
+      `
+    )
+    .join("");
+  recentProjects.forEach((project) => {
+    const openButton = container.querySelector(`[data-open-project-id="${project.project_id}"]`);
+    const deleteButton = container.querySelector(
+      `[data-delete-project-id="${project.project_id}"]`
+    );
+    openButton?.addEventListener("click", () => openRecentProject(project.project_id));
+    deleteButton?.addEventListener("click", () => deleteProject(project.project_id));
   });
 }
 
-async function preserveCurrentTaskSnapshotAfterStop(input: {
-  status: TaskState;
-  sourceText: string;
-  book: BookInfo;
-  controls: ControlsState;
-  errorMessage: string;
-}): Promise<boolean> {
-  if (!currentTaskId || !input.sourceText.trim()) {
-    return false;
+function renderDocumentMap() {
+  const container = getElement("document-map");
+  if (!currentDocumentMap) {
+    renderEmpty(container, "暂无文档地图。");
+    return;
   }
+  container.className = "workspace-list";
+  const chunks = currentDocumentMap.chunks.slice(0, 8);
+  container.innerHTML = `
+    <div class="summary-line">全文 ${currentDocumentMap.text_len} 字，${currentDocumentMap.block_count} 个块，${currentDocumentMap.chunk_count} 个审校分块。</div>
+    ${chunks
+      .map(
+        (chunk) => `
+          <div class="map-item">
+            <div class="item-title">Chunk ${chunk.index + 1} · ${chunk.chunk_len} 字</div>
+            <div class="item-meta">${chunk.start} - ${chunk.end}</div>
+            <div class="item-body">${escapeHtml(chunk.text_preview || "-")}</div>
+          </div>
+        `
+      )
+      .join("")}
+  `;
+}
 
+function renderReviewPlan() {
+  const container = getElement("review-plan");
+  if (!currentPlan) {
+    renderEmpty(container, "暂无审校计划。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = currentPlan.steps
+    .map((step, index) => {
+      const status = getPlanStepDisplayStatus(step.step_id, step.status);
+      return `
+        <div class="plan-item ${step.enabled ? "" : "is-disabled"}">
+          <div class="item-title">${index + 1}. ${escapeHtml(step.title)} · ${translateStatus(status)}</div>
+          <div class="item-meta">${escapeHtml(step.tool_name)} · ${step.enabled ? "已启用" : "未启用"}</div>
+          <div class="item-body">${escapeHtml(step.description)}</div>
+          <div class="item-meta">${escapeHtml(step.reason || "")}</div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function getPlanStepDisplayStatus(stepId: string, fallback: string): string {
+  if (!currentRun && !currentTrace) {
+    return fallback;
+  }
+  if (currentRun?.stage === stepId) {
+    return "running";
+  }
+  const events = currentTrace?.events || [];
+  if (stepId === "plan_review" && events.some((event) => event.event === "plan_created")) {
+    return "succeeded";
+  }
+  if (
+    stepId === "human_approval" &&
+    currentRun &&
+    TERMINAL_RUN_STATUSES.has(currentRun.status) &&
+    currentRun.status !== "failed" &&
+    (currentProject?.candidate_count || candidateTotal) > 0
+  ) {
+    return "running";
+  }
+  if (
+    events.some(
+      (event) => event.event === "pass_completed" && String(event.data.pass_name || "") === stepId
+    )
+  ) {
+    return "succeeded";
+  }
+  return fallback;
+}
+
+function renderTrace() {
+  const container = getElement("run-trace");
+  if (!currentTrace || currentTrace.events.length === 0) {
+    renderEmpty(container, "暂无运行记录。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = currentTrace.events
+    .map(
+      (event) => `
+        <div class="event-item">
+          <div class="item-title">${escapeHtml(event.event)}</div>
+          <div class="item-meta">${escapeHtml(event.created_at)}</div>
+          <div class="item-body">${escapeHtml(JSON.stringify(event.data))}</div>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function renderCandidates() {
+  const container = getElement("candidates");
+  updateCandidatePassFilterOptions();
+  renderCandidatePagination();
+  getElement("candidate-summary").textContent = formatCandidateSummary();
+  if (isRunInProgress()) {
+    renderEmpty(
+      container,
+      `正在审校：${translateStatus(currentRun?.stage || currentRun?.status || "running")}`
+    );
+    return;
+  }
+  if (currentCandidates.length === 0) {
+    renderEmpty(
+      container,
+      candidateTotal === 0 && isCompletedWithoutCandidates()
+        ? "审校完成，未发现需要确认的问题。"
+        : candidateTotal === 0
+          ? "开始审校后显示候选问题。"
+          : "当前筛选下没有候选问题。"
+    );
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = currentCandidates.map(renderCandidateCard).join("");
+  currentCandidates.forEach((candidate) => {
+    bindCandidateButton(candidate.candidate_id, "approved");
+    bindCandidateButton(candidate.candidate_id, "rejected");
+    bindLocateButton(candidate.candidate_id);
+  });
+}
+
+function renderCandidateCard(candidate: V2CandidateIssue): string {
+  const canLocate = canLocateCandidate(candidate);
+  const locateHint = canLocate
+    ? ""
+    : currentProject?.source_type === "docx"
+      ? "缺少可定位原文；写回后可在结果 DOCX 中查看。"
+      : "缺少可定位原文。";
+  return `
+    <div class="candidate-item">
+      <div class="candidate-header">
+        <div class="item-title">${escapeHtml(candidate.category)} · ${translateStatus(candidate.status)}</div>
+        <span class="severity ${candidate.severity}">${candidate.severity}</span>
+      </div>
+      <div class="item-body"><strong>原文：</strong>${escapeHtml(candidate.original || "-")}</div>
+      <div class="item-body"><strong>建议：</strong>${escapeHtml(candidate.suggestion || "-")}</div>
+      <div class="item-body"><strong>替换：</strong>${escapeHtml(candidate.replacement || "需人工判断")}</div>
+      <div class="item-body"><strong>证据：</strong>${escapeHtml(candidate.evidence || "-")}</div>
+      ${locateHint ? `<div class="item-meta">${locateHint}</div>` : ""}
+      <details class="candidate-detail">
+        <summary>查看详情</summary>
+        <div class="item-meta">${escapeHtml(candidate.pass_name)} · 置信度 ${Math.round(candidate.confidence * 100)}% · ${escapeHtml(candidate.rule_id || candidate.evidence_kind)}</div>
+        <div class="item-meta">${escapeHtml(candidate.evaluation_note || candidate.self_check || "")}</div>
+      </details>
+      <div class="candidate-actions">
+        <button class="ms-Button" data-locate-candidate-id="${escapeHtml(candidate.candidate_id)}" type="button" ${canLocate ? "" : "disabled"}>定位</button>
+        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="approved" type="button">批准</button>
+        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="rejected" type="button">拒绝</button>
+      </div>
+    </div>
+  `;
+}
+
+function bindCandidateButton(candidateId: string, status: "approved" | "rejected") {
+  const selector = `[data-candidate-id="${candidateId}"][data-decision="${status}"]`;
+  const button = getElement("candidates").querySelector(selector);
+  button?.addEventListener("click", () => decideCandidate(candidateId, status));
+}
+
+function bindLocateButton(candidateId: string) {
+  const button = getElement("candidates").querySelector(
+    `[data-locate-candidate-id="${candidateId}"]`
+  );
+  button?.addEventListener("click", () => locateCandidate(candidateId));
+}
+
+function updateCandidatePassFilterOptions() {
+  const select = getSelect("candidate-pass-filter");
+  const currentValue = select.value || "all";
+  const passNames = Array.from(
+    new Set(currentCandidates.map((candidate) => candidate.pass_name))
+  ).sort();
+  const optionPassNames =
+    currentValue !== "all" && !passNames.includes(currentValue)
+      ? [currentValue, ...passNames]
+      : passNames;
+  select.hidden = optionPassNames.length <= 1 && currentValue === "all";
+  select.innerHTML = [
+    `<option value="all">全部阶段</option>`,
+    ...optionPassNames.map(
+      (passName) => `<option value="${escapeHtml(passName)}">${escapeHtml(passName)}</option>`
+    ),
+  ].join("");
+  select.value = currentValue;
+}
+
+function renderCandidatePagination() {
+  getElement("candidate-page-summary").textContent =
+    candidateTotalPages > 0
+      ? `第 ${candidatePage}/${candidateTotalPages} 页 · 当前 ${currentCandidates.length} 条`
+      : "第 0/0 页";
+  getButton("candidate-prev-page").disabled = isBusy || !candidateHasPrevious;
+  getButton("candidate-next-page").disabled = isBusy || !candidateHasNext;
+}
+
+async function handleCandidateFilterChange() {
+  candidatePage = 1;
+  if (!currentProject) {
+    renderWorkspace();
+    return;
+  }
+  const abortController = startBusy();
   try {
-    const task = await getProofreadTask(currentTaskId, new AbortController().signal);
-    const issues = normalizeChunkedIssuesForScope(task.issues);
-    if (issues.length === 0) {
-      return false;
-    }
-
-    pendingResult = {
-      sessionId: currentSessionId || "",
-      sourceText: input.sourceText,
-      book: input.book,
-      scope: task.scope,
-      taskId: task.task_id || currentTaskId,
-      totalChunks: task.total_chunks,
-      completedChunks: task.completed_chunks,
-      failedChunks: task.failed_chunks,
-      providerApi: input.controls.providerApi,
-      proofreadMode: input.controls.proofreadMode,
-      reasoningEnabled: input.controls.reasoningEnabled,
-      issues,
-    };
-    issueReviewState = {
-      selectedIssueIds: issues.map((issue) => issue.id),
-      filter: createDefaultFilterState(),
-    };
-    renderCurrentPendingResult();
-    savePendingResultHistory({
-      result: pendingResult,
-      applicationMode: input.controls.applicationMode,
-      status: input.status,
-      errorMessage: input.errorMessage,
-    });
-    refreshHistory();
-    return true;
-  } catch {
-    return false;
+    await loadCandidates(abortController.signal);
+  } catch (error) {
+    showMessage(`刷新候选问题失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
   }
 }
 
-function refreshHistory() {
-  renderHistory(getHistoryEntries(), openHistoryEntry);
-}
-
-function openHistoryEntry(entry: ProofreadHistoryEntry) {
-  pendingResult = null;
-  issueReviewState = {
-    selectedIssueIds: entry.selectedIssueIds,
-    filter: createDefaultFilterState(),
-  };
-  renderHistoryEntry(entry);
-  updateActionButtons();
-}
-
-function initializeControls() {
-  getInput("book-title").value = localStorage.getItem(BOOK_TITLE_STORAGE_KEY) || "";
-  getTextArea("book-introduction").value =
-    localStorage.getItem(BOOK_INTRODUCTION_STORAGE_KEY) || "";
-  getSelect("provider-api").value = readStoredProviderApi();
-  getSelect("proofread-mode").value = readStoredProofreadMode();
-  getInput("reasoning-enabled").checked = readStoredReasoningEnabled();
-  getSelect("application-mode").value = readStoredApplicationMode();
-  getSelect("proofread-scope").value = readStoredProofreadScope();
-}
-
-function persistControls() {
-  localStorage.setItem(PROVIDER_API_STORAGE_KEY, getProviderApi());
-  localStorage.setItem(PROOFREAD_MODE_STORAGE_KEY, getProofreadMode());
-  localStorage.setItem(REASONING_ENABLED_STORAGE_KEY, String(getReasoningEnabled()));
-  localStorage.setItem(APPLICATION_MODE_STORAGE_KEY, getApplicationMode());
-  localStorage.setItem(PROOFREAD_SCOPE_STORAGE_KEY, getProofreadScope());
-
-  if (pendingResult && issueReviewState) {
-    renderCurrentPendingResult();
+async function changeCandidatePage(nextPage: number) {
+  if (!currentProject || nextPage < 1 || (candidateTotalPages > 0 && nextPage > candidateTotalPages)) {
+    return;
+  }
+  candidatePage = nextPage;
+  const abortController = startBusy();
+  try {
+    await loadCandidates(abortController.signal);
+  } catch (error) {
+    showMessage(`切换候选分页失败：${getErrorMessage(error)}`, "error");
+  } finally {
+    stopBusy();
+    renderWorkspace();
   }
 }
 
-function persistBookInfo() {
-  localStorage.setItem(BOOK_TITLE_STORAGE_KEY, getInput("book-title").value);
-  localStorage.setItem(BOOK_INTRODUCTION_STORAGE_KEY, getTextArea("book-introduction").value);
+function getCandidateStatusFilter(): V2CandidateStatus | "all" {
+  const value = getSelect("candidate-filter").value;
+  return isCandidateStatus(value) ? value : "all";
+}
+
+function canLocateCandidate(candidate: V2CandidateIssue): boolean {
+  return Boolean(
+    candidate.original ||
+      candidate.locator?.key ||
+      (typeof candidate.global_start === "number" && typeof candidate.global_end === "number")
+  );
+}
+
+function renderMemory() {
+  const container = getElement("project-memory");
+  const visibleMemory = currentMemory.filter((item) => !INTERNAL_MEMORY_KEYS.has(item.key));
+  if (!currentProject || visibleMemory.length === 0) {
+    renderEmpty(container, "暂无本书规则。");
+    return;
+  }
+  container.className = "workspace-list";
+  container.innerHTML = visibleMemory
+    .map(
+      (item) => `
+        <div class="memory-item">
+          <div class="item-title">${translateMemoryKind(item.kind)} · ${escapeHtml(item.key)}</div>
+          <div class="item-body">${escapeHtml(item.value)}</div>
+          <div class="item-meta">${escapeHtml(item.source)} · 置信度 ${Math.round(item.confidence * 100)}%</div>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function renderReport() {
+  const container = getElement("report");
+  if (!currentReport || currentReport.written_count === 0) {
+    renderEmpty(container, "写回后显示简短报告。");
+    return;
+  }
+  container.className = "workspace-summary compact-report";
+  container.innerHTML = `
+    <div class="summary-grid">
+      ${summaryItem("已写回", String(currentReport.written_count))}
+      ${summaryItem("待确认", String(currentReport.pending_count))}
+      ${summaryItem("已拒绝", String(currentReport.rejected_count))}
+      ${summaryItem("问题总数", String(currentReport.issue_count))}
+    </div>
+    <details class="details-panel">
+      <summary>查看完整报告</summary>
+      <div class="report-item">
+        <div class="item-title">严重程度</div>
+        <div class="item-body">${escapeHtml(JSON.stringify(currentReport.severity_counts))}</div>
+      </div>
+      <div class="report-item">
+        <div class="item-title">类别分布</div>
+        <div class="item-body">${escapeHtml(JSON.stringify(currentReport.category_counts))}</div>
+      </div>
+      <div class="report-item">
+        <div class="item-title">未处理事项</div>
+        <div class="item-body">${escapeHtml(currentReport.unresolved_items.join("；") || "无")}</div>
+      </div>
+    </details>
+  `;
+}
+
+function updateButtons() {
+  const hasProject = Boolean(currentProject);
+  const hasRun = Boolean(currentRun);
+  const approvedCount = currentProject?.approved_count || 0;
+  const pendingCount = currentProject?.pending_count || 0;
+  getButton("start-review").disabled = isBusy;
+  getButton("start-review").textContent = hasProject ? "重新审校" : "开始审校";
+  getButton("refresh-projects").disabled = isBusy;
+  getButton("refresh-trace").disabled = isBusy || !hasProject || !hasRun;
+  getButton("approve-all").disabled = isBusy || pendingCount === 0;
+  getButton("reject-all").disabled = isBusy || pendingCount === 0;
+  getButton("writeback").disabled = isBusy || approvedCount === 0;
+  getButton("download-docx").disabled =
+    isBusy ||
+    isDownloadingDocx ||
+    !currentProject ||
+    currentProject.source_type !== "docx" ||
+    !currentProject.output_filename;
+  getButton("download-docx").querySelector(".ms-Button-label").textContent = isDownloadingDocx
+    ? "下载中"
+    : "下载结果 DOCX";
 }
 
 function getValidatedBookInfo(): BookInfo | null {
-  const titleInput = getInput("book-title");
-  const title = titleInput.value.trim();
-  const introduction = getTextArea("book-introduction").value.trim();
-
+  const title = getInput("book-title").value.trim();
   if (!title) {
-    showMessage("请先填写书名。", "error");
-    titleInput.focus();
     return null;
   }
+  const introduction = getTextArea("book-introduction").value.trim();
+  return { title, introduction: introduction || null };
+}
 
-  titleInput.value = title;
-  getTextArea("book-introduction").value = introduction;
-  persistBookInfo();
+function getRunControls() {
   return {
-    title,
-    introduction: introduction || null,
+    aiProfileId: getSelect("ai-profile").value || "default",
+    providerApi: getSelect("provider-api").value as ProviderAPI,
+    proofreadMode: getSelect("proofread-mode").value as "fast" | "thinking",
+    reasoningEnabled: getInput("reasoning-enabled").checked,
+    temperature: Number(getInput("temperature").value || DEFAULT_V2_TEMPERATURE),
   };
-}
-
-function getControlsState(): ControlsState {
-  return {
-    providerApi: getProviderApi(),
-    proofreadMode: getProofreadMode(),
-    reasoningEnabled: getReasoningEnabled(),
-    applicationMode: getApplicationMode(),
-    scope: getProofreadScope(),
-  };
-}
-
-function getProviderApi(): ProviderAPI {
-  const value = getSelect("provider-api").value;
-  return isProviderApi(value) ? value : "responses";
-}
-
-function getProofreadMode(): ProofreadMode {
-  const value = getSelect("proofread-mode").value;
-  return isProofreadMode(value) ? value : "fast";
-}
-
-function getReasoningEnabled(): boolean {
-  return getInput("reasoning-enabled").checked;
 }
 
 function getApplicationMode(): ApplicationMode {
-  const value = getSelect("application-mode").value;
-  return isApplicationMode(value) ? value : "comment";
+  return getSelect("application-mode").value as ApplicationMode;
 }
 
-function getProofreadScope(): ProofreadScope {
-  const value = getSelect("proofread-scope").value;
-  return isProofreadScope(value) ? value : "selection";
+function getSourceType(): SourceType {
+  return getSelect("source-type").value as SourceType;
 }
 
-function readStoredProviderApi(): ProviderAPI {
-  const value = localStorage.getItem(PROVIDER_API_STORAGE_KEY);
-  return isProviderApi(value) ? value : "responses";
+function getDocxFile(): File | null {
+  return getInput("docx-file").files?.[0] || null;
 }
 
-function readStoredProofreadMode(): ProofreadMode {
-  const value = localStorage.getItem(PROOFREAD_MODE_STORAGE_KEY);
-  return isProofreadMode(value) ? value : "fast";
-}
-
-function readStoredReasoningEnabled(): boolean {
-  return localStorage.getItem(REASONING_ENABLED_STORAGE_KEY) === "true";
-}
-
-function readStoredApplicationMode(): ApplicationMode {
-  const value = localStorage.getItem(APPLICATION_MODE_STORAGE_KEY);
-  return isApplicationMode(value) ? value : "comment";
-}
-
-function readStoredProofreadScope(): ProofreadScope {
-  const value = localStorage.getItem(PROOFREAD_SCOPE_STORAGE_KEY);
-  return isProofreadScope(value) ? value : "selection";
-}
-
-function isProviderApi(value: unknown): value is ProviderAPI {
-  return value === "responses" || value === "chat";
-}
-
-function isProofreadMode(value: unknown): value is ProofreadMode {
-  return value === "fast" || value === "thinking";
-}
-
-function isApplicationMode(value: unknown): value is ApplicationMode {
-  return value === "comment" || value === "revision";
-}
-
-function isProofreadScope(value: unknown): value is ProofreadScope {
-  return value === "selection" || value === "document";
-}
-
-function clearHistory() {
-  if (!isClearHistoryArmed) {
-    armClearHistoryConfirmation();
-    return;
-  }
-
-  resetClearHistoryConfirmation();
-  clearHistoryEntries();
-  refreshHistory();
-  showMessage("已清空本地历史记录。", "success");
-}
-
-function armClearHistoryConfirmation() {
-  isClearHistoryArmed = true;
-  getButton("clear-history").querySelector(".ms-Button-label").textContent = "确认清空";
-  showMessage("再次点击“确认清空”将删除本地历史记录。", "default");
-
-  if (clearHistoryConfirmTimer !== null) {
-    clearTimeout(clearHistoryConfirmTimer);
-  }
-
-  clearHistoryConfirmTimer = setTimeout(() => {
-    resetClearHistoryConfirmation();
-  }, CLEAR_HISTORY_CONFIRM_MS);
-}
-
-function resetClearHistoryConfirmation() {
-  isClearHistoryArmed = false;
-  getButton("clear-history").querySelector(".ms-Button-label").textContent = "清空";
-
-  if (clearHistoryConfirmTimer !== null) {
-    clearTimeout(clearHistoryConfirmTimer);
-    clearHistoryConfirmTimer = null;
+function handleSourceTypeChange() {
+  getElement("docx-source-panel").hidden = getSourceType() !== "docx";
+  if (currentProject) {
+    resetProjectState();
+    renderWorkspace();
   }
 }
 
-function exportHistory() {
-  const count = exportHistoryEntries();
-  showMessage(`已导出 ${count} 条历史记录。`, "success");
+function updateDocxFileSummary() {
+  const file = getDocxFile();
+  getElement("docx-file-summary").textContent = file
+    ? `${file.name} · ${file.size} bytes`
+    : "尚未选择 DOCX。";
 }
 
-async function importHistory() {
-  const input = getInput("history-file");
-  const file = input.files && input.files[0];
-
-  if (!file) {
-    return;
-  }
-
-  try {
-    const count = await importHistoryEntries(file);
-    refreshHistory();
-    showMessage(`已导入 ${count} 条历史记录。`, "success");
-  } catch (error) {
-    showMessage(`导入历史失败：${getErrorMessage(error)}`, "error");
-  } finally {
-    input.value = "";
-  }
+function isRunInProgress(): boolean {
+  return Boolean(currentRun && !TERMINAL_RUN_STATUSES.has(currentRun.status));
 }
 
-function setBusy(isBusy: boolean, options: { applying?: boolean } = {}) {
-  const proofreadButton = getButton("proofread");
-  if (isBusy) {
-    resetClearHistoryConfirmation();
-  }
-
-  proofreadButton.disabled = Boolean(options.applying);
-  proofreadButton.querySelector(".ms-Button-label").textContent = isBusy
-    ? options.applying
-      ? "应用中"
-      : "停止审校"
-    : "AI 审校";
-  getButton("new-conversation").disabled = isBusy;
-  getButton("clear-history").disabled = isBusy;
-  getButton("export-history").disabled = isBusy;
-  getButton("import-history").disabled = isBusy;
-  getInput("book-title").disabled = isBusy;
-  getTextArea("book-introduction").disabled = isBusy;
-  getSelect("provider-api").disabled = isBusy;
-  getSelect("proofread-mode").disabled = isBusy;
-  getInput("reasoning-enabled").disabled = isBusy;
-  getSelect("application-mode").disabled = isBusy;
-  getSelect("proofread-scope").disabled = isBusy;
+function startBusy(): AbortController {
+  currentAbortController?.abort();
+  currentAbortController = new AbortController();
+  isBusy = true;
+  updateButtons();
+  return currentAbortController;
 }
 
-function updateActionButtons() {
-  const selectedCount = getSelectedIssues().length;
-  const canApply = Boolean(pendingResult && selectedCount > 0 && !isApplyingToWord);
-  const applyButton = getButton("apply-to-word");
-  const retryCurrentButton = getButton("retry-current-chunk");
-  const retryFailedButton = getButton("retry-failed-chunks");
-  const activeProgress = getActiveChunkProgress();
-  const canRetryCurrent = Boolean(
-    currentTaskId &&
-      taskState === "running" &&
-      activeProgress &&
-      typeof activeProgress.elapsed_seconds === "number" &&
-      activeProgress.elapsed_seconds >= CURRENT_CHUNK_RETRY_THRESHOLD_SECONDS &&
-      !isRetryingCurrentChunk &&
-      !isRetryingFailedChunks &&
-      !isApplyingToWord
+function stopBusy() {
+  isBusy = false;
+  currentAbortController = null;
+  updateButtons();
+}
+
+function resetProjectState() {
+  currentProject = null;
+  currentDocumentMap = null;
+  currentPlan = null;
+  currentRun = null;
+  currentTrace = null;
+  currentCandidates = [];
+  currentMemory = [];
+  currentReport = null;
+  candidatePage = 1;
+  candidateTotal = 0;
+  candidateTotalPages = 0;
+  candidateHasPrevious = false;
+  candidateHasNext = false;
+}
+
+function candidateToProofreadIssue(candidate: V2CandidateIssue): ProofreadIssue {
+  return {
+    id: candidate.candidate_id,
+    category: candidate.category,
+    severity: candidate.severity,
+    original: candidate.original,
+    replacement: candidate.replacement,
+    suggestion: candidate.suggestion,
+    start: candidate.global_start,
+    end: candidate.global_end,
+    locator: candidate.locator,
+  };
+}
+
+function formatCandidateSummary(): string {
+  if ((currentProject?.candidate_count || 0) === 0 && isCompletedWithoutCandidates()) {
+    return "总数 0，未发现需要确认的问题。";
+  }
+  const rejectedCount = currentReport?.rejected_count ?? "-";
+  const writtenCount = currentReport?.written_count ?? "-";
+  return `项目总数 ${currentProject?.candidate_count || 0}，待确认 ${currentProject?.pending_count || 0}，已批准 ${currentProject?.approved_count || 0}，已拒绝 ${rejectedCount}，已写回 ${writtenCount}；当前筛选 ${candidateTotal} 条。`;
+}
+
+function summaryItem(label: string, value: string): string {
+  return `
+    <div class="summary-item">
+      <span class="summary-label">${escapeHtml(label)}</span>
+      <span class="summary-value">${escapeHtml(value)}</span>
+    </div>
+  `;
+}
+
+function renderEmpty(element: HTMLElement, message: string) {
+  element.className = "workspace-empty";
+  element.textContent = message;
+}
+
+function translateStatus(status: string): string {
+  const labels: Record<string, string> = {
+    approved: "已批准",
+    cancelled: "已取消",
+    created: "已创建",
+    deferred: "暂缓",
+    docx: "DOCX",
+    failed: "失败",
+    no_candidates: "未发现问题",
+    not_started: "未开始",
+    partial_succeeded: "部分成功",
+    pending: "待确认",
+    queued: "排队中",
+    rejected: "已拒绝",
+    running: "审校中",
+    selection: "当前选区",
+    succeeded: "成功",
+    waiting_for_approval: "等待确认",
+    written: "已写回",
+  };
+  return labels[status] || status;
+}
+
+function getDisplayStatus(status: string, candidateCount: number): string {
+  if (
+    candidateCount === 0 &&
+    (status === "waiting_for_approval" || status === "succeeded" || status === "partial_succeeded")
+  ) {
+    return "no_candidates";
+  }
+  return status;
+}
+
+function isCompletedWithoutCandidates(): boolean {
+  const status = currentRun?.status || currentProject?.status;
+  return Boolean(
+    status && getDisplayStatus(status, currentProject?.candidate_count || candidateTotal) === "no_candidates"
   );
-  const canRetryFailed = Boolean(
-    pendingResult?.taskId &&
-      pendingResult.failedChunks > 0 &&
-      taskState !== "running" &&
-      !isRetryingFailedChunks &&
-      !isApplyingToWord
-  );
+}
 
-  applyButton.disabled = !canApply || taskState === "running";
-  applyButton.querySelector(".ms-Button-label").textContent = formatApplyButtonLabel(selectedCount);
-  retryCurrentButton.disabled = !canRetryCurrent;
-  retryFailedButton.disabled = !canRetryFailed;
+function translateMemoryKind(kind: string): string {
+  const labels: Record<string, string> = {
+    book_convention: "本书约定",
+    observation: "审校记录",
+    preference: "编辑偏好",
+    style_rule: "体例规则",
+    terminology: "术语",
+  };
+  return labels[kind] || kind;
+}
+
+function isCandidateStatus(value: string): value is V2CandidateStatus {
+  return (
+    value === "pending" ||
+    value === "approved" ||
+    value === "rejected" ||
+    value === "deferred" ||
+    value === "written"
+  );
+}
+
+function showMessage(message: string, type: "default" | "error" | "success" = "default") {
+  const element = getElement("message");
+  element.textContent = message;
+  element.className = type === "default" ? "message" : `message is-${type}`;
+}
+
+function confirmAction(
+  title: string,
+  description: string,
+  confirmLabel = "确认"
+): Promise<boolean> {
+  if (confirmDialogResolver) {
+    confirmDialogResolver(false);
+  }
+  getElement("confirm-dialog-title").textContent = title;
+  getElement("confirm-dialog-description").textContent = description;
+  getButton("confirm-dialog-submit").textContent = confirmLabel;
+  const dialog = getElement("confirm-dialog");
+  dialog.hidden = false;
+  getButton("confirm-dialog-submit").focus();
+  return new Promise((resolve) => {
+    confirmDialogResolver = resolve;
+  });
+}
+
+function resolveConfirmDialog(confirmed: boolean) {
+  const resolver = confirmDialogResolver;
+  confirmDialogResolver = null;
+  getElement("confirm-dialog").hidden = true;
+  if (resolver) {
+    resolver(confirmed);
+  }
+}
+
+function getButton(id: string): HTMLButtonElement {
+  return document.getElementById(id) as HTMLButtonElement;
+}
+
+function getElement(id: string): HTMLElement {
+  return document.getElementById(id) as HTMLElement;
+}
+
+function getInput(id: string): HTMLInputElement {
+  return document.getElementById(id) as HTMLInputElement;
+}
+
+function getSelect(id: string): HTMLSelectElement {
+  return document.getElementById(id) as HTMLSelectElement;
+}
+
+function getTextArea(id: string): HTMLTextAreaElement {
+  return document.getElementById(id) as HTMLTextAreaElement;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }

@@ -1,45 +1,114 @@
-# Word AI 审校助手 V2 开发计划与技术方案
+# Word AI 审校助手 API 契约与验收标准
 
-## 目标
+本文是当前 V1 基线和已实现 V2.1 Agent 工作台的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-面向出版社责任编辑，在 Word 中完成统一范围审校闭环：小选区直接审校，长选区和全书正文自动分块审校；后端返回结构化审校问题和原文位置，插件可把建议批注到对应原文片段，也可在修订模式下把可直接替换的建议写成 Word 原生修订。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为一个开始审校按钮和候选问题工作区。
 
-## V2 范围
+## 范围
 
-- 包含：Word 选区读取、本地 session 流程、后端审校 API、阶段进度流、结构化问题返回、后端原文定位、纯空白差异过滤、结果筛选、逐条勾选、单条定位预览、逐条精准批注、修订模式替换、快速/深度审校、Responses/Chat API 切换、停止审校、本地历史记录清空/导出/导入、基础错误提示。
-- 新增：当前选区超过 7000 字自动分块审校；全书正文按约 5000 字自动分块审校；分块不硬切自然句，会优先在段落或句末边界切分；分块任务使用后端内存异步任务、SSE 进度、heartbeat 和轮询兜底；全书结果支持二次确认后批注或修订。
-- 不包含：登录、云端审校历史、跨服务重启恢复任务、页眉页脚/脚注/文本框扫描、token 级模型文本流、无人工确认地默认改正文。
-- 第一版后端使用 OpenAI 兼容接口；没有 `AI_API_KEY` 时返回 mock 结果，保证本地可联调。
-- 本地真实 AI 联调可使用 oMLX 启动 OpenAI 兼容服务，默认地址为 `http://127.0.0.1:8001/v1`。
+目标是在 Word 中完成审校闭环：当前选区由插件读取并在用户确认后写回 Word；全书正文通过上传 `.docx` 交给后端抽取、分块、审校并生成带批注或修订+批注的新 Word 文件。
 
-## 技术架构
+包含：
+
+- 当前选区审校和全书 `.docx` 文件审校。
+- Responses API、Chat Completions API 和未配置 Key 时的 mock fallback。
+- 结构化 `issues[]`、后端原文定位、`locator`、分块全局位置和 DOCX 后端写回。
+- 审校进度 SSE、分块任务 SSE、轮询兜底、停止和重试分块。
+- 本地历史记录清空、导出、导入和可回写的新 schema 历史。
+
+不包含：
+
+- 登录、云端历史、跨后端重启恢复任务。
+- `.doc` 旧二进制格式、页眉页脚、脚注和尾注扫描。
+- token 级模型文本流。
+- 当前选区未经人工确认自动改正文。
+
+## 系统约定
+
+- 后端默认地址：`http://127.0.0.1:8000`。
+- Word 插件开发地址：`https://localhost:3000/taskpane.html`。
+- 本地开发时，插件从同源 `/api/*` 请求，由 Webpack dev server 代理到后端。
+- API Key 只存在于后端运行环境，不进入前端代码、manifest、Webpack 配置、构建产物或文档。
+- 后端不保存 AI provider 上下文；Responses 和 Chat 每次审校都是独立请求，不发送 `previous_response_id`。
+
+## 数据流
 
 ```text
-Word 选区
-  -> word-addin 读取选区文本
-  -> POST /api/sessions 创建本地 session
+Word 当前选区或 DOCX 文件
+  -> word-addin 读取选区文本，或上传全书 .docx
   -> 小选区: Responses POST /api/proofread/stream；Chat POST /api/proofread
-  -> 长选区/全书: POST /api/proofread/tasks + SSE/轮询任务进度
-  -> backend/FastAPI 调用 provider /v1/responses、/v1/chat/completions 或 mock service
-  -> AI 返回精简 issues[]，包含 original/replacement/suggestion，不返回 start/end/comment
-  -> backend 在单段或分块文本中搜索 issue.original 并填充 start/end；分块结果额外填充 global_start/global_end
-  -> word-addin 先展示结果，用户确认后按应用方式插入批注或生成 Word 修订
+  -> 长选区: POST /api/proofread/tasks + SSE/轮询
+  -> 全书 DOCX: POST /api/proofread/docx/tasks + SSE/轮询
+  -> backend 调用 OpenAI 兼容 provider 或 mock
+  -> 当前选区: backend 计算 start/end/locator，word-addin 展示并按用户勾选写回
+  -> 全书 DOCX: backend 按 OOXML 位置映射写入批注或修订+批注，保存新 .docx，word-addin 展示下载入口
 ```
 
-### 前端
+## 通用模型
 
-- 目录：`word-addin/`
-- 技术栈：Office.js、TypeScript、Webpack。
-- 本地地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：开发环境先请求同源 `/api/sessions` 创建本地 session；短选区 Responses 模式优先请求同源 `/api/proofread/stream` 获取阶段进度，流式不可用时回退 `/api/proofread`；短选区 Chat 模式直接请求 `/api/proofread`。长选区和全书请求 `/api/proofread/tasks`，优先用 `/api/proofread/tasks/{task_id}/events` 获取 SSE 进度，失败时轮询 `/api/proofread/tasks/{task_id}`；运行中当前块超时可请求 `/api/proofread/tasks/{task_id}/retry-current`，任务结束后可请求 `/api/proofread/tasks/{task_id}/retry-failed`。这些接口均由 Webpack dev server 代理到 `http://127.0.0.1:8000`。
+### `BookInfo`
 
-### 后端
+```json
+{
+  "title": "书名",
+  "introduction": "可选书籍介绍"
+}
+```
 
-- 目录：`backend/`
-- 技术栈：Python、FastAPI、Pydantic、pydantic-settings、httpx、pytest。
-- 本地地址：`http://127.0.0.1:8000`。
-- 配置来源：后端运行环境变量；本地可通过 `uvicorn --env-file ../.env` 加载。
-- 本地真实 AI：oMLX 服务建议监听 `http://127.0.0.1:8001/v1`。后端支持 OpenAI 兼容 Responses API 和 Chat Completions；两种模式都按单轮审校处理，不发送 `previous_response_id`。
+- `title` 必填，去掉首尾空白后不能为空。
+- `introduction` 可选；空白会归一为 `null`。
+- 书籍信息仅作为 prompt 背景，不属于待审正文。
+
+### `ProofreadIssue`
+
+```json
+{
+  "id": "issue-1",
+  "category": "typo",
+  "severity": "medium",
+  "original": "原文片段",
+  "replacement": "可直接替换原文的新文本",
+  "suggestion": "修改建议说明",
+  "start": 0,
+  "end": 4,
+  "locator": {
+    "key": "原文片段",
+    "key_start": 0,
+    "key_end": 4,
+    "original_start_in_key": 0,
+    "original_end_in_key": 4,
+    "strategy": "original",
+    "key_occurrence_index": 0
+  }
+}
+```
+
+- `category` 为自由字符串，例如 `typo`、`grammar`、`style`、`fact`。
+- `severity` 只允许 `low`、`medium`、`high`。
+- AI 原始输出只需要包含 `id/category/severity/original/replacement/suggestion`，不返回 `start/end/comment/locator`。
+- `replacement` 可为 `null`；空字符串归一为 `null`。不能直接替换正文的问题必须返回 `null`。
+- 如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端过滤该 issue。
+- `start/end` 由后端按 `original` 在请求文本中计算；找不到时为 `null`。
+- `locator` 是 Word 精准写回定位包；不可靠时为 `null`，前端应用时降级为汇总批注。
+
+### 分块规则
+
+- 当前选区长度 `<= 7000`：单段审校。
+- 当前选区长度 `> 7000`：分块任务。
+- 全书 `.docx`：始终走 DOCX 文件任务。
+- 默认 `chunk_size=5000`，允许范围 `500..10000`。
+- 分块优先在目标长度前的段落换行和句末标点附近切分；找不到时向后延伸到下一个边界，不硬切自然句。
+- 极端情况下全文无任何边界时，保留剩余文本为一个 chunk。
+
+### 全书 DOCX 规则
+
+- 仅支持 `.docx`；`.doc` 返回 400，提示先另存为 `.docx`。
+- 审校范围包含目录可见文本、正文段落、表格文字和常见文本框文字；页眉页脚、脚注、尾注暂不纳入。
+- 后端抽取可见文本时同步建立“文本字符范围 -> OOXML 文本节点”映射。AI 仍只返回精简 issue；后端把 issue 绑定到来源 chunk，优先用 chunk 内定位结果，写回前可在该 chunk 内按 `original` 二次精确搜索，再映射回 DOCX 写回，不把 Word 写回 `locator` 交给前端。
+- 分块优先级：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可提取目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区的段落/句末规则。
+- 批注模式生成 Word 原生批注；修订+批注模式对有 `replacement` 的问题生成 `w:del/w:ins` 原生修订并在 `replacement` 插入文本上附原因批注，无 `replacement` 或无法安全定位时降级为批注或汇总批注。
+- 任务完成后后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口和保留期限。
+- 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；后端通过 SQLite 索引恢复重启后的下载能力，过期或文件被外部清理时下载返回明确错误。
 
 ## API 契约
 
@@ -53,7 +122,199 @@ Response:
 }
 ```
 
+## V2 Agent 工作台 API
+
+V2 API 以审校项目为核心，V2.2 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。插件 UI 默认收敛为一个开始审校按钮和候选问题工作区，Agent 内部 trace/plan/memory 默认放入高级信息。
+
+### `POST /api/v2/projects`
+
+创建 V2 DOCX 审校项目，立即建立文档地图和默认审校计划。
+
+Query：
+
+- `filename`：必填，必须以 `.docx` 结尾。
+- `book`：必填，URL 编码后的 `BookInfo` JSON。
+- `review_goal`：可选，审校目标；缺省为全书出版审校目标。
+
+Request body：原始 `.docx` 二进制。
+
+Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count`。DOCX 项目的 `source_type` 为 `docx`。
+
+### `POST /api/v2/projects/selection`
+
+创建 V2 当前选区审校项目，立即建立轻量文档地图和默认审校计划。
+
+Request:
+
+```json
+{
+  "text": "当前 Word 选区文本",
+  "book": {"title": "书名", "introduction": "可选书籍介绍"},
+  "review_goal": "检查当前选区中的出版审校问题。",
+  "session_id": "session_xxx"
+}
+```
+
+Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`source_filename` 为 `当前选区`，`text_preview` 为选区短预览。
+
+### `GET /api/v2/projects`
+
+返回最近 V2.1 项目列表，用于插件重新打开后恢复工作台。Query `limit` 默认 20，返回 `{"projects": [V2ProjectResponse]}`。
+
+### `GET /api/v2/projects/{project_id}`
+
+查询 V2 项目摘要。项目不存在返回 404。
+
+### `DELETE /api/v2/projects/{project_id}`
+
+删除 V2 项目及关联工作台数据。后端会清理 project、document map、review plan、runs、run events、candidates、report、memory 和该项目的 DOCX output 目录。项目不存在返回 404。
+
+Response:
+
+```json
+{
+  "project_id": "project_xxx",
+  "deleted": true
+}
+```
+
+### `GET /api/v2/projects/{project_id}/document-map`
+
+返回文档地图摘要：`text_len/block_count/chunk_count/blocks/chunks`。DOCX 项目基于 DOCX 文档模型生成；selection 项目基于选区文本的段落和分块生成。`blocks` 和 `chunks` 只包含短 preview，不返回完整正文。
+
+### `GET /api/v2/projects/{project_id}/plan`
+
+返回 V2.1 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。
+
+### 本地 pass 规则
+
+V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入完整正文记忆。默认规则包括：`terminology_variant_pair` 检查 `AI/人工智能`、`责任编辑/责编`、`DOCX/docx` 并用；`style_consecutive_punctuation` 检查连续标点；`style_ascii_comma` 检查中文语境英文逗号；`style_halfwidth_parenthesis` 检查中文正文半角括号；`cross_chapter_numeric_consistency` 仅在 DOCX 项目中提示重复数字/时间表达的一致性风险。规则候选必须携带 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end`，同一规则的多处非重叠命中都应生成候选，再由归并阶段去重。
+
+### `POST /api/v2/projects/{project_id}/runs`
+
+启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}`
+
+查询 V2 run 状态、chunk 统计和候选问题数量。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
+
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`report_ready` 和 `error`。
+
+### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
+
+返回脱敏 run event trace。trace 不保存完整正文、API Key、Authorization 或 Bearer token。
+
+### `GET /api/v2/projects/{project_id}/candidates`
+
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.1 候选增加 `pass_name/confidence/evidence_kind/rule_id/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型和 evaluator 复核意见。
+
+### `POST /api/v2/projects/{project_id}/candidates/decisions`
+
+批量更新候选问题决策。
+
+Request:
+
+```json
+{
+  "decisions": [
+    {"candidate_id": "candidate_xxx", "status": "approved"}
+  ]
+}
+```
+
+`status` 允许 `approved`、`rejected`、`deferred`。V2.2 插件默认只暴露批准和拒绝；`deferred` 保留给 API 兼容和后续更清晰的“稍后处理”设计。
+
+编辑决策会派生轻量项目记忆，例如已批准的问题类别；不会把完整正文写入长期记忆。
+
+### `POST /api/v2/projects/{project_id}/candidates/bulk-decisions`
+
+批量更新该项目所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“批准全部/拒绝全部”调用该接口，语义是处理所有待确认候选，而不是当前页。
+
+Request:
+
+```json
+{
+  "status": "approved"
+}
+```
+
+`status` 允许 `approved`、`rejected`、`deferred`。编辑决策会派生轻量项目记忆；不会把完整正文写入长期记忆。
+
+### `GET /api/v2/projects/{project_id}/memory`
+
+返回项目记忆列表。记忆项包含 `memory_id/kind/key/value/source/confidence/created_at/updated_at`，默认保存术语、体例规则、编辑偏好、本书约定或候选摘要，不保存完整正文。
+
+### `POST /api/v2/projects/{project_id}/memory`
+
+手动新增项目记忆。Request 包含 `kind/key/value/source/confidence`，用于把责任编辑确认过的术语、体例或本书约定写入后续 Agent run 上下文。
+
+### `DELETE /api/v2/projects/{project_id}/memory/{memory_id}`
+
+删除错误或过时的项目记忆。删除后返回最新 memory 列表。
+
+### `POST /api/v2/projects/{project_id}/writeback`
+
+DOCX 项目只写回 `approved` 候选问题；没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后 approved 候选变为 `written`，项目状态变为 `written`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+
+### `POST /api/v2/projects/{project_id}/candidates/mark-written`
+
+当前选区项目由 Word 插件完成 Office.js 写回后，调用该接口把已成功写回的候选标记为 `written`，并刷新项目报告。
+
+Request:
+
+```json
+{
+  "candidate_ids": ["candidate_xxx"]
+}
+```
+
+Response 包含 `project_id/updated_count/candidates`。
+
+### `GET /api/v2/projects/{project_id}/report`
+
+返回审校报告，包含问题总数、各状态数量、severity/category/pass 分布和未处理事项。
+
+### `GET /api/v2/projects/{project_id}/download`
+
+下载 V2 写回后的 DOCX。尚未写回或文件丢失时返回 404。
+
+### `POST /api/sessions`
+
+创建本地 session ID，用于插件启动、清空当前结果和历史记录关联；不承担 AI 上下文续接。
+
+Response:
+
+```json
+{
+  "session_id": "session_xxx",
+  "created_at": "2026-04-25T04:00:00+00:00"
+}
+```
+
+### `GET /api/ai-profiles`
+
+返回后端 `.env` 解析出的 AI 配置档案，供 Word 插件下拉选择。响应不包含 API Key。
+
+Response:
+
+```json
+[
+  {
+    "id": "default",
+    "label": "Default AI (.env)",
+    "model": "Qwen3.6-35B-A3B-4.4bit-msq",
+    "default_api": "responses",
+    "supported_apis": ["responses", "chat"],
+    "configured": true
+  }
+]
+```
+
 ### `POST /api/proofread`
+
+普通审校接口。Chat 模式直接使用该接口；Responses 模式在流式接口不可用时回退到该接口。
 
 Request:
 
@@ -65,53 +326,45 @@ Request:
     "introduction": "可选书籍介绍"
   },
   "session_id": "session_xxx",
+  "ai_profile_id": "default",
   "provider_api": "responses",
   "proofread_mode": "fast",
   "reasoning_enabled": false,
+  "temperature": 0.2,
   "context": {
     "source": "word-addin"
   }
 }
 ```
 
+字段：
+
+- `text` 必填，去掉首尾空白后不能为空。
+- `book` 必填，规则见 `BookInfo`。
+- `session_id` 可选，不用于 AI 上下文续接。
+- `ai_profile_id` 可选；缺省使用后端 profile 列表第一项。旧 `.env` 配置会生成 `default` profile。
+- `provider_api` 可选，支持 `responses`、`chat`；缺省使用所选 profile 的 `default_api`。
+- `proofread_mode` 可选，支持 `fast`、`thinking`；默认 `fast`。
+- `reasoning_enabled` 可选，默认 `false`；默认 Chat 供应商写入请求体 `reasoning.enabled`；Xiaomi MiMo profile 写入 `thinking.type`。
+- `temperature` 可选，默认 `0.2`，范围 `0` 到 `1.5`；写入 Responses 和 Chat provider 请求体。
+- `context` 可选，用于调用来源等调试信息。
+
 Response:
 
 ```json
 {
-  "issues": [
-    {
-      "id": "issue-1",
-      "category": "typo",
-      "severity": "medium",
-      "original": "原文片段",
-      "replacement": "可直接替换原文的新文本",
-      "suggestion": "修改建议说明",
-      "start": 0,
-      "end": 4
-    }
-  ]
+  "run_id": "agent_run_xxx",
+  "issues": []
 }
 ```
 
-字段约定：
-
-- `category`：问题类别，第一版允许自由字符串，例如 `typo`、`grammar`、`style`、`fact`。
-- `severity`：严重程度，使用 `low`、`medium`、`high`。
-- `book`：必填。`title` 为书名，去掉首尾空白后不能为空；`introduction` 为可选书籍介绍，空白会归一为 `null`。缺少 `book` 或空书名返回 422。
-- `provider_api`：可选，支持 `responses`、`chat`；未传时使用后端环境变量 `AI_PROVIDER_API`，默认 `responses`。
-- `proofread_mode`：可选，支持 `fast`、`thinking`；默认 `fast`。`fast` 只抓明显问题、优先响应速度；`thinking` 更细审、使用更高输出上限，优先审校质量。两种模式均不限制返回条数。
-- `reasoning_enabled`：可选布尔值，默认 `false`。启用时，Chat Completions 请求携带 `"reasoning": {"enabled": true}`；关闭时携带 `"reasoning": {"enabled": false}`。该开关独立于 `proofread_mode`，不改变 prompt 文案。
-- 后端会把书名和书籍介绍作为 prompt 背景传给 AI；书籍信息不属于待审正文，AI 仍只能对 `<text>` 内的 Word 选区文本返回可定位 issue。
-- AI 原始输出不包含 `start`、`end`、`comment`，只包含 `id`、`category`、`severity`、`original`、`replacement`、`suggestion`。
-- `replacement`：可选，表示可直接替换 `original` 的正文文本；事实待核、需人工判断、体例疑问等不能直接替换的问题返回 `null`。空字符串会被后端归一为 `null`。
-- 纯空白差异过滤：如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端会过滤该 issue，不返回给 Word 插件。
-- `start`、`end`：后端按 `original` 在请求文本中计算，`start` 为包含式起点，`end` 为不包含式终点，均相对请求文本。重复 `original` 按 issue 顺序匹配下一处；找不到时返回 `null`。
-- `issues` 为空表示未发现明显问题。
-- `issues` 为空时，Word 插件只在任务窗格显示结果，不插入批注。
+`issues` 为空表示未发现明显问题；插件只显示结果，不插入批注或修订+批注。
 
 ### `POST /api/proofread/stream`
 
-Request 与 `/api/proofread` 相同，但仅用于 Responses 模式。Chat 模式直接使用 `/api/proofread`，后端按标准 Chat Completions request/response 调用 `/v1/chat/completions`。
+Responses 模式的审校进度接口。Chat 模式不走 SSE，应使用 `/api/proofread`。
+
+Request 与 `/api/proofread` 相同。
 
 Response 使用 `text/event-stream`：
 
@@ -120,10 +373,7 @@ event: status
 data: {"stage":"received","message":"已接收选区文本。"}
 
 event: status
-data: {"stage":"calling_ai","message":"正在调用 AI 审校。"}
-
-event: status
-data: {"stage":"calling_ai","message":"AI 审校仍在运行（约 1 秒）。"}
+data: {"stage":"calling_ai","message":"正在调用 AI Responses API。"}
 
 event: status
 data: {"stage":"normalizing","message":"正在整理结构化审校结果。"}
@@ -135,31 +385,37 @@ event: status
 data: {"stage":"completed","message":"审校完成。"}
 ```
 
-AI provider 异常时返回 `error` 事件：
+失败时返回：
 
 ```text
 event: error
 data: {"message":"AI provider returned HTTP 500"}
 ```
 
+流式事件的 `data` 会附带本次审校的 `run_id`，用于查询 Agent trace。
+
 ### `POST /api/proofread/chunked`
 
-同步分块审校接口，用于测试、调试和较小分块任务。请求字段沿用 `/api/proofread`，增加：
+同步分块审校接口，用于测试、调试和较小分块任务。产品主链路使用 `/api/proofread/tasks`。
+
+Request 在 `/api/proofread` 基础上增加：
 
 ```json
 {
-  "scope": "selection",
+  "scope": "document",
   "chunk_size": 5000
 }
 ```
 
-`scope` 支持 `selection` 和 `document`。`selection` 文本不超过 7000 字时返回单个 chunk；超过 7000 字时按约 5000 字分块。`document` 始终按约 5000 字分块。分块优先在目标长度前的段落换行和句末标点附近切分；找不到时向后延伸到下一个段落或句末边界，不硬切自然句。极端情况下全文无任何边界时，保留剩余文本为一个 chunk。
+- `scope` 支持 `selection`、`document`；默认 `selection`。
+- `chunk_size` 默认 `5000`。
 
 Response:
 
 ```json
 {
   "task_id": null,
+  "run_id": "agent_run_xxx",
   "scope": "document",
   "status": "succeeded",
   "total_chunks": 2,
@@ -175,6 +431,7 @@ Response:
       "suggestion": "修改建议",
       "start": 0,
       "end": 4,
+      "locator": null,
       "chunk_index": 0,
       "global_start": 0,
       "global_end": 4
@@ -184,193 +441,246 @@ Response:
 }
 ```
 
-### 异步分块任务接口
+状态值支持 `queued`、`running`、`succeeded`、`partial_succeeded`、`failed`、`cancelled`。
 
-创建任务：
+### `POST /api/proofread/tasks`
 
-```http
-POST /api/proofread/tasks
-```
+创建内存异步分块任务。请求与 `/api/proofread/chunked` 相同。
 
-请求与 `/api/proofread/chunked` 相同。Response 为 `ChunkedProofreadResult`，其中 `task_id` 必填，初始 `status` 为 `queued`。
+Response 为 `ChunkedProofreadResult`，`task_id` 必填，初始 `status` 为 `queued`，并包含本次 Agent 编排的 `run_id`。
 
-查询任务：
+任务只保存在后端内存中；服务重启后不可恢复。
 
-```http
-GET /api/proofread/tasks/{task_id}
-```
+### `GET /api/proofread/tasks/{task_id}`
 
-返回当前进度、聚合结果和错误信息。任务只保存在后端内存中；任务不存在或服务重启后返回 404。
+查询任务状态、进度、聚合结果和错误信息。任务不存在时返回 404。
 
-停止任务：
+### `GET /api/proofread/tasks/{task_id}/events`
 
-```http
-DELETE /api/proofread/tasks/{task_id}
-```
-
-将任务标记为取消。正在运行的 chunk 完成后停止后续 chunk，最终状态为 `cancelled`。
-
-重试当前分块：
-
-```http
-POST /api/proofread/tasks/{task_id}/retry-current
-```
-
-仅用于运行中的分块任务。当前 chunk 长时间无响应时，前端可请求该接口；后端取消当前 AI 调用并重新审校同一 chunk，成功后继续后续 chunk。
-
-重试失败分块：
-
-```http
-POST /api/proofread/tasks/{task_id}/retry-failed
-```
-
-仅用于已有失败 chunk 的终态任务。后端只重试失败 chunk，成功后移出失败集合并合并该 chunk 的结果；仍失败的 chunk 保持失败计数。
-
-任务 SSE：
+订阅任务 SSE。
 
 ```http
 GET /api/proofread/tasks/{task_id}/events
 Accept: text/event-stream
 ```
 
-事件名包括 `queued`、`running`、`chunk_started`、`heartbeat`、`chunk_retry_requested`、`chunk_retrying`、`chunk_completed`、`chunk_failed`、`retry_queued`、`completed`、`cancelled`、`error`。事件数据包含 `task_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`；chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`，失败事件包含 `error_message`。部分 chunk 失败但至少一个 chunk 成功时，最终状态为 `partial_succeeded`。
+事件名包括：
 
-### `POST /api/sessions`
+```text
+queued
+running
+chunk_started
+heartbeat
+chunk_retry_requested
+chunk_retrying
+chunk_completed
+chunk_failed
+retry_queued
+completed
+cancelled
+error
+```
+
+事件数据包含 `task_id`、`run_id`、`scope`、`status`、`total_chunks`、`completed_chunks`、`failed_chunks`、`issue_count` 和 `message`。chunk 相关事件额外包含 `chunk_index`、`chunk_start`、`chunk_end`、`chunk_len`、`elapsed_seconds`；失败事件包含 `error_message`。
+
+### `DELETE /api/proofread/tasks/{task_id}`
+
+标记取消任务。正在运行的 chunk 完成后停止后续 chunk，最终状态为 `cancelled`。
+
+### `POST /api/proofread/tasks/{task_id}/retry-current`
+
+仅用于运行中的分块任务。当前 chunk 长时间无响应时，前端可请求该接口；后端取消当前 AI 调用并重新审校同一 chunk。任务不存在返回 404，状态不允许时返回 409。
+
+### `POST /api/proofread/tasks/{task_id}/retry-failed`
+
+仅用于已有失败 chunk 的终态任务。后端只重试失败 chunk，成功后移出失败集合并合并结果；仍失败的 chunk 保持失败计数。任务不存在返回 404，状态不允许时返回 409。
+
+### `POST /api/proofread/docx/tasks`
+
+创建全书 DOCX 文件审校任务。请求体是原始 `.docx` 二进制；元数据走 query 参数，避免 Word WebView 对 multipart 的兼容差异。
+
+```http
+POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&provider_api=responses&proofread_mode=fast&reasoning_enabled=false&temperature=0.2&application_mode=comment&fallback_summary_truncate_enabled=true
+Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+```
+
+字段：
+
+- `filename` 必填，必须以 `.docx` 结尾；`.doc` 返回 400。
+- `book` 必填，是 URL 编码后的 `BookInfo` JSON。
+- `provider_api`、`proofread_mode`、`reasoning_enabled`、`temperature` 与普通审校一致。
+- `application_mode` 支持 `comment`、`revision`；`comment` 生成批注版 Word，`revision` 生成修订+批注版 Word。
+- `fallback_summary_truncate_enabled` 可选，默认 `true`；为 `false` 时未定位汇总批注不限制总条数，长内容按 1500 字预算拆成多条。
 
 Response:
 
 ```json
 {
-  "session_id": "session_xxx",
-  "created_at": "2026-04-25T04:00:00+00:00"
+  "task_id": "docx_task_xxx",
+  "run_id": "agent_run_xxx",
+  "status": "queued",
+  "total_chunks": 12,
+  "completed_chunks": 0,
+  "failed_chunks": 0,
+  "issue_count": 0,
+  "source_filename": "书稿.docx",
+  "application_mode": "comment",
+  "output_filename": null,
+  "download_url": null,
+  "expires_at": null,
+  "retention_days": null,
+  "error_message": null
 }
 ```
 
-字段约定：
+### `GET /api/proofread/docx/tasks/{task_id}`
 
-- `session_id`：Word 插件当前本地 session ID，用于兼容插件流程和历史记录。
-- 后端不保存 AI 上下文，不保存 provider `response.id`；Responses 和 Chat 模式每次审校都是独立请求。
+查询 DOCX 任务状态。终态成功或部分成功时，`output_filename`、`download_url`、`expires_at` 和 `retention_days` 非空。后端重启后，如果结果索引和文件仍未过期，该接口仍可返回终态快照；新生成的持久化结果会保留并返回 `run_id`，旧索引记录可能返回 `run_id: null`。
 
-## 开发任务
+### `GET /api/proofread/docx/tasks/{task_id}/events`
 
-1. 搭建 FastAPI 后端骨架，提供 `GET /health` 和 `POST /api/proofread`。
-2. 定义 Pydantic schema，校验空文本，固定响应结构。
-3. 实现 mock 审校服务，未配置 `AI_API_KEY` 时返回可预测的本地结果。
-4. 实现 OpenAI 兼容 Responses API 与 Chat Completions client，配置 `AI_API_KEY` 后请求对应 provider API 并解析精简 JSON。
-5. 改造 Word 插件任务窗格，只保留“AI 审校”正式入口、状态提示和结果展示。
-6. 插件内部读取 Word 当前选区：Responses 模式优先调用流式接口展示阶段进度，失败时回退普通接口；Chat 模式直接调用普通接口。
-7. 后端返回问题时，插件先展示结果，不立即写回 Word；任务窗格支持按严重程度、类别、定位状态和是否可直接替换筛选，支持逐条勾选和批量选择，并可点击单条“定位”选中 Word 原文。
-8. 用户点击“应用 N 条到 Word”后，插件只写回已勾选问题；批注模式按 `start/end` 或 `global_start/global_end` 和 `original` 精准插入逐条批注；修订模式临时开启 Word 修订跟踪，将已勾选、可定位且有 `replacement` 的问题替换为 Word 原生修订。
-9. 修订模式下已勾选、可定位但无 `replacement` 的问题回退为原位批注；已勾选但定位失败的问题统一合并为一条简短汇总批注，锚定在审校范围起点的第一个非空字符，找不到非空字符时退回范围起点；未勾选问题不写回 Word。
-10. 长选区和全书审校通过异步任务展示分块进度；停止审校时同时中断前端请求并调用后端取消任务接口。
-11. 插件支持清空当前结果、停止审校、快速/深度审校、Responses/Chat API 切换、本地历史记录清空/导出/导入；历史记录保存 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。
-12. 补充后端测试、插件 lint/build 验证和本地联调说明。
+订阅 DOCX 任务 SSE。事件名与普通分块任务一致，事件数据额外包含 `source_filename`、`output_filename`、`download_url`、`expires_at` 和 `retention_days`。
 
-## 本地运行
+### `DELETE /api/proofread/docx/tasks/{task_id}`
 
-后端：
+标记取消 DOCX 任务。正在运行的 chunk 完成或取消后停止后续 chunk。
 
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --env-file ../.env --host 127.0.0.1 --port 8000 --reload
+### `POST /api/proofread/docx/tasks/{task_id}/retry-current`
+
+仅用于运行中的 DOCX 任务。当前 chunk 长时间无响应时，前端可请求后端重新审校同一 chunk。
+
+### `POST /api/proofread/docx/tasks/{task_id}/retry-failed`
+
+仅用于已有失败 chunk 的 DOCX 终态任务。重试完成后重新生成结果文件。
+
+### `GET /api/proofread/docx/tasks/{task_id}/download`
+
+下载后端生成的审校后 `.docx` 文件。结果尚未生成、已过期或文件丢失时返回明确错误；未过期结果即使后端重启也可通过持久化索引下载。
+
+### `GET /api/agent/runs/{run_id}/trace`
+
+查询一次 Agent 审校 run 的可观测 trace。`run_id` 会随普通审校响应、分块任务响应、DOCX 任务响应和任务 SSE 事件返回；Word 插件可用该接口在“运行过程”面板展示 Agent trace 摘要。trace 只记录节点和 chunk 元数据，不记录完整正文、API Key、Authorization 或 Bearer token。若旧 DOCX 结果没有 `run_id`，或 trace SQLite 已被清理，该接口可能无法查询并返回 404。
+
+trace 默认保存到 `backend/var/agent-traces/traces.sqlite3`，可通过 `AGENT_TRACE_DIR` 修改目录。DOCX 下载索引使用独立 SQLite：`backend/var/docx-results/results.sqlite3`，可通过 `DOCX_OUTPUT_DIR` 修改目录。
+
+Response:
+
+```json
+{
+  "run_id": "agent_run_xxx",
+  "flow": "chunked_task",
+  "task_id": "task_xxx",
+  "status": "succeeded",
+  "created_at": "2026-05-16T00:00:00+00:00",
+  "updated_at": "2026-05-16T00:00:03+00:00",
+  "total_chunks": 2,
+  "completed_chunks": 2,
+  "failed_chunks": 0,
+  "issue_count": 3,
+  "error_message": null,
+  "metadata": {
+    "scope": "document",
+    "proofread_mode": "fast"
+  },
+  "nodes": [
+    {
+      "node_name": "proofread_chunk",
+      "status": "succeeded",
+      "started_at": "2026-05-16T00:00:01+00:00",
+      "ended_at": "2026-05-16T00:00:02+00:00",
+      "elapsed_seconds": 1.0,
+      "error_message": null
+    }
+  ],
+  "chunks": [
+    {
+      "chunk_index": 0,
+      "chunk_start": 0,
+      "chunk_end": 5000,
+      "chunk_len": 5000,
+      "status": "succeeded",
+      "issue_count": 2,
+      "retry_count": 0,
+      "error_message": null,
+      "started_at": "2026-05-16T00:00:01+00:00",
+      "ended_at": "2026-05-16T00:00:02+00:00",
+      "elapsed_seconds": 1.0
+    }
+  ]
+}
 ```
 
-AI 配置：
+## Word 写回规则
+
+- 当前选区：插件拿到 `issues` 后先展示结果，不立即写回 Word。
+- 默认选中全部问题，用户可按严重程度、类别、定位状态和是否有 `replacement` 筛选。
+- 已勾选 + 批注模式 + 可定位：在 `original` 对应片段插入逐条批注。
+- 已勾选 + 修订+批注 + 可定位 + `replacement` 非空：临时开启 `TrackAll`，用 `replacement` 替换 `original`，生成 Word 原生修订，再把原因批注锚定到插入后的 `replacement` 文本。
+- 已勾选 + 修订+批注 + 可定位 + 无 `replacement`：回退为原位批注。
+- 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条 1500 字以内；关闭默认截断后不限制总条数，单条超 1500 字继续拆分。
+- 未勾选问题不写回。
+- 已成功提交的批注或修订不回滚；某批失败时换 fresh `Word.run` 重试或降级汇总。
+- 全书 DOCX：后端按 `application_mode` 直接生成新 Word 文件，插件不做逐条勾选和 Office.js 写回。
+
+## 环境变量
 
 ```text
 AI_API_KEY=local-omlx-dev-key
+MIMO_API_KEY=...
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
-AI_MAX_TOKENS=32768
-AI_FAST_MAX_TOKENS=16384
-AI_THINKING_MAX_TOKENS=32768
+AI_FAST_MAX_TOKENS=8192
+AI_THINKING_MAX_TOKENS=16384
+BACKEND_HOST=127.0.0.1
+BACKEND_PORT=8000
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
+DOCX_OUTPUT_DIR=var/docx-results
+DOCX_RETENTION_DAYS=7
+AGENT_TRACE_DIR=var/agent-traces
+AGENT_WORKSPACE_DIR=var/agent-workspace
+WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-`AI_API_KEY` 只允许存在于后端运行环境中，不进入 Word 插件代码、manifest、Webpack 构建变量或前端产物。未配置 `AI_API_KEY` 时，后端返回 mock 审校结果；已配置时按请求或环境配置调用 OpenAI 兼容 Responses API 或 Chat Completions。Chat 模式根据 `reasoning_enabled` 写入 `reasoning.enabled`，默认关闭。`local-omlx-dev-key` 只用于本机 oMLX 开发服务鉴权，不是真实云端密钥。AI HTTP 错误、无法清理解析的非 JSON 返回、schema 不匹配统一转换为后端 502；模型返回 Markdown 代码块、前后解释、尾随逗号或未转义控制字符时，后端会先清理再做 schema 校验。`AI_FAST_MAX_TOKENS` 用于快速审校，`AI_THINKING_MAX_TOKENS` 用于深度审校。
-`BACKEND_LOG_LEVEL` 默认 `INFO`，用于打印请求模式、文本长度、provider 状态、AI provider 返回报文、问题数、定位数量、分块失败编号和错误原因，不打印完整请求正文。AI 返回报文可能包含 `original` 原文摘录。临时设为 `DEBUG` 时会额外打印后端请求体和 AI provider 请求报文，可能包含选区文本、书名、介绍和 AI 输出；任何模式都不得打印 API Key、`Authorization` 或 Bearer token。
-
-本地 oMLX：
-
-```bash
-./scripts/start-omlx.sh
-curl --noproxy 127.0.0.1 http://127.0.0.1:8001/v1/models \
-  -H 'Authorization: Bearer local-omlx-dev-key'
-```
-
-`scripts/start-omlx.sh` 默认将 `Qwen3.6-35B-A3B-4.4bit-msq` 写入 `~/.omlx/model_settings.json`，设置为 default + pinned，使 oMLX 启动时预加载该模型。可通过 `OMLX_PRELOAD_MODEL` 覆盖模型 ID，或设置 `OMLX_CONFIGURE_MODEL_SETTINGS=0` 跳过该配置步骤。
-
-Responses 流式接口 smoke test：
-
-```bash
-curl --no-buffer --noproxy 127.0.0.1 -X POST http://127.0.0.1:8000/api/proofread/stream \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: text/event-stream' \
-  -d '{"text":"这是一段需要审校的文本。","book":{"title":"测试书名","introduction":"这是一部用于联调的测试图书。"},"session_id":"session_xxx","context":{"source":"manual-curl"}}'
-```
-
-插件：
-
-```bash
-cd word-addin
-npm install
-npm run dev-server
-```
-
-联调：
-
-1. 在 Word 中旁加载 `word-addin/manifest.xml`。
-2. 打开任务窗格。
-3. 选中一段正文，或准备使用“全书正文”范围。
-4. 点击“AI 审校”。
-5. 确认任务窗格“运行过程”区域显示阶段进度；长选区和全书正文显示分块进度，并在“审校结果”区域显示最终结果。
-6. 如果存在审校问题，确认审校完成后只在任务窗格展示结果，不立即写入 Word。
-7. 使用筛选器、复选框和批量选择按钮调整待应用问题；点击单条“定位”，确认 Word 选中对应原文。
-8. 点击“应用 N 条到 Word”后，确认只有已勾选的可定位问题批注在对应原文片段上；修订模式下确认已勾选、可定位且有 `replacement` 的问题生成 Word 修订。
-9. 确认已勾选、可定位但无 `replacement` 的问题回退为原位批注，已勾选但未定位问题合并为一条范围起点汇总批注，未勾选问题不写回。
-10. 点击“清空当前结果”，确认任务窗格清空当前结果，并创建新的本地 session。
-11. 审校运行中点击“停止审校”，确认请求停止且不会插入批注。
-12. 切换“快速审校/深度审校”和“Responses/Chat”，确认后续请求使用对应模式。
-13. 切换“批注模式/修订模式”，确认批注模式不改正文，修订模式生成可接受/拒绝的 Word 修订。
-14. 使用历史记录“清空、另存为、导入”，确认当前开发版 schema 历史可管理，旧 schema 历史导入失败并显示格式不兼容。
+- `AI_API_KEY` 为空时走 mock fallback。
+- 不配置 `AI_PROFILES_JSON` 时，后端根据 `AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL` 生成 `default` profile。
+- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。Xiaomi MiMo 示例：`{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
+- `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
+- `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
+- `temperature` 是请求级参数，插件默认 `0.2`，不需要环境变量。
+- `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
+- `AGENT_WORKSPACE_DIR` 保存 V2 project/session/run/history schema 的 SQLite 文件和 V2 输出文件，默认 `backend/var/agent-workspace`。
+- `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
 
 ## 验收标准
 
 - `GET /health` 返回 200 和 `{ "status": "ok" }`。
-- 空文本请求 `POST /api/proofread` 返回 422。
-- 未配置 `AI_API_KEY` 时，后端返回 mock `issues[]`。
-- 配置 `AI_API_KEY` 时，后端按 `provider_api` 调用真实 Responses API 或 Chat Completions；AI provider 异常时返回 502，且错误信息不包含 Key 或 Authorization header。
-- 缺少 `book` 或 `book.title` 为空时，`POST /api/proofread` 返回 422。
-- `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文，但会记录 AI provider 返回报文、分块失败的 chunk 编号、范围和错误原因；`DEBUG` 会额外打印后端请求体和 AI provider 请求报文，但不包含 API Key、`Authorization` 或 Bearer token。
-- `POST /api/sessions` 返回唯一 `session_id`。
-- Responses 请求不携带 `previous_response_id`；同一 `session_id` 的多次审校互不续接上下文。
-- AI 输出不包含 `start/end` 时，后端能按 `original` 计算 `start/end`。
-- AI 输出含 `replacement` 时，后端响应保留该字段；AI 输出无 `replacement` 或空字符串时，响应为 `replacement: null`。
-- `original` 与 `replacement` 去掉所有空白后完全一致的 issue 会被后端过滤。
-- 重复 `original` 会按 issue 顺序定位不同 occurrence；找不到 `original` 时返回 `start/end: null`。
-- `proofread_mode=fast` 与 `proofread_mode=thinking` 使用不同 prompt 和 token 上限。
-- `reasoning_enabled` 默认关闭；开启时 Chat 请求体包含 `"reasoning": {"enabled": true}`，关闭时包含 `"reasoning": {"enabled": false}`。
+- 空文本、缺少 `book` 或空 `book.title` 返回 422。
+- 未配置 `AI_API_KEY` 时返回 mock `issues[]`。
+- 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
+- `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
+- 普通审校、流式审校、分块任务和 DOCX 全书任务都接受 `temperature`；越界返回 422，合法值会传给 AI provider。
+- 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；新生成的 DOCX 持久化结果在服务重启后仍返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
+- `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
+- Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
+- AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
+- 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异 issue 被过滤。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
-- 当前选区超过 7000 字时，插件自动创建分块任务；全书正文始终创建分块任务。
-- 分块任务返回全局位置 `global_start/global_end`，前端据此定位重复原文 occurrence。
-- 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；前端收到 `chunk_started` 后本地每秒刷新当前块耗时，并用后端 `heartbeat` 校准进度；SSE 不可用时前端轮询任务状态。
-- 当前 chunk 审校超过前端阈值后，任务窗格启用“重试当前分块”；任务结束后如存在失败 chunk，启用“重试失败分块”。
-- 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`，前端保留可用结果并显示失败块数、失败原因和累计问题数。
-- 点击停止审校会中断当前请求并取消后端异步任务；分块审校会查询当前任务快照，保留已收到的 issues 供查看和应用。
-- `npm run lint` 通过。
-- `npm run build` 通过。
-- Word 中书名为空或空选区点击“AI 审校”时显示错误，不调用审校接口。
-- 后端不可用时显示错误，不插入空批注。
-- 后端返回非空 `issues[]` 时，插件只展示结果；筛选和勾选后点击“应用 N 条到 Word”才对已选的可定位问题逐条插入批注或修订。
-- 单条“定位”可选中 Word 中对应原文；重复 `original` 场景应定位到按 `start/end` 计算出的 occurrence。
-- 修订模式下，插件临时将 `document.changeTrackingMode` 设为 `TrackAll`，对已选、可定位且有 `replacement` 的问题替换正文，完成后恢复原修订设置。
-- 修订模式下，已选且无 `replacement` 但可定位的问题回退为原位批注；已选但定位失败的问题合并为一条锚定在审校范围起点第一个非空字符的汇总批注；未选问题不写回。
-- 后端返回空 `issues[]` 时，插件显示未发现明显问题，且不插入批注。
-- 审校运行中点击“停止审校”时，插件中断请求、恢复按钮、不插入批注。
-- 插件本地保存最近 20 条新 schema 审校历史，可回看结果，并支持清空、另存为 JSON、导入 JSON；历史记录包含 `selectedIssueIds` 和 `skippedIssueCount`，开发阶段不兼容旧历史数据。
+- 当前选区 `> 7000` 字时创建分块任务；全书正文上传 `.docx` 创建 DOCX 文件任务；默认 `chunk_size=5000`。
+- 分块任务返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标。
+- 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；SSE 不可用时前端轮询任务状态。
+- 当前 chunk 超过前端等待阈值后可重试当前分块；终态任务存在失败 chunk 时可重试失败分块。
+- DOCX 文件任务支持同样的当前分块重试和失败分块重试；重试成功后重新生成结果文件。
+- 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`。
+- 点击停止审校会中断前端请求并取消后端异步任务；分块审校保留已收到 issues 供查看和应用。
+- Word 中书名为空或空选区时显示错误，不调用审校接口。
+- 后端返回非空 `issues[]` 时，插件只展示结果；点击“应用 N 条到 Word”后才写回已选问题。
+- 全书 `.docx` 完成后插件显示后端保存的新文件名、保留期限和“下载审校后 Word”按钮。
+- 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
+- 批注模式不改正文；修订+批注模式生成可接受/拒绝的 Word 修订，并把原因批注锚定到插入后的 `replacement` 文本，完成后恢复原修订设置。
+- 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订+批注。
+- `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
+- 插件本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；DOCX 历史保存输出文件名、下载入口和过期时间，不保存原文件或全文。当前选区新历史可再次筛选、勾选、定位和应用，旧历史缺少 locator occurrence 时只读。

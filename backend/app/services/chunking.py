@@ -4,7 +4,6 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from app.schemas import (
-    BookInfo,
     ChunkedProofreadIssue,
     ChunkedProofreadRequest,
     ChunkedProofreadResult,
@@ -22,17 +21,7 @@ BOUNDARY_LOOKBACK = 1500
 PARAGRAPH_BOUNDARIES = ("\n\n", "\r\n\r\n", "\n", "\r")
 SENTENCE_BOUNDARIES = ("。", "！", "？", "；", ".", "!", "?", ";")
 
-ProofreadChunkCallable = Callable[
-    [
-        str,
-        BookInfo,
-        str | None,
-        proofread_service.ProviderAPI | None,
-        proofread_service.ProofreadMode,
-        bool,
-    ],
-    Awaitable[list[ProofreadIssue]],
-]
+ProofreadChunkCallable = Callable[..., Awaitable[list[ProofreadIssue]]]
 
 logger = logging.getLogger(__name__)
 
@@ -114,23 +103,19 @@ async def proofread_chunks(
 
     for chunk in chunks:
         try:
+            proofread_kwargs = {
+                "session_id": request.session_id,
+                "provider_api": request.provider_api,
+                "proofread_mode": request.proofread_mode,
+            }
+            if request.ai_profile_id is not None:
+                proofread_kwargs["ai_profile_id"] = request.ai_profile_id
             if request.reasoning_enabled:
-                chunk_issues = await proofread_chunk(
-                    chunk.text,
-                    request.book,
-                    request.session_id,
-                    request.provider_api,
-                    request.proofread_mode,
-                    True,
-                )
-            else:
-                chunk_issues = await proofread_chunk(
-                    chunk.text,
-                    request.book,
-                    request.session_id,
-                    request.provider_api,
-                    request.proofread_mode,
-                )
+                proofread_kwargs["reasoning_enabled"] = True
+            if request.temperature != proofread_service.DEFAULT_TEMPERATURE:
+                proofread_kwargs["temperature"] = request.temperature
+
+            chunk_issues = await proofread_chunk(chunk.text, request.book, **proofread_kwargs)
         except Exception:
             failed_chunks += 1
             logger.exception("chunk proofread failed chunk_index=%s", chunk.index)
@@ -143,15 +128,26 @@ async def proofread_chunks(
 
 
 def globalize_issues(chunk: ProofreadChunk, issues: list[ProofreadIssue]) -> list[ChunkedProofreadIssue]:
-    return [
-        ChunkedProofreadIssue(
-            **issue.model_dump(),
-            chunk_index=chunk.index,
-            global_start=chunk.start + issue.start if issue.start is not None else None,
-            global_end=chunk.start + issue.end if issue.end is not None else None,
+    global_issues: list[ChunkedProofreadIssue] = []
+
+    for issue in issues:
+        payload = issue.model_dump()
+        locator = payload.get("locator")
+
+        if locator is not None:
+            locator["key_start"] += chunk.start
+            locator["key_end"] += chunk.start
+
+        global_issues.append(
+            ChunkedProofreadIssue(
+                **payload,
+                chunk_index=chunk.index,
+                global_start=chunk.start + issue.start if issue.start is not None else None,
+                global_end=chunk.start + issue.end if issue.end is not None else None,
+            )
         )
-        for issue in issues
-    ]
+
+    return global_issues
 
 
 def _find_chunk_boundary(text: str, start: int, target_end: int) -> int:

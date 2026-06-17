@@ -4,11 +4,13 @@ import asyncio
 from fastapi.testclient import TestClient
 
 import app.services.proofread as proofread_service
+from app.agents import trace as agent_trace
 from app.services import tasks as task_service
 from app.main import app
 from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
 from app.services.ai_client import AIClientError, AIProofreadResult, AIStreamEvent
 from app.services.sessions import clear_sessions_for_tests
+from app.services import docx_tasks as docx_task_service
 
 
 client = TestClient(app)
@@ -18,6 +20,8 @@ BOOK = {"title": "测试书名", "introduction": "这是一部测试图书。"}
 def setup_function():
     clear_sessions_for_tests()
     task_service.clear_tasks_for_tests()
+    docx_task_service.clear_tasks_for_tests()
+    agent_trace.clear_traces_for_tests()
 
 
 def parse_sse_events(body: str):
@@ -59,6 +63,53 @@ def test_create_session_returns_unique_session_ids():
     assert second.json()["session_id"].startswith("session_")
     assert first.json()["session_id"] != second.json()["session_id"]
     assert first.json()["created_at"]
+
+
+def test_ai_profiles_returns_default_profile_without_key():
+    response = client.get("/api/ai-profiles")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": "default",
+            "label": "Default AI (.env)",
+            "model": "gpt-4o-mini",
+            "default_api": "responses",
+            "supported_apis": ["responses", "chat"],
+            "configured": False,
+        }
+    ]
+
+
+def test_proofread_rejects_unsupported_profile_api(monkeypatch):
+    monkeypatch.setenv(
+        "AI_PROFILES_JSON",
+        json.dumps(
+            [
+                {
+                    "id": "chat-only",
+                    "label": "Chat Only",
+                    "api_base_url": "https://example.test/v1",
+                    "api_key_env": "CHAT_ONLY_KEY",
+                    "model": "chat-model",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        ),
+    )
+
+    response = client.post(
+        "/api/proofread",
+        json=proofread_payload(
+            "这是一段文本。",
+            ai_profile_id="chat-only",
+            provider_api="responses",
+        ),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "AI profile chat-only does not support provider_api=responses"
 
 
 def test_proofread_rejects_blank_text():
@@ -103,6 +154,16 @@ def test_proofread_returns_mock_issue_without_api_key(monkeypatch):
     assert issue["suggestion"]
     assert issue["start"] == 0
     assert isinstance(issue["end"], int)
+    assert payload["run_id"].startswith("agent_run_")
+
+    trace_response = client.get(f"/api/agent/runs/{payload['run_id']}/trace")
+    assert trace_response.status_code == 200
+    trace_payload = trace_response.json()
+    assert trace_payload["run_id"] == payload["run_id"]
+    assert trace_payload["status"] == "succeeded"
+    assert trace_payload["nodes"]
+    assert trace_payload["chunks"][0]["issue_count"] == 1
+    assert "这是一段需要审校的文本。" not in json.dumps(trace_payload, ensure_ascii=False)
 
 
 def test_proofread_calculates_offsets_when_ai_omits_them(monkeypatch):
@@ -251,6 +312,89 @@ def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     assert [(issue["start"], issue["end"]) for issue in response.json()["issues"]] == [(0, 2), (5, 7)]
 
 
+def test_locate_issues_builds_original_locator_for_unique_long_original():
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="唯一较长原文",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues("开头，唯一较长原文，结尾。", [issue])[0]
+
+    assert located.start == 3
+    assert located.end == 9
+    assert located.locator is not None
+    assert located.locator.strategy == "original"
+    assert located.locator.key == "唯一较长原文"
+    assert located.locator.key_start == 3
+    assert located.locator.key_end == 9
+    assert located.locator.key_occurrence_index == 0
+
+
+def test_locate_issues_builds_context_locator_for_short_repeated_original():
+    text = "第一处甲需要看。第二处甲需要改。"
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="甲",
+        suggestion="建议",
+        start=10,
+        end=11,
+    )
+
+    located = proofread_service.locate_issues(text, [issue, issue.model_copy(update={"id": "issue-2"})])[1]
+
+    assert located.start == 11
+    assert located.end == 12
+    assert located.locator is not None
+    assert located.locator.strategy == "context"
+    assert located.locator.key == text
+    assert located.locator.original_start_in_key == 11
+    assert located.locator.original_end_in_key == 12
+    assert located.locator.key_occurrence_index == 0
+
+
+def test_locate_issues_records_repeated_original_locator_occurrence_index():
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="重复较长原文",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues(
+        "重复较长原文。重复较长原文。重复较长原文。",
+        [
+            issue,
+            issue.model_copy(update={"id": "issue-2"}),
+            issue.model_copy(update={"id": "issue-3"}),
+        ],
+    )
+
+    assert [issue.locator.key_occurrence_index for issue in located if issue.locator] == [0, 1, 2]
+
+
+def test_locate_issues_omits_locator_when_context_is_still_repeated():
+    text = "甲" * 80
+    issue = ProofreadIssue(
+        id="issue-1",
+        category="style",
+        severity="medium",
+        original="甲",
+        suggestion="建议",
+    )
+
+    located = proofread_service.locate_issues(text, [issue])[0]
+
+    assert located.start == 0
+    assert located.end == 1
+    assert located.locator is None
+
+
 def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     async def fake_proofread_with_ai(
         text,
@@ -280,6 +424,7 @@ def test_proofread_returns_null_offsets_when_original_is_missing(monkeypatch):
     issue = response.json()["issues"][0]
     assert issue["start"] is None
     assert issue["end"] is None
+    assert issue["locator"] is None
 
 
 def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
@@ -288,11 +433,13 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
         book,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
         assert text == "这是一段需要真实审校的文本。"
         assert book.title == "测试书名"
         assert provider_api == "responses"
         assert proofread_mode == "thinking"
+        assert temperature == 0.7
         return AIProofreadResult(
             response_id="resp-1",
             issues=[
@@ -313,7 +460,11 @@ def test_proofread_uses_ai_client_when_api_key_is_configured(monkeypatch):
 
     response = client.post(
         "/api/proofread",
-        json=proofread_payload("这是一段需要真实审校的文本。", proofread_mode="thinking"),
+        json=proofread_payload(
+            "这是一段需要真实审校的文本。",
+            proofread_mode="thinking",
+            temperature=0.7,
+        ),
     )
 
     assert response.status_code == 200
@@ -390,6 +541,15 @@ def test_proofread_chat_mode_does_not_require_session(monkeypatch):
         {"provider_api": "chat", "proofread_mode": "thinking", "reasoning_enabled": True},
         {"provider_api": "chat", "proofread_mode": "fast", "reasoning_enabled": False},
     ]
+
+
+def test_proofread_rejects_temperature_out_of_range():
+    response = client.post(
+        "/api/proofread",
+        json=proofread_payload("这是一段文本。", temperature=1.6),
+    )
+
+    assert response.status_code == 422
 
 
 def test_proofread_converts_ai_client_error_to_502(monkeypatch):
@@ -535,7 +695,8 @@ def test_proofread_stream_does_not_require_session(monkeypatch):
     assert response.status_code == 200
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == ["status", "status", "result"]
-    assert events[2]["data"] == {"issues": []}
+    assert events[2]["data"]["issues"] == []
+    assert events[2]["data"]["run_id"].startswith("agent_run_")
 
 
 def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
@@ -558,7 +719,8 @@ def test_proofread_stream_returns_error_event_for_ai_client_error(monkeypatch):
 
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == ["status", "status", "error"]
-    assert events[-1]["data"] == {"message": "AI provider returned HTTP 500"}
+    assert events[-1]["data"]["message"] == "AI provider returned HTTP 500"
+    assert events[-1]["data"]["run_id"].startswith("agent_run_")
 
 
 def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
@@ -568,7 +730,9 @@ def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
+        assert temperature == 0.6
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -589,6 +753,7 @@ def test_chunked_proofread_returns_aggregated_global_offsets(monkeypatch):
             ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
+            temperature=0.6,
         ),
     )
 
@@ -610,7 +775,9 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
         session_id=None,
         provider_api=None,
         proofread_mode="fast",
+        temperature=0.2,
     ):
+        assert temperature == 0.6
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -631,6 +798,7 @@ def test_proofread_task_lifecycle_and_events(monkeypatch):
             ("甲" * 2999) + "。" + ("乙" * 2999) + "。",
             scope="document",
             chunk_size=3000,
+            temperature=0.6,
         ),
     )
 

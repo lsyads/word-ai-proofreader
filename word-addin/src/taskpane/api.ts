@@ -1,18 +1,26 @@
-/* global AbortSignal, Response, TextDecoder, clearTimeout, fetch, setTimeout */
+/* global AbortSignal, Blob, File, Response, URL, URLSearchParams, document, fetch, setTimeout */
 
 import {
+  AIProfile,
+  ApplicationMode,
   BookInfo,
-  ChunkedProofreadIssue,
-  ChunkedProofreadResponse,
-  DEFAULT_CHUNK_SIZE,
-  ProofreadIssue,
   ProofreadMode,
-  ProofreadResponse,
-  ProofreadScope,
-  ProofreadStatusEvent,
   ProviderAPI,
   SessionResponse,
-  TaskState,
+  V2ApprovalDecision,
+  V2ApprovalDecisionResponse,
+  V2CandidateList,
+  V2DocumentMap,
+  V2MemoryList,
+  V2MarkWrittenResponse,
+  V2Project,
+  V2ProjectDeleteResponse,
+  V2ProjectList,
+  V2ReviewPlan,
+  V2ReviewReport,
+  V2Run,
+  V2RunTrace,
+  V2WritebackResponse,
 } from "./types";
 
 const API_BASE_URL = "";
@@ -29,122 +37,92 @@ export async function createSession(): Promise<SessionResponse> {
   return (await response.json()) as SessionResponse;
 }
 
-export async function requestProofread(
-  text: string,
-  book: BookInfo,
-  sessionId: string,
-  providerApi: ProviderAPI,
-  proofreadMode: ProofreadMode,
-  reasoningEnabled: boolean,
-  onStatus: (status: ProofreadStatusEvent) => void,
-  signal: AbortSignal
-): Promise<ProofreadResponse> {
-  if (providerApi === "chat") {
-    onStatus({ stage: "api", message: "正在请求 Chat Completions 接口" });
-    return requestProofreadJson(
-      text,
-      book,
-      sessionId,
-      providerApi,
-      proofreadMode,
-      reasoningEnabled,
-      signal
-    );
-  }
-
-  try {
-    onStatus({ stage: "api", message: "正在请求流式接口" });
-    return await requestProofreadStream(
-      text,
-      book,
-      sessionId,
-      providerApi,
-      proofreadMode,
-      reasoningEnabled,
-      onStatus,
-      signal
-    );
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw error;
-    }
-
-    onStatus({ stage: "fallback", message: "流式接口不可用，正在回退到普通接口" });
-    return requestProofreadJson(
-      text,
-      book,
-      sessionId,
-      providerApi,
-      proofreadMode,
-      reasoningEnabled,
-      signal
-    );
-  }
-}
-
-export async function requestChunkedProofreadTask(
-  text: string,
-  book: BookInfo,
-  scope: ProofreadScope,
-  sessionId: string,
-  providerApi: ProviderAPI,
-  proofreadMode: ProofreadMode,
-  reasoningEnabled: boolean,
-  onStatus: (status: ProofreadStatusEvent) => void,
-  onTaskCreated: (taskId: string | null) => void,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  onStatus({
-    stage: "task",
-    message:
-      scope === "document"
-        ? "正在创建全书分块审校任务。"
-        : "当前选区超过 7000 字，正在创建分块审校任务。",
+export async function getAIProfiles(): Promise<AIProfile[]> {
+  const response = await fetch(`${API_BASE_URL}/api/ai-profiles`, {
+    method: "GET",
   });
 
-  const createdTask = await createProofreadTask(
-    text,
-    book,
-    scope,
-    sessionId,
-    providerApi,
-    proofreadMode,
-    reasoningEnabled,
-    signal
-  );
-  onTaskCreated(createdTask.task_id || null);
-  onStatus(taskSnapshotToStatus("queued", createdTask, "审校任务已创建。"));
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
 
-  return waitForProofreadTask(createdTask.task_id as string, onStatus, signal);
+  return (await response.json()) as AIProfile[];
 }
 
-export async function cancelProofreadTask(taskId: string): Promise<void> {
-  await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}`, {
+export async function createV2Project(
+  file: File,
+  book: BookInfo,
+  reviewGoal: string,
+  signal: AbortSignal
+): Promise<V2Project> {
+  const params = new URLSearchParams({
+    filename: file.name,
+    book: JSON.stringify(book),
+    review_goal: reviewGoal,
+  });
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects?${params.toString()}`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    body: file,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Project;
+}
+
+export async function createV2SelectionProject(
+  text: string,
+  book: BookInfo,
+  reviewGoal: string,
+  sessionId: string | null,
+  signal: AbortSignal
+): Promise<V2Project> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects/selection`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      book,
+      review_goal: reviewGoal,
+      session_id: sessionId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Project;
+}
+
+export async function listV2Projects(signal: AbortSignal): Promise<V2ProjectList> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects`, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ProjectList;
+}
+
+export async function deleteV2Project(
+  projectId: string,
+  signal: AbortSignal
+): Promise<V2ProjectDeleteResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
-  });
-}
-
-export async function retryCurrentProofreadChunk(
-  taskId: string
-): Promise<ChunkedProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/retry-current`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
-  }
-
-  return (await response.json()) as ChunkedProofreadResponse;
-}
-
-export async function retryFailedProofreadChunks(
-  taskId: string,
-  onStatus: (status: ProofreadStatusEvent) => void,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/retry-failed`, {
-    method: "POST",
     signal,
   });
 
@@ -152,330 +130,336 @@ export async function retryFailedProofreadChunks(
     throw new Error(await getResponseErrorMessage(response));
   }
 
-  const task = (await response.json()) as ChunkedProofreadResponse;
-  onStatus(taskSnapshotToStatus("retry_queued", task, "已创建失败分块重试任务。"));
-  return waitForProofreadTask(taskId, onStatus, signal);
+  return (await response.json()) as V2ProjectDeleteResponse;
 }
 
-export function normalizeChunkedIssuesForScope(issues: ChunkedProofreadIssue[]): ProofreadIssue[] {
-  return issues.map((issue) => ({
-    ...issue,
-    id: `chunk-${issue.chunk_index}-${issue.id}`,
-    start: issue.global_start,
-    end: issue.global_end,
-  }));
-}
+export async function getV2Project(projectId: string, signal: AbortSignal): Promise<V2Project> {
+  const response = await fetch(`${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}`, {
+    method: "GET",
+    signal,
+  });
 
-export function taskSnapshotToStatus(
-  stage: string,
-  task: ChunkedProofreadResponse,
-  message: string
-): ProofreadStatusEvent {
-  return {
-    stage,
-    message,
-    task_id: task.task_id || undefined,
-    status: task.status,
-    scope: task.scope,
-    total_chunks: task.total_chunks,
-    completed_chunks: task.completed_chunks,
-    failed_chunks: task.failed_chunks,
-    issue_count: task.issues.length,
-    error_message: task.error_message || undefined,
-  };
-}
-
-export function formatProgressResult(status: ProofreadStatusEvent): string {
-  if (typeof status.total_chunks !== "number") {
-    return status.message;
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
   }
 
-  const completed = status.completed_chunks || 0;
-  const failed = status.failed_chunks || 0;
-  const issueCount = status.issue_count || 0;
-  const details = [
-    `进度 ${completed}/${status.total_chunks}`,
-    `失败 ${failed} 块`,
-    `累计问题 ${issueCount} 条`,
-  ];
-
-  if (typeof status.elapsed_seconds === "number") {
-    details.push(`当前块耗时 ${formatElapsedSeconds(status.elapsed_seconds)}`);
-  }
-
-  if (status.error_message) {
-    details.push(`失败原因：${status.error_message}`);
-  }
-
-  return `${status.message} ${details.join("，")}。`;
+  return (await response.json()) as V2Project;
 }
 
-export function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" && error !== null && "name" in error && error.name === "AbortError"
+export async function getV2ReviewPlan(
+  projectId: string,
+  signal: AbortSignal
+): Promise<V2ReviewPlan> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/plan`,
+    {
+      method: "GET",
+      signal,
+    }
   );
-}
-
-async function requestProofreadJson(
-  text: string,
-  book: BookInfo,
-  sessionId: string,
-  providerApi: ProviderAPI,
-  proofreadMode: ProofreadMode,
-  reasoningEnabled: boolean,
-  signal: AbortSignal
-): Promise<ProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      text,
-      book,
-      session_id: sessionId,
-      provider_api: providerApi,
-      proofread_mode: proofreadMode,
-      reasoning_enabled: reasoningEnabled,
-      context: {
-        source: "word-addin",
-      },
-    }),
-  });
 
   if (!response.ok) {
     throw new Error(await getResponseErrorMessage(response));
   }
 
-  return (await response.json()) as ProofreadResponse;
+  return (await response.json()) as V2ReviewPlan;
 }
 
-async function requestProofreadStream(
-  text: string,
-  book: BookInfo,
-  sessionId: string,
-  providerApi: ProviderAPI,
-  proofreadMode: ProofreadMode,
-  reasoningEnabled: boolean,
-  onStatus: (status: ProofreadStatusEvent) => void,
+export async function getV2DocumentMap(
+  projectId: string,
   signal: AbortSignal
-): Promise<ProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/stream`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      text,
-      book,
-      session_id: sessionId,
-      provider_api: providerApi,
-      proofread_mode: proofreadMode,
-      reasoning_enabled: reasoningEnabled,
-      context: {
-        source: "word-addin",
-      },
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
-  }
-
-  if (!response.body) {
-    throw new Error("当前 Word WebView 不支持流式读取。");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result: ProofreadResponse | null = null;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-
-    const events = buffer.split("\n\n");
-    buffer = events.pop() || "";
-
-    events.forEach((eventText) => {
-      const event = parseSseEvent(eventText);
-
-      if (!event) {
-        return;
-      }
-
-      if (event.name === "status") {
-        onStatus(event.data as ProofreadStatusEvent);
-      }
-
-      if (event.name === "result") {
-        result = event.data as ProofreadResponse;
-        onStatus({ stage: "result", message: "已收到结构化审校结果。" });
-      }
-
-      if (event.name === "error") {
-        throw new Error((event.data as { message?: string }).message || "AI 审校失败");
-      }
-    });
-
-    if (done) {
-      break;
+): Promise<V2DocumentMap> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/document-map`,
+    {
+      method: "GET",
+      signal,
     }
-  }
-
-  if (!result) {
-    throw new Error("流式审校没有返回最终结果。");
-  }
-
-  return result;
-}
-
-async function createProofreadTask(
-  text: string,
-  book: BookInfo,
-  scope: ProofreadScope,
-  sessionId: string,
-  providerApi: ProviderAPI,
-  proofreadMode: ProofreadMode,
-  reasoningEnabled: boolean,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      text,
-      book,
-      session_id: sessionId,
-      provider_api: providerApi,
-      proofread_mode: proofreadMode,
-      reasoning_enabled: reasoningEnabled,
-      scope,
-      chunk_size: DEFAULT_CHUNK_SIZE,
-      context: {
-        source: "word-addin",
-        flow: "chunked-task",
-      },
-    }),
-  });
+  );
 
   if (!response.ok) {
     throw new Error(await getResponseErrorMessage(response));
   }
 
-  return (await response.json()) as ChunkedProofreadResponse;
+  return (await response.json()) as V2DocumentMap;
 }
 
-async function streamProofreadTaskEvents(
-  taskId: string,
-  onStatus: (status: ProofreadStatusEvent) => void,
+export async function runV2Project(
+  projectId: string,
+  sessionId: string,
+  aiProfileId: string,
+  providerApi: ProviderAPI,
+  proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
+  temperature: number,
   signal: AbortSignal
+): Promise<V2Run> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        ai_profile_id: aiProfileId,
+        provider_api: providerApi,
+        proofread_mode: proofreadMode,
+        reasoning_enabled: reasoningEnabled,
+        temperature,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Run;
+}
+
+export async function getV2Run(
+  projectId: string,
+  runId: string,
+  signal: AbortSignal
+): Promise<V2Run> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Run;
+}
+
+export async function getV2RunTrace(
+  projectId: string,
+  runId: string,
+  signal: AbortSignal
+): Promise<V2RunTrace> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/trace`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2RunTrace;
+}
+
+export async function getV2Memory(projectId: string, signal: AbortSignal): Promise<V2MemoryList> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/memory`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2MemoryList;
+}
+
+export async function deleteV2Memory(
+  projectId: string,
+  memoryId: string,
+  signal: AbortSignal
+): Promise<V2MemoryList> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/memory/${encodeURIComponent(memoryId)}`,
+    {
+      method: "DELETE",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2MemoryList;
+}
+
+export async function getV2Candidates(
+  projectId: string,
+  signal: AbortSignal,
+  options: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    passName?: string;
+  } = {}
+): Promise<V2CandidateList> {
+  const params = new URLSearchParams({
+    page: String(options.page || 1),
+    page_size: String(options.pageSize || 20),
+  });
+  if (options.status && options.status !== "all") {
+    params.set("status", options.status);
+  }
+  if (options.passName && options.passName !== "all") {
+    params.set("pass_name", options.passName);
+  }
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates?${params.toString()}`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2CandidateList;
+}
+
+export async function decideAllPendingV2Candidates(
+  projectId: string,
+  status: "approved" | "rejected" | "deferred",
+  signal: AbortSignal
+): Promise<V2ApprovalDecisionResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates/bulk-decisions`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ApprovalDecisionResponse;
+}
+
+export async function decideV2Candidates(
+  projectId: string,
+  decisions: V2ApprovalDecision[],
+  signal: AbortSignal
+): Promise<V2ApprovalDecisionResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates/decisions`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ decisions }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ApprovalDecisionResponse;
+}
+
+export async function markV2CandidatesWritten(
+  projectId: string,
+  candidateIds: string[],
+  signal: AbortSignal
+): Promise<V2MarkWrittenResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates/mark-written`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ candidate_ids: candidateIds }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2MarkWrittenResponse;
+}
+
+export async function writebackV2Project(
+  projectId: string,
+  applicationMode: ApplicationMode,
+  fallbackSummaryTruncateEnabled: boolean,
+  signal: AbortSignal
+): Promise<V2WritebackResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/writeback`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        application_mode: applicationMode,
+        fallback_summary_truncate_enabled: fallbackSummaryTruncateEnabled,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2WritebackResponse;
+}
+
+export async function getV2ReviewReport(
+  projectId: string,
+  signal: AbortSignal
+): Promise<V2ReviewReport> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/report`,
+    {
+      method: "GET",
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2ReviewReport;
+}
+
+export function getV2DownloadUrl(projectId: string): string {
+  return `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/download`;
+}
+
+export async function downloadV2ProjectDocx(
+  projectId: string,
+  filename: string,
+  signal?: AbortSignal
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}/events`, {
-    method: "GET",
-    signal,
-    headers: {
-      Accept: "text/event-stream",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(await getResponseErrorMessage(response));
-  }
-
-  if (!response.body) {
-    throw new Error("当前 Word WebView 不支持任务进度流。");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-
-    const events = buffer.split("\n\n");
-    buffer = events.pop() || "";
-
-    events.forEach((eventText) => {
-      const event = parseSseEvent(eventText);
-
-      if (!event) {
-        return;
-      }
-
-      const status = taskEventToStatus(event.name, event.data);
-      onStatus(status);
-
-    });
-
-    if (done) {
-      break;
-    }
-  }
-}
-
-async function waitForProofreadTask(
-  taskId: string,
-  onStatus: (status: ProofreadStatusEvent) => void,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  try {
-    await streamProofreadTaskEvents(taskId, onStatus, signal);
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw error;
-    }
-
-    onStatus({ stage: "polling", message: "任务进度流不可用，正在切换到轮询查询。" });
-    return pollProofreadTask(taskId, onStatus, signal);
-  }
-
-  const finalTask = await getProofreadTask(taskId, signal);
-  if (finalTask.status === "cancelled") {
-    throw createAbortError();
-  }
-
-  return finalTask;
-}
-
-async function pollProofreadTask(
-  taskId: string,
-  onStatus: (status: ProofreadStatusEvent) => void,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  while (true) {
-    const task = await getProofreadTask(taskId, signal);
-    onStatus(taskSnapshotToStatus("polling", task, "正在查询分块审校进度。"));
-
-    if (task.status === "succeeded" || task.status === "partial_succeeded") {
-      return task;
-    }
-
-    if (task.status === "failed" || task.status === "cancelled") {
-      if (task.status === "failed") {
-        return task;
-      }
-      throw createAbortError();
-    }
-
-    await delay(1000, signal);
-  }
-}
-
-export async function getProofreadTask(
-  taskId: string,
-  signal: AbortSignal
-): Promise<ChunkedProofreadResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/proofread/tasks/${taskId}`, {
+  const response = await fetch(getV2DownloadUrl(projectId), {
     method: "GET",
     signal,
   });
@@ -484,120 +468,30 @@ export async function getProofreadTask(
     throw new Error(await getResponseErrorMessage(response));
   }
 
-  return (await response.json()) as ChunkedProofreadResponse;
+  const blob = await response.blob();
+  triggerBlobDownload(blob, filename);
 }
 
-function parseSseEvent(eventText: string): { name: string; data: unknown } | null {
-  const lines = eventText.split("\n");
-  const eventLine = lines.find((line) => line.startsWith("event: "));
-  const dataLine = lines.find((line) => line.startsWith("data: "));
-
-  if (!eventLine || !dataLine) {
-    return null;
-  }
-
-  return {
-    name: eventLine.replace("event: ", ""),
-    data: JSON.parse(dataLine.replace("data: ", "")),
-  };
-}
-
-function taskEventToStatus(stage: string, data: unknown): ProofreadStatusEvent {
-  const payload = isRecord(data) ? data : {};
-  const message = typeof payload.message === "string" ? payload.message : formatStageMessage(stage);
-
-  return {
-    stage,
-    message,
-    task_id: typeof payload.task_id === "string" ? payload.task_id : undefined,
-    status: isTaskState(payload.status) ? payload.status : undefined,
-    scope: isProofreadScope(payload.scope) ? payload.scope : undefined,
-    total_chunks: typeof payload.total_chunks === "number" ? payload.total_chunks : undefined,
-    completed_chunks:
-      typeof payload.completed_chunks === "number" ? payload.completed_chunks : undefined,
-    failed_chunks: typeof payload.failed_chunks === "number" ? payload.failed_chunks : undefined,
-    issue_count: typeof payload.issue_count === "number" ? payload.issue_count : undefined,
-    chunk_index: typeof payload.chunk_index === "number" ? payload.chunk_index : undefined,
-    chunk_start: typeof payload.chunk_start === "number" ? payload.chunk_start : undefined,
-    chunk_end: typeof payload.chunk_end === "number" ? payload.chunk_end : undefined,
-    chunk_len: typeof payload.chunk_len === "number" ? payload.chunk_len : undefined,
-    elapsed_seconds:
-      typeof payload.elapsed_seconds === "number" ? payload.elapsed_seconds : undefined,
-    error_message: typeof payload.error_message === "string" ? payload.error_message : undefined,
-  };
-}
-
-function createAbortError(): Error {
-  const error = new Error("Aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return Promise.reject(createAbortError());
-  }
-
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      resolve();
-    }, milliseconds);
-
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(createAbortError());
-      },
-      { once: true }
-    );
-  });
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 async function getResponseErrorMessage(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { detail?: string };
-
-    if (payload.detail) {
+    const payload = await response.json();
+    if (typeof payload.detail === "string") {
       return payload.detail;
     }
+    return JSON.stringify(payload.detail || payload);
   } catch {
-    // Fall back to the HTTP status below when the response is not JSON.
+    return response.statusText || `HTTP ${response.status}`;
   }
-
-  return `后端返回 HTTP ${response.status}`;
-}
-
-function formatStageMessage(stage: string): string {
-  return stage;
-}
-
-function formatElapsedSeconds(seconds: number): string {
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)} 秒`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.round(seconds % 60);
-  return `${minutes} 分 ${remainingSeconds} 秒`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isProofreadScope(value: unknown): value is ProofreadScope {
-  return value === "selection" || value === "document";
-}
-
-function isTaskState(value: unknown): value is TaskState {
-  return (
-    value === "idle" ||
-    value === "queued" ||
-    value === "running" ||
-    value === "succeeded" ||
-    value === "partial_succeeded" ||
-    value === "failed" ||
-    value === "cancelled"
-  );
 }

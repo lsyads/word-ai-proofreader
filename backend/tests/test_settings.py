@@ -9,12 +9,14 @@ def test_settings_defaults():
     assert settings.openai_api_base_url == "https://api.openai.com/v1"
     assert settings.openai_model == "gpt-4o-mini"
     assert settings.ai_request_timeout_seconds == 30
-    assert settings.ai_max_tokens == 32768
-    assert settings.ai_fast_max_tokens == 16384
-    assert settings.ai_thinking_max_tokens == 32768
+    assert settings.ai_fast_max_tokens == 8192
+    assert settings.ai_thinking_max_tokens == 16384
     assert settings.backend_cors_origins == "https://localhost:3000,http://localhost:3000"
     assert settings.backend_cors_origin_list == ["https://localhost:3000", "http://localhost:3000"]
     assert settings.backend_log_level == "INFO"
+    assert settings.docx_output_dir.name == "docx-results"
+    assert settings.docx_retention_days == 7
+    assert settings.agent_trace_dir.name == "agent-traces"
 
 
 def test_settings_parses_comma_separated_cors_origins():
@@ -29,3 +31,25 @@ def test_settings_reads_comma_separated_cors_origins_from_env(monkeypatch):
     settings = Settings()
 
     assert settings.backend_cors_origin_list == ["https://localhost:3000", "http://localhost:3000"]
+
+
+def test_settings_enforces_minimum_docx_retention_days():
+    settings = Settings(DOCX_RETENTION_DAYS=1)
+
+    assert settings.docx_retention_days == 7
+
+
+def test_settings_resolves_relative_docx_output_dir_from_backend_root():
+    settings = Settings(DOCX_OUTPUT_DIR="var/docx-results")
+
+    assert settings.docx_output_dir.is_absolute()
+    assert settings.docx_output_dir.name == "docx-results"
+    assert settings.docx_output_dir.parent.name == "var"
+
+
+def test_settings_resolves_relative_agent_trace_dir_from_backend_root():
+    settings = Settings(AGENT_TRACE_DIR="var/agent-traces")
+
+    assert settings.agent_trace_dir.is_absolute()
+    assert settings.agent_trace_dir.name == "agent-traces"
+    assert settings.agent_trace_dir.parent.name == "var"

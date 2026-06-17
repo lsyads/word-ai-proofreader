@@ -1,6 +1,6 @@
 import asyncio
 
-from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue
+from app.schemas import BookInfo, ChunkedProofreadRequest, ProofreadIssue, ProofreadLocator
 from app.services import chunking
 
 
@@ -69,6 +69,15 @@ def test_globalize_issues_adds_chunk_offsets():
         suggestion="修正错别字。",
         start=3,
         end=5,
+        locator=ProofreadLocator(
+            key="有错字。",
+            key_start=2,
+            key_end=6,
+            original_start_in_key=1,
+            original_end_in_key=3,
+            strategy="context",
+            key_occurrence_index=0,
+        ),
     )
 
     global_issue = chunking.globalize_issues(chunk, [issue])[0]
@@ -78,10 +87,18 @@ def test_globalize_issues_adds_chunk_offsets():
     assert global_issue.end == 5
     assert global_issue.global_start == 3003
     assert global_issue.global_end == 3005
+    assert global_issue.locator is not None
+    assert global_issue.locator.key_start == 3002
+    assert global_issue.locator.key_end == 3006
+    assert global_issue.locator.original_start_in_key == 1
+    assert global_issue.locator.key_occurrence_index == 0
 
 
 def test_proofread_chunked_aggregates_issues():
-    async def fake_proofread_chunk(text, book, session_id, provider_api, proofread_mode):
+    async def fake_proofread_chunk(text, book, **kwargs):
+        assert kwargs["session_id"] is None
+        assert kwargs["provider_api"] is None
+        assert kwargs["proofread_mode"] == "fast"
         return [
             ProofreadIssue(
                 id=f"issue-{text[0]}",
@@ -108,3 +125,23 @@ def test_proofread_chunked_aggregates_issues():
     assert failed_chunks == 0
     assert [issue.chunk_index for issue in issues] == [0, 1]
     assert [issue.global_start for issue in issues] == [0, 5000]
+
+
+def test_proofread_chunked_passes_temperature():
+    calls = []
+
+    async def fake_proofread_chunk(text, book, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    request = ChunkedProofreadRequest(
+        text=("甲" * 4999) + "。" + ("乙" * 4999) + "。",
+        book=BOOK,
+        scope="document",
+        temperature=0.8,
+    )
+
+    asyncio.run(chunking.proofread_chunks(request, fake_proofread_chunk))
+
+    assert calls
+    assert all(call["temperature"] == 0.8 for call in calls)

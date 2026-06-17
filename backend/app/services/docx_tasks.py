@@ -8,44 +8,59 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from app.schemas import (
-    ChunkedProofreadIssue,
-    ChunkedProofreadRequest,
-    ChunkedProofreadResult,
-    ChunkedTaskStatus,
-)
+from app.schemas import BookInfo, ChunkedProofreadIssue, ChunkedTaskStatus, DocxProofreadResult
 from app.agents import trace as agent_trace
 from app.agents.service import AgentOptions, agent_runner, metadata_from_options
-from app.services import chunking
+from app.services import docx as docx_service
+from app.services import docx_store
 from app.services.ai_client import AIClientError, AIStreamEvent, DEFAULT_TEMPERATURE
-from app.services.proofread import proofread_text
+from app.services.proofread import ProofreadMode, ProviderAPI, proofread_text
 
-MAX_TASKS = 50
+MAX_TASKS = 30
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 logger = logging.getLogger(__name__)
 
 
-class ProofreadTaskNotFound(KeyError):
-    """Raised when an in-memory proofread task is unavailable."""
+class DocxProofreadTaskNotFound(KeyError):
+    """Raised when an in-memory DOCX task is unavailable."""
 
 
-class ProofreadTaskConflict(RuntimeError):
-    """Raised when a task cannot accept the requested operation now."""
+class DocxProofreadTaskConflict(RuntimeError):
+    """Raised when a DOCX task cannot accept the requested operation now."""
 
 
 @dataclass
-class ProofreadTask:
+class DocxProofreadRequestData:
+    filename: str
+    content: bytes
+    book: BookInfo
+    session_id: str | None = None
+    ai_profile_id: str | None = None
+    provider_api: ProviderAPI | None = None
+    proofread_mode: ProofreadMode = "fast"
+    reasoning_enabled: bool = False
+    temperature: float = DEFAULT_TEMPERATURE
+    application_mode: docx_service.ApplicationMode = "comment"
+    fallback_summary_truncate_enabled: bool = True
+
+
+@dataclass
+class DocxProofreadTask:
     task_id: str
-    request: ChunkedProofreadRequest
+    request: DocxProofreadRequestData
     run_id: str = field(default_factory=lambda: f"agent_run_{uuid.uuid4().hex}")
     status: ChunkedTaskStatus = "queued"
     total_chunks: int = 0
     completed_chunks: int = 0
     failed_chunks: int = 0
-    issues: list[ChunkedProofreadIssue] = field(default_factory=list)
+    issue_count: int = 0
     error_message: str | None = None
+    output_filename: str | None = None
+    output_path: Path | None = None
+    expires_at: str | None = None
     cancel_requested: bool = False
     current_chunk_index: int | None = None
     current_chunk_started_at: float | None = None
@@ -54,31 +69,32 @@ class ProofreadTask:
     completed_chunk_indices: set[int] = field(default_factory=set)
     failed_chunk_indices: set[int] = field(default_factory=set)
     chunk_retry_counts: dict[int, int] = field(default_factory=dict)
-    created_at: str = field(default_factory=lambda: _now_iso())
-    updated_at: str = field(default_factory=lambda: _now_iso())
+    issues: list[ChunkedProofreadIssue] = field(default_factory=list)
     events: list[AIStreamEvent] = field(default_factory=list)
     subscribers: list[asyncio.Queue[AIStreamEvent]] = field(default_factory=list)
+    created_at: str = field(default_factory=lambda: _now_iso())
+    updated_at: str = field(default_factory=lambda: _now_iso())
 
 
-_tasks: OrderedDict[str, ProofreadTask] = OrderedDict()
+_tasks: OrderedDict[str, DocxProofreadTask] = OrderedDict()
 
 
-def create_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
-    chunks = chunking.split_text_into_chunks(request.text, request.scope, request.chunk_size)
-    task_id = f"task_{uuid.uuid4().hex}"
+def create_task(request: DocxProofreadRequestData) -> DocxProofreadResult:
+    cleanup_expired_results()
+    document = docx_service.parse_docx(request.content)
+    chunks = docx_service.split_docx_into_chunks(document)
+    task_id = f"docx_task_{uuid.uuid4().hex}"
     options = _agent_options(request)
     run_id = agent_runner.create_run(
-        "chunked_task",
+        "docx_task",
         task_id=task_id,
         total_chunks=len(chunks),
-        metadata=metadata_from_options(options),
+        metadata={
+            **metadata_from_options(options),
+            "source_filename": request.filename,
+        },
     )
-    task = ProofreadTask(
-        task_id=task_id,
-        run_id=run_id,
-        request=request,
-        total_chunks=len(chunks),
-    )
+    task = DocxProofreadTask(task_id=task_id, run_id=run_id, request=request, total_chunks=len(chunks))
     _tasks[task_id] = task
     _trim_tasks()
     _emit(
@@ -87,34 +103,39 @@ def create_task(request: ChunkedProofreadRequest) -> ChunkedProofreadResult:
         {
             "task_id": task_id,
             "run_id": run_id,
-            "scope": request.scope,
+            "scope": "document",
             "total_chunks": task.total_chunks,
-            "message": "审校任务已创建。",
+            "message": "DOCX 全书审校任务已创建。",
         },
     )
     task.runner_task = asyncio.create_task(_run_task(task, chunks))
     return snapshot_task(task)
 
 
-def get_task(task_id: str) -> ChunkedProofreadResult:
-    return snapshot_task(_require_task(task_id))
+def get_task(task_id: str) -> DocxProofreadResult:
+    task = _tasks.get(task_id)
+    if task:
+        return snapshot_task(task)
+
+    stored = docx_store.get_result(task_id)
+    if stored:
+        return snapshot_stored_result(stored)
+
+    raise DocxProofreadTaskNotFound(task_id)
 
 
-def cancel_task(task_id: str) -> ChunkedProofreadResult:
+def cancel_task(task_id: str) -> DocxProofreadResult:
     task = _require_task(task_id)
-
     if task.status in {"queued", "running"}:
         task.cancel_requested = True
-        task.updated_at = _now_iso()
-
+        _touch(task)
     return snapshot_task(task)
 
 
-def retry_current_chunk(task_id: str) -> ChunkedProofreadResult:
+def retry_current_chunk(task_id: str) -> DocxProofreadResult:
     task = _require_task(task_id)
-
     if task.status != "running" or task.current_chunk_index is None or not task.runner_task:
-        raise ProofreadTaskConflict("No running chunk is available to retry.")
+        raise DocxProofreadTaskConflict("No running DOCX chunk is available to retry.")
 
     task.retry_current_requested = True
     task.runner_task.cancel()
@@ -131,27 +152,25 @@ def retry_current_chunk(task_id: str) -> ChunkedProofreadResult:
     return snapshot_task(task)
 
 
-def retry_failed_chunks(task_id: str) -> ChunkedProofreadResult:
+def retry_failed_chunks(task_id: str) -> DocxProofreadResult:
     task = _require_task(task_id)
-
     if task.status in {"queued", "running"}:
-        raise ProofreadTaskConflict("Proofread task is still running.")
+        raise DocxProofreadTaskConflict("DOCX proofread task is still running.")
 
     failed_indices = sorted(task.failed_chunk_indices)
     if not failed_indices:
-        raise ProofreadTaskConflict("Proofread task has no failed chunks to retry.")
+        raise DocxProofreadTaskConflict("DOCX proofread task has no failed chunks to retry.")
 
-    chunks = chunking.split_text_into_chunks(
-        task.request.text,
-        task.request.scope,
-        task.request.chunk_size,
-    )
+    document = docx_service.parse_docx(task.request.content)
+    chunks = docx_service.split_docx_into_chunks(document)
     retry_chunks = [chunks[index] for index in failed_indices if index < len(chunks)]
     if not retry_chunks:
-        raise ProofreadTaskConflict("Failed chunks are no longer available to retry.")
+        raise DocxProofreadTaskConflict("Failed DOCX chunks are no longer available to retry.")
 
     task.cancel_requested = False
     task.error_message = None
+    task.output_filename = None
+    task.output_path = None
     task.status = "queued"
     for index in failed_indices:
         task.chunk_retry_counts[index] = task.chunk_retry_counts.get(index, 0) + 1
@@ -161,7 +180,7 @@ def retry_failed_chunks(task_id: str) -> ChunkedProofreadResult:
         "retry_queued",
         _progress_payload(
             task,
-            f"已创建失败分块重试任务，共 {len(retry_chunks)} 块。",
+            f"已创建 DOCX 失败分块重试任务，共 {len(retry_chunks)} 块。",
             extra={"retry_chunk_indices": failed_indices},
         ),
     )
@@ -169,10 +188,25 @@ def retry_failed_chunks(task_id: str) -> ChunkedProofreadResult:
     return snapshot_task(task)
 
 
+def get_download_path(task_id: str) -> tuple[Path, str]:
+    try:
+        output_path, stored = docx_store.resolve_download(task_id)
+    except KeyError as exc:
+        task = _tasks.get(task_id)
+        if task and task.output_path and task.output_filename and task.output_path.exists():
+            cleanup_expired_results()
+            return task.output_path, task.output_filename
+        raise DocxProofreadTaskNotFound(task_id) from exc
+    except (docx_store.DocxResultExpired, docx_store.DocxResultFileMissing) as exc:
+        raise DocxProofreadTaskConflict(str(exc)) from exc
+
+    cleanup_expired_results()
+    return output_path, stored.output_filename
+
+
 async def stream_task_events(task_id: str) -> AsyncIterator[AIStreamEvent]:
     task = _require_task(task_id)
     queue: asyncio.Queue[AIStreamEvent] = asyncio.Queue()
-    replay_from = len(task.events)
 
     for event in task.events:
         yield event
@@ -181,15 +215,13 @@ async def stream_task_events(task_id: str) -> AsyncIterator[AIStreamEvent]:
         return
 
     task.subscribers.append(queue)
-
     try:
         while True:
-            if _is_terminal(task.status) and queue.empty() and replay_from <= len(task.events):
+            if _is_terminal(task.status) and queue.empty():
                 return
 
             event = await queue.get()
             yield event
-
             if event.event in {"completed", "cancelled", "error"}:
                 return
     finally:
@@ -201,9 +233,17 @@ def clear_tasks_for_tests() -> None:
     _tasks.clear()
 
 
+def clear_store_for_tests() -> None:
+    docx_store.clear_store_for_tests()
+
+
+def cleanup_expired_results() -> int:
+    return docx_store.cleanup_expired()
+
+
 async def _run_task(
-    task: ProofreadTask,
-    chunks: list[chunking.ProofreadChunk],
+    task: DocxProofreadTask,
+    chunks: list[Any],
     retry_only: bool = False,
 ) -> None:
     task.status = "running"
@@ -213,7 +253,7 @@ async def _run_task(
     _emit(
         task,
         "running",
-        _progress_payload(task, "正在重试失败分块。" if retry_only else "审校任务开始运行。"),
+        _progress_payload(task, "正在重试 DOCX 失败分块。" if retry_only else "DOCX 审校任务开始运行。"),
     )
 
     try:
@@ -234,22 +274,14 @@ async def _run_task(
                     total_chunks=task.total_chunks,
                     completed_chunks=task.completed_chunks,
                     failed_chunks=task.failed_chunks,
-                    issue_count=len(task.issues),
+                    issue_count=task.issue_count,
                 )
                 elapsed_seconds = _elapsed_seconds_for_task(task)
                 logger.warning(
-                    "chunked proofread chunk failed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s completed_chunks=%s failed_chunks=%s total_chunks=%s error_type=%s error_message=%s",
+                    "docx chunk proofread failed task_id=%s chunk_index=%s error=%s",
                     task.task_id,
                     chunk.index,
-                    chunk.start,
-                    chunk.end,
-                    len(chunk.text),
-                    elapsed_seconds,
-                    task.completed_chunks,
-                    task.failed_chunks,
-                    task.total_chunks,
-                    type(exc).__name__,
-                    str(exc),
+                    exc,
                     exc_info=True,
                 )
                 _emit(
@@ -274,7 +306,8 @@ async def _run_task(
             task.completed_chunk_indices.add(chunk.index)
             _sync_chunk_counts(task)
             task.issues = [issue for issue in task.issues if issue.chunk_index != chunk.index]
-            task.issues.extend(chunking.globalize_issues(chunk, chunk_issues))
+            task.issues.extend(_globalize_issues(chunk, chunk_issues))
+            task.issue_count = len(task.issues)
             _touch(task)
             agent_trace.update_run(
                 task.run_id,
@@ -282,19 +315,9 @@ async def _run_task(
                 total_chunks=task.total_chunks,
                 completed_chunks=task.completed_chunks,
                 failed_chunks=task.failed_chunks,
-                issue_count=len(task.issues),
+                issue_count=task.issue_count,
             )
             elapsed_seconds = _elapsed_seconds_for_task(task)
-            logger.info(
-                "chunked proofread chunk completed task_id=%s chunk_index=%s chunk_start=%s chunk_end=%s chunk_len=%s elapsed_seconds=%s issue_count=%s",
-                task.task_id,
-                chunk.index,
-                chunk.start,
-                chunk.end,
-                len(chunk.text),
-                elapsed_seconds,
-                len(chunk_issues),
-            )
             _emit(
                 task,
                 "chunk_completed",
@@ -307,7 +330,7 @@ async def _run_task(
                         "chunk_end": chunk.end,
                         "chunk_len": len(chunk.text),
                         "elapsed_seconds": elapsed_seconds,
-                        "issue_count": len(task.issues),
+                        "issue_count": task.issue_count,
                     },
                 ),
             )
@@ -318,7 +341,7 @@ async def _run_task(
 
         if task.completed_chunks == 0 and task.failed_chunks > 0:
             task.status = "failed"
-            task.error_message = "All chunks failed to proofread."
+            task.error_message = "All DOCX chunks failed to proofread."
             _touch(task)
             agent_trace.update_run(
                 task.run_id,
@@ -326,21 +349,14 @@ async def _run_task(
                 total_chunks=task.total_chunks,
                 completed_chunks=task.completed_chunks,
                 failed_chunks=task.failed_chunks,
-                issue_count=len(task.issues),
+                issue_count=task.issue_count,
                 error_message=task.error_message,
             )
-            logger.warning(
-                "chunked proofread task failed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_message=%s",
-                task.task_id,
-                task.total_chunks,
-                task.completed_chunks,
-                task.failed_chunks,
-                task.error_message,
-            )
-            _emit(task, "error", _progress_payload(task, "审校任务失败。"))
+            _emit(task, "error", _progress_payload(task, "DOCX 审校任务失败。"))
             return
 
         task.status = "partial_succeeded" if task.failed_chunks > 0 else "succeeded"
+        _save_output_file(task)
         _touch(task)
         agent_trace.update_run(
             task.run_id,
@@ -348,18 +364,9 @@ async def _run_task(
             total_chunks=task.total_chunks,
             completed_chunks=task.completed_chunks,
             failed_chunks=task.failed_chunks,
-            issue_count=len(task.issues),
+            issue_count=task.issue_count,
         )
-        message = "审校任务部分完成。" if task.status == "partial_succeeded" else "审校任务完成。"
-        if task.status == "partial_succeeded":
-            logger.warning(
-                "chunked proofread task partially succeeded task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s issue_count=%s",
-                task.task_id,
-                task.total_chunks,
-                task.completed_chunks,
-                task.failed_chunks,
-                len(task.issues),
-            )
+        message = "DOCX 审校任务部分完成，已生成可下载文件。" if task.failed_chunks else "DOCX 审校任务完成，已生成可下载文件。"
         _emit(task, "completed", _progress_payload(task, message))
     except Exception as exc:
         task.status = "failed"
@@ -371,19 +378,11 @@ async def _run_task(
             total_chunks=task.total_chunks,
             completed_chunks=task.completed_chunks,
             failed_chunks=task.failed_chunks,
-            issue_count=len(task.issues),
+            issue_count=task.issue_count,
             error_message=task.error_message,
         )
-        logger.exception(
-            "chunked proofread task crashed task_id=%s total_chunks=%s completed_chunks=%s failed_chunks=%s error_type=%s error_message=%s",
-            task.task_id,
-            task.total_chunks,
-            task.completed_chunks,
-            task.failed_chunks,
-            type(exc).__name__,
-            str(exc),
-        )
-        _emit(task, "error", _progress_payload(task, "审校任务失败。", extra={"error_message": str(exc)}))
+        logger.exception("docx proofread task crashed task_id=%s", task.task_id)
+        _emit(task, "error", _progress_payload(task, "DOCX 审校任务失败。", extra={"error_message": str(exc)}))
     finally:
         task.current_chunk_index = None
         task.current_chunk_started_at = None
@@ -392,10 +391,7 @@ async def _run_task(
             task.runner_task = None
 
 
-async def _proofread_chunk_with_manual_retry(
-    task: ProofreadTask,
-    chunk: chunking.ProofreadChunk,
-) -> list[Any]:
+async def _proofread_chunk_with_manual_retry(task: DocxProofreadTask, chunk: Any) -> list[Any]:
     while True:
         chunk_started_at = time.monotonic()
         task.current_chunk_index = chunk.index
@@ -439,7 +435,6 @@ async def _proofread_chunk_with_manual_retry(
                     ),
                 )
                 continue
-
             raise
         finally:
             heartbeat_task.cancel()
@@ -449,22 +444,18 @@ async def _proofread_chunk_with_manual_retry(
                 pass
 
 
-async def _proofread_chunk(
-    task: ProofreadTask,
-    chunk: chunking.ProofreadChunk,
-) -> list[Any]:
-    proofread_kwargs = {
+async def _proofread_chunk(task: DocxProofreadTask, chunk: Any) -> list[Any]:
+    kwargs = {
         "session_id": task.request.session_id,
         "provider_api": task.request.provider_api,
         "proofread_mode": task.request.proofread_mode,
     }
     if task.request.ai_profile_id is not None:
-        proofread_kwargs["ai_profile_id"] = task.request.ai_profile_id
+        kwargs["ai_profile_id"] = task.request.ai_profile_id
     if task.request.reasoning_enabled:
-        proofread_kwargs["reasoning_enabled"] = True
+        kwargs["reasoning_enabled"] = True
     if task.request.temperature != DEFAULT_TEMPERATURE:
-        proofread_kwargs["temperature"] = task.request.temperature
-
+        kwargs["temperature"] = task.request.temperature
     return await agent_runner.proofread_task_chunk(
         run_id=task.run_id,
         chunk=chunk,
@@ -475,59 +466,136 @@ async def _proofread_chunk(
     )
 
 
-def snapshot_task(task: ProofreadTask) -> ChunkedProofreadResult:
-    return ChunkedProofreadResult(
+def _globalize_issues(chunk: Any, issues: list[Any]) -> list[ChunkedProofreadIssue]:
+    global_issues: list[ChunkedProofreadIssue] = []
+    for issue in issues:
+        payload = issue.model_dump()
+        payload["locator"] = None
+        global_issues.append(
+            ChunkedProofreadIssue(
+                **payload,
+                chunk_index=chunk.index,
+                global_start=chunk.start + issue.start if issue.start is not None else None,
+                global_end=chunk.start + issue.end if issue.end is not None else None,
+            )
+        )
+    return global_issues
+
+
+def _save_output_file(task: DocxProofreadTask) -> None:
+    output_filename = docx_service.build_output_filename(task.request.filename, task.request.application_mode)
+    relative_path = (Path(task.task_id) / output_filename).as_posix()
+    output_path = docx_store.result_path(relative_path)
+    agent_runner.record_docx_writeback(
+        task.run_id,
+        docx_service.write_docx_result,
+        task.request.content,
+        task.issues,
+        task.request.application_mode,
+        output_path,
+        issue_count=task.issue_count,
+        fallback_summary_truncate_enabled=task.request.fallback_summary_truncate_enabled,
+    )
+    task.output_filename = output_filename
+    task.output_path = output_path
+    task.expires_at = docx_store.build_expires_at()
+    docx_store.save_result(
         task_id=task.task_id,
         run_id=task.run_id,
-        scope=task.request.scope,
+        source_filename=task.request.filename,
+        output_filename=output_filename,
+        application_mode=task.request.application_mode,
         status=task.status,
         total_chunks=task.total_chunks,
         completed_chunks=task.completed_chunks,
         failed_chunks=task.failed_chunks,
-        issues=task.issues,
+        issue_count=task.issue_count,
+        relative_path=relative_path,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        expires_at=task.expires_at,
+    )
+
+
+def snapshot_task(task: DocxProofreadTask) -> DocxProofreadResult:
+    return DocxProofreadResult(
+        task_id=task.task_id,
+        run_id=task.run_id,
+        status=task.status,
+        total_chunks=task.total_chunks,
+        completed_chunks=task.completed_chunks,
+        failed_chunks=task.failed_chunks,
+        issue_count=task.issue_count,
+        source_filename=task.request.filename,
+        application_mode=task.request.application_mode,
+        output_filename=task.output_filename,
+        download_url=f"/api/proofread/docx/tasks/{task.task_id}/download" if task.output_filename else None,
+        expires_at=task.expires_at,
+        retention_days=docx_store.retention_days() if task.output_filename else None,
         error_message=task.error_message,
     )
 
 
-def _require_task(task_id: str) -> ProofreadTask:
+def snapshot_stored_result(stored: docx_store.StoredDocxResult) -> DocxProofreadResult:
+    return DocxProofreadResult(
+        task_id=stored.task_id,
+        run_id=stored.run_id,
+        status=stored.status,
+        total_chunks=stored.total_chunks,
+        completed_chunks=stored.completed_chunks,
+        failed_chunks=stored.failed_chunks,
+        issue_count=stored.issue_count,
+        source_filename=stored.source_filename,
+        application_mode=stored.application_mode,
+        output_filename=stored.output_filename,
+        download_url=f"/api/proofread/docx/tasks/{stored.task_id}/download",
+        expires_at=stored.expires_at,
+        retention_days=docx_store.retention_days(),
+        error_message=None,
+    )
+
+
+def _require_task(task_id: str) -> DocxProofreadTask:
     try:
         return _tasks[task_id]
     except KeyError as exc:
-        raise ProofreadTaskNotFound(task_id) from exc
+        raise DocxProofreadTaskNotFound(task_id) from exc
 
 
-def _emit(task: ProofreadTask, event: str, data: dict[str, Any]) -> None:
+def _emit(task: DocxProofreadTask, event: str, data: dict[str, Any]) -> None:
     stream_event = AIStreamEvent(event, data)
     task.events.append(stream_event)
-
     for queue in list(task.subscribers):
         queue.put_nowait(stream_event)
 
 
 def _progress_payload(
-    task: ProofreadTask,
+    task: DocxProofreadTask,
     message: str,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": task.task_id,
         "run_id": task.run_id,
-        "scope": task.request.scope,
+        "scope": "document",
         "status": task.status,
         "total_chunks": task.total_chunks,
         "completed_chunks": task.completed_chunks,
         "failed_chunks": task.failed_chunks,
-        "issue_count": len(task.issues),
+        "issue_count": task.issue_count,
+        "source_filename": task.request.filename,
+        "output_filename": task.output_filename,
+        "download_url": f"/api/proofread/docx/tasks/{task.task_id}/download" if task.output_filename else None,
+        "expires_at": task.expires_at,
+        "retention_days": docx_store.retention_days() if task.output_filename else None,
         "message": message,
     }
-
     if extra:
         payload.update(extra)
-
     return payload
 
 
-def _mark_cancelled(task: ProofreadTask) -> None:
+def _mark_cancelled(task: DocxProofreadTask) -> None:
     task.status = "cancelled"
     _touch(task)
     agent_trace.update_run(
@@ -536,23 +604,16 @@ def _mark_cancelled(task: ProofreadTask) -> None:
         total_chunks=task.total_chunks,
         completed_chunks=task.completed_chunks,
         failed_chunks=task.failed_chunks,
-        issue_count=len(task.issues),
+        issue_count=task.issue_count,
     )
-    _emit(task, "cancelled", _progress_payload(task, "审校任务已停止。"))
+    _emit(task, "cancelled", _progress_payload(task, "DOCX 审校任务已停止。"))
 
 
-async def _emit_heartbeats(
-    task: ProofreadTask,
-    chunk: chunking.ProofreadChunk,
-    chunk_started_at: float | None = None,
-) -> None:
-    chunk_started_at = chunk_started_at if chunk_started_at is not None else time.monotonic()
-
+async def _emit_heartbeats(task: DocxProofreadTask, chunk: Any, chunk_started_at: float) -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         if task.cancel_requested or _is_terminal(task.status):
             return
-
         _emit(
             task,
             "heartbeat",
@@ -570,11 +631,11 @@ async def _emit_heartbeats(
         )
 
 
-def _touch(task: ProofreadTask) -> None:
+def _touch(task: DocxProofreadTask) -> None:
     task.updated_at = _now_iso()
 
 
-def _sync_chunk_counts(task: ProofreadTask) -> None:
+def _sync_chunk_counts(task: DocxProofreadTask) -> None:
     task.completed_chunks = len(task.completed_chunk_indices)
     task.failed_chunks = len(task.failed_chunk_indices)
 
@@ -587,10 +648,9 @@ def _elapsed_seconds(started_at: float) -> float:
     return round(time.monotonic() - started_at, 1)
 
 
-def _elapsed_seconds_for_task(task: ProofreadTask) -> float:
+def _elapsed_seconds_for_task(task: DocxProofreadTask) -> float:
     if task.current_chunk_started_at is not None:
         return _elapsed_seconds(task.current_chunk_started_at)
-
     return 0.0
 
 
@@ -603,7 +663,7 @@ def _trim_tasks() -> None:
         _tasks.popitem(last=False)
 
 
-def _agent_options(request: ChunkedProofreadRequest) -> AgentOptions:
+def _agent_options(request: DocxProofreadRequestData) -> AgentOptions:
     return AgentOptions(
         session_id=request.session_id,
         ai_profile_id=request.ai_profile_id,
@@ -611,6 +671,7 @@ def _agent_options(request: ChunkedProofreadRequest) -> AgentOptions:
         proofread_mode=request.proofread_mode,
         reasoning_enabled=request.reasoning_enabled,
         temperature=request.temperature,
-        scope=request.scope,
-        chunk_size=request.chunk_size,
+        scope="document",
+        application_mode=request.application_mode,
+        fallback_summary_truncate_enabled=request.fallback_summary_truncate_enabled,
     )

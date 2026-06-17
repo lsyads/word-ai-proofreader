@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import AIClientError, V2PromptContext, proofread_with_ai, stream_proofread_with_ai
 from app.settings import Settings
 
 
@@ -122,7 +122,6 @@ def settings():
         OPENAI_API_BASE_URL="https://example.test/v1",
         OPENAI_MODEL="test-model",
         AI_REQUEST_TIMEOUT_SECONDS=12,
-        AI_MAX_TOKENS=345,
     )
 
 
@@ -157,7 +156,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert call["timeout"] == 12
     assert call["json"]["model"] == "test-model"
     assert call["json"]["temperature"] == 0.2
-    assert call["json"]["max_output_tokens"] == 16384
+    assert call["json"]["max_output_tokens"] == 8192
     assert call["json"]["text"] == {"format": {"type": "json_object"}}
     assert "previous_response_id" not in call["json"]
     assert "这是一段文本。" in call["json"]["input"]
@@ -176,8 +175,42 @@ def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
     result = asyncio.run(proofread_with_ai("文本", book(), settings=settings(), proofread_mode="thinking"))
 
     assert result.response_id == "resp-1"
-    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 32768
+    assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 16384
     assert "深度审校" in FakeAsyncClient.calls[0]["json"]["input"]
+
+
+def test_proofread_with_ai_uses_custom_temperature_for_responses(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=response_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    asyncio.run(proofread_with_ai("文本", book(), settings=settings(), temperature=0.7))
+
+    assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.7
+
+
+def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=response_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    context = V2PromptContext(
+        review_goal="重点检查术语一致性。",
+        source_type="docx",
+        pass_name="terminology_pass",
+        document_map_summary="text_len=100; blocks=2; chunks=1",
+        memory_items=[{"kind": "preference", "key": "approved_issue_categories", "value": "style"}],
+        style_rules=["统一术语。"],
+    )
+
+    asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
+
+    payload_input = FakeAsyncClient.calls[0]["json"]["input"]
+    assert "V2.1 Agent 工作台要求" in payload_input
+    assert "重点检查术语一致性。" in payload_input
+    assert "terminology_pass" in payload_input
+    assert "text_len=100; blocks=2; chunks=1" in payload_input
+    assert "approved_issue_categories" in payload_input
 
 
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):
@@ -202,13 +235,53 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.test/v1/chat/completions"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
-    assert call["json"]["max_tokens"] == 16384
+    assert call["json"]["max_tokens"] == 8192
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
     assert call["json"]["reasoning"] == {"enabled": False}
+    assert "max_completion_tokens" not in call["json"]
+    assert "thinking" not in call["json"]
+    assert "response_format" not in call["json"]
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
     assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
+
+
+def test_proofread_with_ai_uses_selected_profile(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "profile-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "openrouter-qwen",
+                    "label": "OpenRouter / Qwen",
+                    "api_base_url": "https://openrouter.ai/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "model": "qwen/test",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    result = asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="openrouter-qwen",
+            settings=profile_settings,
+        )
+    )
+
+    assert result.response_id == "chatcmpl-1"
+    call = FakeAsyncClient.calls[0]
+    assert call["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert call["headers"] == {"Authorization": "Bearer profile-key"}
+    assert call["json"]["model"] == "qwen/test"
 
 
 def test_proofread_with_ai_can_enable_chat_reasoning(monkeypatch):
@@ -227,6 +300,107 @@ def test_proofread_with_ai_can_enable_chat_reasoning(monkeypatch):
     )
 
     assert FakeAsyncClient.calls[0]["json"]["reasoning"] == {"enabled": True}
+
+
+def test_proofread_with_ai_uses_custom_temperature_for_chat(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            provider_api="chat",
+            temperature=0.9,
+            settings=settings(),
+        )
+    )
+
+    assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.9
+
+
+def test_proofread_with_ai_uses_xiaomimimo_chat_payload(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "xiaomi-mimo",
+                    "label": "Xiaomi MiMo",
+                    "api_base_url": "https://api.xiaomimimo.com/v1",
+                    "api_key_env": "MIMO_API_KEY",
+                    "model": "mimo-v2.5-pro",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    result = asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="xiaomi-mimo",
+            provider_api="chat",
+            settings=profile_settings,
+        )
+    )
+
+    assert result.response_id == "chatcmpl-1"
+    call = FakeAsyncClient.calls[0]
+    assert call["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert call["headers"] == {"Authorization": "Bearer mimo-key"}
+    assert call["json"]["model"] == "mimo-v2.5-pro"
+    assert call["json"]["max_completion_tokens"] == 8192
+    assert call["json"]["thinking"] == {"type": "disabled"}
+    assert call["json"]["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in call["json"]
+    assert "reasoning" not in call["json"]
+
+
+def test_proofread_with_ai_enables_xiaomimimo_thinking(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "xiaomi-mimo",
+                    "label": "Xiaomi MiMo",
+                    "api_base_url": "https://api.xiaomimimo.com/v1",
+                    "api_key_env": "MIMO_API_KEY",
+                    "model": "mimo-v2.5-pro",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="xiaomi-mimo",
+            provider_api="chat",
+            proofread_mode="thinking",
+            reasoning_enabled=True,
+            settings=profile_settings,
+        )
+    )
+
+    call = FakeAsyncClient.calls[0]
+    assert call["json"]["max_completion_tokens"] == 16384
+    assert call["json"]["thinking"] == {"type": "enabled"}
+    assert "max_tokens" not in call["json"]
+    assert "reasoning" not in call["json"]
 
 
 def test_proofread_with_ai_raises_for_responses_unsupported(monkeypatch):

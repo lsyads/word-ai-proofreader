@@ -39,6 +39,7 @@ import {
   V2ReviewReport,
   V2Run,
   V2RunTrace,
+  V2WritebackResponse,
 } from "./types";
 import {
   applyIssuesToScope,
@@ -50,6 +51,18 @@ import {
 
 type SourceType = "selection" | "docx";
 type RunPollResult = "completed" | "timed_out" | "aborted";
+type BusyAction =
+  | "starting_review"
+  | "refreshing_projects"
+  | "opening_project"
+  | "deleting_project"
+  | "refreshing_project"
+  | "bulk_decision"
+  | "candidate_decision"
+  | "loading_candidates"
+  | "locating"
+  | "writing_back"
+  | "downloading_docx";
 
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
@@ -67,6 +80,19 @@ const INTERNAL_MEMORY_KEYS = new Set([
   "observed_passes",
   "observed_severities",
 ]);
+const BUSY_ACTION_MESSAGES: Record<BusyAction, string> = {
+  bulk_decision: "正在批量处理建议，请稍候。",
+  candidate_decision: "正在处理建议，请稍候。",
+  deleting_project: "正在删除这次审校，请稍候。",
+  downloading_docx: "正在下载审校后文件，请稍候。",
+  loading_candidates: "正在刷新建议，请稍候。",
+  locating: "正在定位 Word 原文，请稍候。",
+  opening_project: "正在打开这次审校，请稍候。",
+  refreshing_project: "正在刷新进度，请稍候。",
+  refreshing_projects: "正在刷新最近审校，请稍候。",
+  starting_review: "正在启动审校，请稍候。",
+  writing_back: "正在写回已接受建议，请稍候。",
+};
 
 let currentSessionId: string | null = null;
 let currentAbortController: AbortController | null = null;
@@ -82,6 +108,7 @@ let currentMemory: V2MemoryItem[] = [];
 let currentReport: V2ReviewReport | null = null;
 let currentSelectionText = "";
 let isBusy = false;
+let currentBusyAction: BusyAction | null = null;
 let isDownloadingDocx = false;
 let isRunPolling = false;
 let runPollingTimedOut = false;
@@ -203,7 +230,7 @@ async function initializeProjects() {
 }
 
 async function startReview() {
-  const abortController = startBusy();
+  const abortController = startBusy("starting_review");
   try {
     if (isRunInProgress()) {
       showMessage("本次审校仍在运行，请刷新进度查看最新结果。", "default");
@@ -275,7 +302,7 @@ async function runCurrentProject(signal: AbortSignal) {
 }
 
 async function refreshProjects() {
-  const abortController = startBusy();
+  const abortController = startBusy("refreshing_projects");
   try {
     await loadRecentProjects(abortController.signal);
     showMessage("最近审校已刷新。", "success");
@@ -288,7 +315,7 @@ async function refreshProjects() {
 }
 
 async function openRecentProject(projectId: string) {
-  const abortController = startBusy();
+  const abortController = startBusy("opening_project");
   try {
     await loadProject(projectId, abortController.signal);
     showMessage("已打开这次审校。", "success");
@@ -313,7 +340,7 @@ async function deleteProject(projectId: string) {
   if (!confirmed) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("deleting_project");
   try {
     await deleteV2Project(projectId, abortController.signal);
     if (currentProject?.project_id === projectId) {
@@ -545,7 +572,7 @@ async function refreshCurrentProject() {
   if (!currentProject) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("refreshing_project");
   try {
     await refreshWorkspaceData(abortController.signal);
     if (currentRun && TERMINAL_RUN_STATUSES.has(currentRun.status)) {
@@ -584,7 +611,7 @@ async function decidePendingCandidates(status: "approved" | "rejected") {
   if (!confirmed) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("bulk_decision");
   try {
     await decideAllPendingV2Candidates(currentProject.project_id, status, abortController.signal);
     candidatePage = 1;
@@ -606,7 +633,7 @@ async function decideCandidates(decisions: V2ApprovalDecision[]) {
   if (!currentProject || decisions.length === 0) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("candidate_decision");
   try {
     const response = await decideV2Candidates(
       currentProject.project_id,
@@ -644,7 +671,7 @@ async function locateCandidate(candidateId: string) {
     showMessage("当前选区缓存已丢失，请重新开始当前选区审校后再定位。", "error");
     return;
   }
-  startBusy();
+  startBusy("locating");
   try {
     await selectIssueInScope(
       currentProject.source_type === "selection" ? currentSelectionText : "",
@@ -666,7 +693,7 @@ async function writebackApproved() {
   if (!currentProject) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("writing_back");
   try {
     const approved = await loadAllCandidatesByStatus("approved", abortController.signal);
     if (approved.length === 0) {
@@ -677,13 +704,31 @@ async function writebackApproved() {
     if (currentProject.source_type === "selection") {
       await writebackSelection(approved, abortController.signal);
     } else {
-      await writebackDocx(abortController.signal);
+      const writeback = await writebackDocx(abortController.signal);
+      mergeDocxWritebackResult(writeback);
     }
-    await refreshWorkspaceData(abortController.signal);
-    showMessage(
-      isDocxProject ? "已生成审校后文件，可点击下载。" : "已将接受的建议写回 Word。",
-      "success"
-    );
+    try {
+      await refreshWorkspaceData(abortController.signal);
+      showMessage(
+        isDocxProject ? "已生成审校后文件，可点击下载。" : "已将接受的建议写回 Word。",
+        "success"
+      );
+    } catch (refreshError) {
+      if (isDocxProject && currentProject.output_filename) {
+        showMessage("文件已生成，刷新报告失败。可先下载审校后文件，或点击刷新进度。", "success");
+        appendDebugLog("warn", "DOCX 写回成功后刷新工作台失败", {
+          error: getErrorMessage(refreshError),
+          project_id: currentProject.project_id,
+          output_filename: currentProject.output_filename,
+        });
+      } else {
+        showMessage("已完成写回，但刷新报告失败。请点击刷新进度查看最新结果。", "success");
+        appendDebugLog("warn", "写回成功后刷新工作台失败", {
+          error: getErrorMessage(refreshError),
+          project_id: currentProject?.project_id,
+        });
+      }
+    }
   } catch (error) {
     showMessage(`写回失败：${getErrorMessage(error)}`, "error");
     appendDebugLog("error", "V2 写回失败", { error: getErrorMessage(error) });
@@ -714,16 +759,40 @@ async function writebackSelection(approved: V2CandidateIssue[], signal: AbortSig
   );
 }
 
-async function writebackDocx(signal: AbortSignal) {
+async function writebackDocx(signal: AbortSignal): Promise<V2WritebackResponse> {
   if (!currentProject) {
-    return;
+    throw new Error("请先打开一个 DOCX 审校项目。");
   }
-  await writebackV2Project(
+  return writebackV2Project(
     currentProject.project_id,
     getApplicationMode(),
     getInput("fallback-summary-truncate-enabled").checked,
     signal
   );
+}
+
+function mergeDocxWritebackResult(writeback: V2WritebackResponse) {
+  if (!currentProject || currentProject.project_id !== writeback.project_id) {
+    return;
+  }
+  currentProject = {
+    ...currentProject,
+    status: "written",
+    approved_count: Math.max(0, currentProject.approved_count - writeback.written_count),
+    output_filename: writeback.output_filename,
+    download_url: writeback.download_url,
+  };
+  currentCandidates = currentCandidates.map((candidate) =>
+    candidate.status === "approved" ? { ...candidate, status: "written" } : candidate
+  );
+  if (currentReport) {
+    currentReport = {
+      ...currentReport,
+      status: "written",
+      approved_count: Math.max(0, currentReport.approved_count - writeback.written_count),
+      written_count: currentReport.written_count + writeback.written_count,
+    };
+  }
 }
 
 async function downloadDocx() {
@@ -733,7 +802,7 @@ async function downloadDocx() {
   if (isDownloadingDocx) {
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("downloading_docx");
   isDownloadingDocx = true;
   updateButtons();
   try {
@@ -1056,7 +1125,7 @@ async function handleCandidateFilterChange() {
     renderWorkspace();
     return;
   }
-  const abortController = startBusy();
+  const abortController = startBusy("loading_candidates");
   try {
     await loadCandidates(abortController.signal);
   } catch (error) {
@@ -1076,7 +1145,7 @@ async function changeCandidatePage(nextPage: number) {
     return;
   }
   candidatePage = nextPage;
-  const abortController = startBusy();
+  const abortController = startBusy("loading_candidates");
   try {
     await loadCandidates(abortController.signal);
   } catch (error) {
@@ -1162,19 +1231,48 @@ function updateButtons() {
   getButton("start-review").disabled = isBusy || runInProgress;
   setButtonLabel(
     "start-review",
-    runInProgress ? "审校进行中" : hasProject ? "重新审校" : "开始审校"
+    currentBusyAction === "starting_review"
+      ? "启动中"
+      : runInProgress
+        ? "审校进行中"
+        : hasProject
+          ? "重新审校"
+          : "开始审校"
   );
   getButton("refresh-projects").disabled = isBusy;
+  setButtonLabel(
+    "refresh-projects",
+    currentBusyAction === "refreshing_projects" ? "刷新中" : "刷新列表"
+  );
   getButton("refresh-current-project").disabled = isBusy || !hasProject;
+  setButtonLabel(
+    "refresh-current-project",
+    currentBusyAction === "refreshing_project" ? "刷新中" : "刷新进度"
+  );
   getButton("refresh-trace").disabled = isBusy || !hasProject;
+  setButtonLabel(
+    "refresh-trace",
+    currentBusyAction === "refreshing_project" ? "刷新中" : "刷新进度"
+  );
   getButton("continue-waiting").hidden = !runInProgress || isRunPolling;
   getButton("continue-waiting").disabled = isBusy || !hasProject || !hasRun || isRunPolling;
   getButton("approve-all").disabled = isBusy || pendingCount === 0;
+  setButtonLabel(
+    "approve-all",
+    currentBusyAction === "bulk_decision" ? "处理中" : "接受全部待处理"
+  );
   getButton("reject-all").disabled = isBusy || pendingCount === 0;
+  setButtonLabel("reject-all", currentBusyAction === "bulk_decision" ? "处理中" : "忽略全部待处理");
   getButton("writeback").disabled = isBusy || approvedCount === 0;
   setButtonLabel(
     "writeback",
-    approvedCount > 0 ? `写回 ${approvedCount} 条已接受建议` : "先接受建议后写回"
+    currentBusyAction === "writing_back"
+      ? currentProject?.source_type === "docx"
+        ? "生成文件中"
+        : "写回中"
+      : approvedCount > 0
+        ? `写回 ${approvedCount} 条已接受建议`
+        : "先接受建议后写回"
   );
   getButton("download-docx").disabled =
     isBusy ||
@@ -1182,7 +1280,10 @@ function updateButtons() {
     !currentProject ||
     currentProject.source_type !== "docx" ||
     !currentProject.output_filename;
-  setButtonLabel("download-docx", isDownloadingDocx ? "下载中" : "下载审校后文件");
+  setButtonLabel(
+    "download-docx",
+    currentBusyAction === "downloading_docx" || isDownloadingDocx ? "下载中" : "下载审校后文件"
+  );
 }
 
 function getValidatedBookInfo(): BookInfo | null {
@@ -1235,16 +1336,19 @@ function isRunInProgress(): boolean {
   return Boolean(currentRun && !TERMINAL_RUN_STATUSES.has(currentRun.status));
 }
 
-function startBusy(): AbortController {
+function startBusy(action: BusyAction): AbortController {
   currentAbortController?.abort();
   currentAbortController = new AbortController();
   isBusy = true;
+  currentBusyAction = action;
   updateButtons();
+  showMessage(BUSY_ACTION_MESSAGES[action], "default");
   return currentAbortController;
 }
 
 function stopBusy() {
   isBusy = false;
+  currentBusyAction = null;
   currentAbortController = null;
   updateButtons();
 }

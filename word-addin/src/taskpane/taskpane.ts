@@ -49,11 +49,14 @@ import {
 } from "./word";
 
 type SourceType = "selection" | "docx";
+type RunPollResult = "completed" | "timed_out" | "aborted";
 
 const DEFAULT_REVIEW_GOAL = "完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。";
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
 const LAST_PROJECT_ID_KEY = "docpilot_v2_last_project_id";
+const RUN_POLL_INTERVAL_MS = 2000;
+const RUN_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const TERMINAL_RUN_STATUSES = new Set([
   "waiting_for_approval",
   "succeeded",
@@ -82,6 +85,11 @@ let currentReport: V2ReviewReport | null = null;
 let currentSelectionText = "";
 let isBusy = false;
 let isDownloadingDocx = false;
+let isRunPolling = false;
+let runPollingTimedOut = false;
+let runPollAbortController: AbortController | null = null;
+let runPollingProjectId: string | null = null;
+let runPollingRunId: string | null = null;
 let candidatePage = 1;
 const candidatePageSize = 20;
 let candidateTotal = 0;
@@ -108,7 +116,9 @@ Office.onReady((info) => {
 function bindEvents() {
   getButton("start-review").onclick = startReview;
   getButton("refresh-projects").onclick = refreshProjects;
-  getButton("refresh-trace").onclick = refreshTrace;
+  getButton("refresh-current-project").onclick = refreshCurrentProject;
+  getButton("continue-waiting").onclick = continueWaitingForRun;
+  getButton("refresh-trace").onclick = refreshCurrentProject;
   getButton("approve-all").onclick = () => decidePendingCandidates("approved");
   getButton("reject-all").onclick = () => decidePendingCandidates("rejected");
   getButton("writeback").onclick = writebackApproved;
@@ -203,6 +213,10 @@ async function initializeProjects() {
 async function startReview() {
   const abortController = startBusy();
   try {
+    if (isRunInProgress()) {
+      showMessage("当前审校仍在运行，请刷新当前项目查看进度。", "default");
+      return;
+    }
     if (!currentProject) {
       await createProjectForCurrentInputs(abortController.signal);
     }
@@ -210,10 +224,9 @@ async function startReview() {
       throw new Error("审校项目创建失败。");
     }
     await runCurrentProject(abortController.signal);
-    showMessage("审校完成，请确认候选问题。", "success");
   } catch (error) {
-    showMessage(`审校失败：${getErrorMessage(error)}`, "error");
-    appendDebugLog("error", "V2.2 审校失败", { error: getErrorMessage(error) });
+    showMessage(`启动审校失败：${getErrorMessage(error)}`, "error");
+    appendDebugLog("error", "V2.2 审校启动失败", { error: getErrorMessage(error) });
   } finally {
     stopBusy();
     renderWorkspace();
@@ -267,10 +280,9 @@ async function runCurrentProject(signal: AbortSignal) {
     controls.temperature,
     signal
   );
-  showMessage("正在审校，请稍候。", "default");
+  showMessage("已开始后台审校，前端会自动刷新运行状态。", "default");
   renderWorkspace();
-  await pollRunUntilFinished(currentRun.run_id, signal);
-  await refreshWorkspaceData(signal);
+  startRunPolling(currentProject.project_id, currentRun.run_id);
 }
 
 async function refreshProjects() {
@@ -300,6 +312,10 @@ async function openRecentProject(projectId: string) {
 }
 
 async function deleteProject(projectId: string) {
+  if (currentProject?.project_id === projectId && isRunInProgress()) {
+    showMessage("当前项目仍在审校中，请等待完成或确认后台任务已停止后再删除。", "default");
+    return;
+  }
   const confirmed = await confirmAction(
     "确认删除项目",
     "删除后会清理该项目的候选问题、报告和生成的 DOCX 文件。这个操作不能撤销。"
@@ -360,22 +376,133 @@ async function loadProject(projectId: string, signal: AbortSignal) {
   localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
 }
 
-async function pollRunUntilFinished(runId: string, signal: AbortSignal) {
-  if (!currentProject) {
+async function pollRunUntilFinished(
+  projectId: string,
+  runId: string,
+  signal: AbortSignal
+): Promise<RunPollResult> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < RUN_POLL_TIMEOUT_MS) {
+    if (signal.aborted) {
+      return "aborted";
+    }
+    try {
+      const nextRun = await getV2Run(projectId, runId, signal);
+      const nextTrace = await getV2RunTrace(projectId, runId, signal);
+      const nextProject = await getV2Project(projectId, signal);
+      if (currentProject?.project_id === projectId) {
+        currentRun = nextRun;
+        currentTrace = nextTrace;
+        currentProject = nextProject;
+        renderWorkspace();
+      }
+      if (TERMINAL_RUN_STATUSES.has(nextRun.status)) {
+        if (currentProject?.project_id === projectId) {
+          await refreshWorkspaceData(signal);
+        }
+        return "completed";
+      }
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) {
+        return "aborted";
+      }
+      appendDebugLog("warn", "自动刷新运行状态失败", {
+        error: getErrorMessage(error),
+        project_id: projectId,
+        run_id: runId,
+      });
+    }
+    await delay(RUN_POLL_INTERVAL_MS);
+  }
+  return "timed_out";
+}
+
+function startRunPolling(projectId: string, runId: string) {
+  stopRunPolling();
+  const abortController = new AbortController();
+  runPollAbortController = abortController;
+  runPollingProjectId = projectId;
+  runPollingRunId = runId;
+  isRunPolling = true;
+  runPollingTimedOut = false;
+  updateButtons();
+
+  void pollRunUntilFinished(projectId, runId, abortController.signal)
+    .then((result) => {
+      if (runPollingProjectId !== projectId || runPollingRunId !== runId) {
+        return;
+      }
+      runPollAbortController = null;
+      isRunPolling = false;
+      if (result === "completed") {
+        clearRunPollingState();
+        showRunCompletionMessage();
+      } else if (result === "timed_out") {
+        runPollingTimedOut = true;
+        showMessage(
+          "已等待 30 分钟，审校可能仍在后台运行。你可以稍后刷新当前项目查看结果，或点击继续等待。",
+          "default"
+        );
+        appendDebugLog("warn", "前端轮询已到 30 分钟上限，后台任务未判定失败。", {
+          project_id: projectId,
+          run_id: runId,
+          status: currentRun?.status,
+          stage: currentRun?.stage,
+        });
+      }
+      renderWorkspace();
+    })
+    .catch((error) => {
+      if (isAbortError(error) || runPollingProjectId !== projectId || runPollingRunId !== runId) {
+        return;
+      }
+      runPollAbortController = null;
+      isRunPolling = false;
+      showMessage("自动刷新运行状态中断，请刷新当前项目查看结果。", "default");
+      appendDebugLog("warn", "自动刷新运行状态中断", {
+        error: getErrorMessage(error),
+        project_id: projectId,
+        run_id: runId,
+      });
+      renderWorkspace();
+    });
+}
+
+function stopRunPolling() {
+  runPollAbortController?.abort();
+  clearRunPollingState();
+}
+
+function clearRunPollingState() {
+  runPollAbortController = null;
+  isRunPolling = false;
+  runPollingTimedOut = false;
+  runPollingProjectId = null;
+  runPollingRunId = null;
+  updateButtons();
+}
+
+function showRunCompletionMessage() {
+  if (!currentRun) {
     return;
   }
-  for (let attempt = 0; attempt < 180; attempt += 1) {
-    currentRun = await getV2Run(currentProject.project_id, runId, signal);
-    currentTrace = await getV2RunTrace(currentProject.project_id, runId, signal);
-    currentProject = await getV2Project(currentProject.project_id, signal);
-    await loadCandidates(signal);
-    renderWorkspace();
-    if (TERMINAL_RUN_STATUSES.has(currentRun.status)) {
-      return;
-    }
-    await delay(1000);
+  if (currentRun.status === "failed") {
+    showMessage(`审校失败：${currentRun.error_message || "请查看运行记录。"}`, "error");
+    appendDebugLog("error", "V2.2 审校失败", {
+      run_id: currentRun.run_id,
+      error: currentRun.error_message || "unknown",
+    });
+  } else if (currentRun.status === "waiting_for_approval") {
+    showMessage("审校完成，请确认候选问题。", "success");
+  } else if (isCompletedWithoutCandidates()) {
+    showMessage("审校完成，未发现需要确认的问题。", "success");
+  } else if (currentRun.status === "partial_succeeded") {
+    showMessage("审校部分完成，请查看候选问题和运行记录。", "success");
+  } else if (currentRun.status === "cancelled") {
+    showMessage("审校已取消。", "default");
+  } else {
+    showMessage("审校完成。", "success");
   }
-  throw new Error("审校仍在运行，请稍后刷新。");
 }
 
 async function loadCandidates(signal: AbortSignal) {
@@ -426,24 +553,34 @@ async function loadAllCandidatesByStatus(
   }
 }
 
-async function refreshTrace() {
-  if (!currentProject || !currentRun) {
+async function refreshCurrentProject() {
+  if (!currentProject) {
     return;
   }
   const abortController = startBusy();
   try {
-    currentTrace = await getV2RunTrace(
-      currentProject.project_id,
-      currentRun.run_id,
-      abortController.signal
-    );
-    showMessage("运行记录已刷新。", "success");
+    await refreshWorkspaceData(abortController.signal);
+    if (currentRun && TERMINAL_RUN_STATUSES.has(currentRun.status)) {
+      stopRunPolling();
+      showRunCompletionMessage();
+    } else {
+      showMessage("当前项目已刷新。", "success");
+    }
   } catch (error) {
-    showMessage(`刷新运行记录失败：${getErrorMessage(error)}`, "error");
+    showMessage(`刷新当前项目失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
   }
+}
+
+function continueWaitingForRun() {
+  if (!currentProject || !currentRun || !isRunInProgress()) {
+    return;
+  }
+  startRunPolling(currentProject.project_id, currentRun.run_id);
+  showMessage("继续等待后台审校结果，前端会自动刷新运行状态。", "default");
+  renderWorkspace();
 }
 
 async function decidePendingCandidates(status: "approved" | "rejected") {
@@ -798,6 +935,13 @@ function renderCandidates() {
   updateCandidatePassFilterOptions();
   renderCandidatePagination();
   getElement("candidate-summary").textContent = formatCandidateSummary();
+  if (runPollingTimedOut && isRunInProgress()) {
+    renderEmpty(
+      container,
+      "后台审校时间较长。已停止自动轮询，请刷新当前项目查看结果，或点击继续等待。"
+    );
+    return;
+  }
   if (isRunInProgress()) {
     renderEmpty(
       container,
@@ -917,7 +1061,11 @@ async function handleCandidateFilterChange() {
 }
 
 async function changeCandidatePage(nextPage: number) {
-  if (!currentProject || nextPage < 1 || (candidateTotalPages > 0 && nextPage > candidateTotalPages)) {
+  if (
+    !currentProject ||
+    nextPage < 1 ||
+    (candidateTotalPages > 0 && nextPage > candidateTotalPages)
+  ) {
     return;
   }
   candidatePage = nextPage;
@@ -940,8 +1088,8 @@ function getCandidateStatusFilter(): V2CandidateStatus | "all" {
 function canLocateCandidate(candidate: V2CandidateIssue): boolean {
   return Boolean(
     candidate.original ||
-      candidate.locator?.key ||
-      (typeof candidate.global_start === "number" && typeof candidate.global_end === "number")
+    candidate.locator?.key ||
+    (typeof candidate.global_start === "number" && typeof candidate.global_end === "number")
   );
 }
 
@@ -1001,12 +1149,20 @@ function renderReport() {
 function updateButtons() {
   const hasProject = Boolean(currentProject);
   const hasRun = Boolean(currentRun);
+  const runInProgress = isRunInProgress();
   const approvedCount = currentProject?.approved_count || 0;
   const pendingCount = currentProject?.pending_count || 0;
-  getButton("start-review").disabled = isBusy;
-  getButton("start-review").textContent = hasProject ? "重新审校" : "开始审校";
+  getButton("start-review").disabled = isBusy || runInProgress;
+  getButton("start-review").textContent = runInProgress
+    ? "审校进行中"
+    : hasProject
+      ? "重新审校"
+      : "开始审校";
   getButton("refresh-projects").disabled = isBusy;
-  getButton("refresh-trace").disabled = isBusy || !hasProject || !hasRun;
+  getButton("refresh-current-project").disabled = isBusy || !hasProject;
+  getButton("refresh-trace").disabled = isBusy || !hasProject;
+  getButton("continue-waiting").hidden = !runInProgress || isRunPolling;
+  getButton("continue-waiting").disabled = isBusy || !hasProject || !hasRun || isRunPolling;
   getButton("approve-all").disabled = isBusy || pendingCount === 0;
   getButton("reject-all").disabled = isBusy || pendingCount === 0;
   getButton("writeback").disabled = isBusy || approvedCount === 0;
@@ -1086,6 +1242,7 @@ function stopBusy() {
 }
 
 function resetProjectState() {
+  stopRunPolling();
   currentProject = null;
   currentDocumentMap = null;
   currentPlan = null;
@@ -1174,7 +1331,8 @@ function getDisplayStatus(status: string, candidateCount: number): string {
 function isCompletedWithoutCandidates(): boolean {
   const status = currentRun?.status || currentProject?.status;
   return Boolean(
-    status && getDisplayStatus(status, currentProject?.candidate_count || candidateTotal) === "no_candidates"
+    status &&
+    getDisplayStatus(status, currentProject?.candidate_count || candidateTotal) === "no_candidates"
   );
 }
 
@@ -1255,6 +1413,10 @@ function getTextArea(id: string): HTMLTextAreaElement {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function escapeHtml(value: string): string {

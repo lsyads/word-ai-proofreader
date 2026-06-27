@@ -107,7 +107,7 @@
             <div class="panel-heading">
                 <h2 class="ms-font-m">最近项目</h2>
                 <button id="refresh-projects" class="ms-Button" type="button">
-                    <span class="ms-Button-label">刷新</span>
+                    <span class="ms-Button-label">刷新项目列表</span>
                 </button>
             </div>
             <div id="recent-projects" class="workspace-empty">暂无最近项目。</div>
@@ -115,6 +115,14 @@
 
         <section class="workspace-panel compact-panel">
             <div id="project-summary" class="workspace-empty">暂无审校项目。</div>
+            <div class="button-row project-action-row">
+                <button id="refresh-current-project" class="ms-Button" type="button" disabled>
+                    <span class="ms-Button-label">刷新当前项目</span>
+                </button>
+                <button id="continue-waiting" class="ms-Button" type="button" disabled hidden>
+                    <span class="ms-Button-label">继续等待</span>
+                </button>
+            </div>
         </section>
 
         <section class="workspace-panel">
@@ -176,7 +184,7 @@
                     <div class="panel-heading">
                         <h3 class="ms-font-s">运行过程</h3>
                         <button id="refresh-trace" class="ms-Button" type="button" disabled>
-                            <span class="ms-Button-label">刷新</span>
+                            <span class="ms-Button-label">刷新当前项目</span>
                         </button>
                     </div>
                     <div id="run-trace" class="workspace-empty">暂无运行记录。</div>

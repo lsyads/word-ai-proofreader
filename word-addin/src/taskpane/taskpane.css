@@ -234,6 +234,10 @@ body {
   padding: 0;
 }
 
+.project-action-row {
+  margin: 10px;
+}
+
 .compact-status {
   align-items: center;
   display: flex;

@@ -9,6 +9,11 @@ def test_settings_defaults():
     assert settings.openai_api_base_url == "https://api.openai.com/v1"
     assert settings.openai_model == "gpt-4o-mini"
     assert settings.ai_request_timeout_seconds == 30
+    assert settings.ai_request_timeout_min_seconds == 60
+    assert settings.ai_request_timeout_max_seconds == 900
+    assert settings.ai_request_timeout_base_seconds == 60
+    assert settings.ai_fast_timeout_seconds_per_1k_tokens == 45
+    assert settings.ai_thinking_timeout_seconds_per_1k_tokens == 75
     assert settings.ai_fast_max_tokens == 8192
     assert settings.ai_thinking_max_tokens == 16384
     assert settings.backend_cors_origins == "https://localhost:3000,http://localhost:3000"

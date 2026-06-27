@@ -216,6 +216,43 @@ export async function runV2Project(
   return (await response.json()) as V2Run;
 }
 
+export async function retryFailedV2Run(
+  projectId: string,
+  runId: string,
+  sessionId: string,
+  aiProfileId: string,
+  providerApi: ProviderAPI,
+  proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
+  temperature: number,
+  signal: AbortSignal
+): Promise<V2Run> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/retry-failed`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        ai_profile_id: aiProfileId,
+        provider_api: providerApi,
+        proofread_mode: proofreadMode,
+        reasoning_enabled: reasoningEnabled,
+        temperature,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Run;
+}
+
 export async function getV2Run(
   projectId: string,
   runId: string,

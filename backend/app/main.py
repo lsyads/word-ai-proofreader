@@ -372,6 +372,31 @@ async def get_v2_run(project_id: str, run_id: str) -> V2RunResponse:
         raise HTTPException(status_code=404, detail="V2 run not found") from exc
 
 
+@app.post("/api/v2/projects/{project_id}/runs/{run_id}/retry-failed", response_model=V2RunResponse)
+async def retry_failed_v2_run_chunks(
+    project_id: str,
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    request: V2RunCreateRequest | None = None,
+) -> V2RunResponse:
+    try:
+        retry_request = request or V2RunCreateRequest()
+        stored_settings = project_store.get_run_settings(project_id, run_id)
+        resolved_request = V2RunCreateRequest.model_validate(stored_settings or retry_request.model_dump())
+        proofread_service.resolve_provider_api(resolved_request.provider_api, resolved_request.ai_profile_id)
+        run = workspace_runner.start_failed_chunk_retry(project_id, run_id, retry_request)
+        background_tasks.add_task(workspace_runner.retry_failed_chunks_job, project_id, run_id, retry_request)
+        return run
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
+    except V2WorkspaceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/v2/projects/{project_id}/runs/{run_id}/trace", response_model=V2RunTraceResponse)
 async def get_v2_run_trace(project_id: str, run_id: str) -> V2RunTraceResponse:
     try:
@@ -577,7 +602,11 @@ async def writeback_v2_project(project_id: str, request: V2WritebackRequest) -> 
                 project_id,
                 latest.run_id,
                 "writeback_completed",
-                {"output_filename": response.output_filename, "written_count": response.written_count},
+                {
+                    "output_filename": response.output_filename,
+                    "written_count": response.written_count,
+                    "included_count": response.included_count,
+                },
             )
         return response
     except project_store.V2ProjectNotFound as exc:

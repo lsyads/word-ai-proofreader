@@ -160,6 +160,7 @@ export interface V2Project {
   approved_count: number;
   output_filename?: string | null;
   download_url?: string | null;
+  output_stale: boolean;
 }
 
 export interface V2ProjectList {
@@ -291,6 +292,7 @@ export interface V2WritebackResponse {
   fallback_count: number;
   failed_count: number;
   written_count: number;
+  included_count: number;
 }
 
 export interface V2RunEvent {

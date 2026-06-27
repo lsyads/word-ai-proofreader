@@ -169,6 +169,12 @@ def write_docx_result(
                 _refresh_document_text_model(document)
                 continue
 
+            if _try_insert_multi_run_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
+                summary.comment_count += 1
+                summary.revision_count += 1
+                _refresh_document_text_model(document)
+                continue
+
             if _try_insert_revision(document, issue.global_start, issue.global_end, issue, package):
                 summary.revision_count += 1
                 _refresh_document_text_model(document)
@@ -575,6 +581,74 @@ def _try_insert_revision_with_comment(
         replacement_nodes.append(_make_run(after, rpr))
 
     _replace_child(run_parent, run, replacement_nodes)
+    return True
+
+
+def _try_insert_multi_run_revision_with_comment(
+    document: DocxDocument,
+    start: int,
+    end: int,
+    issue: ProofreadIssue,
+    package: "_DocxPackage",
+) -> bool:
+    if not issue.replacement:
+        return False
+
+    spans = _spans_for_range(document, start, end)
+    if not spans or len(spans) < 2:
+        return False
+
+    parent_map = _build_parent_map(document.document_root)
+    run_entries: list[tuple[TextSpan, ET.Element, ET.Element, ET.Element | None, str, str, str]] = []
+    seen_runs: set[ET.Element] = set()
+    run_parent: ET.Element | None = None
+    target_parts: list[str] = []
+
+    for span in spans:
+        run = _ancestor(span.node, parent_map, _w("r"))
+        if run is None or run in seen_runs:
+            return False
+        parent = parent_map.get(run)
+        if parent is None:
+            return False
+        if run_parent is None:
+            run_parent = parent
+        elif parent is not run_parent:
+            return False
+
+        original_text = span.node.text or ""
+        relative_start = max(start, span.start) - span.start
+        relative_end = min(end, span.end) - span.start
+        before = original_text[:relative_start]
+        target = original_text[relative_start:relative_end]
+        after = original_text[relative_end:]
+        if not target:
+            return False
+
+        target_parts.append(target)
+        run_entries.append((span, run, parent, run.find(_w("rPr")), before, target, after))
+        seen_runs.add(run)
+
+    if "".join(target_parts) != issue.original:
+        return False
+
+    comment_id = package.add_comment(_format_issue_comment(issue, prefix="文本框" if spans[0].in_textbox else None))
+    start_marker, end_marker, reference_run = package.comment_markers(comment_id)
+    replacements: list[tuple[ET.Element, ET.Element, list[ET.Element]]] = []
+
+    for index, (_span, run, parent, rpr, before, target, after) in enumerate(run_entries):
+        nodes: list[ET.Element] = []
+        if before:
+            nodes.append(_make_run(before, rpr))
+        nodes.append(package.revision_delete(target, rpr))
+        if index == 0:
+            nodes.extend([start_marker, package.revision_insert(issue.replacement, rpr), end_marker, reference_run])
+        if after:
+            nodes.append(_make_run(after, rpr))
+        replacements.append((parent, run, nodes))
+
+    for parent, run, nodes in reversed(replacements):
+        _replace_child(parent, run, nodes)
     return True
 
 

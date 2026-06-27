@@ -649,6 +649,102 @@ def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
     assert "乙乙乙乙" not in serialized_trace
 
 
+def test_v2_retry_failed_chunks_merges_candidates_and_marks_written_output_stale(monkeypatch):
+    attempts = {"乙": 0}
+
+    async def fake_proofread_text_with_context(text, *args, **kwargs):
+        if "乙" in text:
+            attempts["乙"] += 1
+            if attempts["乙"] == 1:
+                raise AIClientError("chunk failed with Authorization: Bearer secret-token")
+        return [
+            ProofreadIssue(
+                id=f"issue-{text[:1]}",
+                category="typo",
+                severity="medium",
+                original=text[:2],
+                replacement=f"{text[:1]}修",
+                suggestion="修正明显错字。",
+                start=0,
+                end=2,
+            )
+        ]
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    source = make_docx([("甲" * 4999 + "。") + ("乙" * 4999 + "。")])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查长文。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={"proofread_mode": "thinking"})
+    assert run_response.status_code == 200
+    run_id = run_response.json()["run_id"]
+    run = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}").json()
+    assert run["completed_chunks"] == 1
+    assert run["failed_chunks"] == 1
+    assert run["candidate_count"] == 1
+
+    first_candidate = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]
+    approve_response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": first_candidate["candidate_id"], "status": "approved"}]},
+    )
+    assert approve_response.status_code == 200
+    writeback_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "revision"})
+    assert writeback_response.status_code == 200
+    assert writeback_response.json()["written_count"] == 1
+    assert writeback_response.json()["included_count"] == 1
+    assert client.get(f"/api/v2/projects/{project_id}").json()["output_stale"] is False
+
+    retry_response = client.post(f"/api/v2/projects/{project_id}/runs/{run_id}/retry-failed", json={})
+    assert retry_response.status_code == 200
+    retried_run = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}").json()
+    assert retried_run["completed_chunks"] == 2
+    assert retried_run["failed_chunks"] == 0
+    assert retried_run["candidate_count"] == 2
+    project = client.get(f"/api/v2/projects/{project_id}").json()
+    assert project["status"] == "waiting_for_approval"
+    assert project["output_stale"] is True
+    assert project["pending_count"] == 1
+
+    trace = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}/trace").json()
+    event_names = [event["event"] for event in trace["events"]]
+    assert "retry_queued" in event_names
+    assert "chunk_retrying" in event_names
+    serialized_trace = json.dumps(trace, ensure_ascii=False)
+    assert "secret-token" not in serialized_trace
+
+    pending_candidate = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"status": "pending"},
+    ).json()["candidates"][0]
+    approve_retry_response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": pending_candidate["candidate_id"], "status": "approved"}]},
+    )
+    assert approve_retry_response.status_code == 200
+    regenerate_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "revision"})
+    assert regenerate_response.status_code == 200
+    assert regenerate_response.json()["written_count"] == 1
+    assert regenerate_response.json()["included_count"] == 2
+    refreshed = client.get(f"/api/v2/projects/{project_id}").json()
+    assert refreshed["status"] == "written"
+    assert refreshed["output_stale"] is False
+    assert refreshed["pending_count"] == 0
+
+
 def test_v2_docx_repeated_numbers_do_not_create_local_candidates(monkeypatch):
     async def fake_proofread_text_with_context(*args, **kwargs):
         return []

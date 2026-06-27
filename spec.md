@@ -197,7 +197,7 @@ V2 当前审校计划不展示本地非 AI 规则 pass。默认不产出任何�
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
-启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。同一项目存在 `queued/running` run 时返回 409，避免并发 run 混写候选状态。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/merge_candidates/evaluate_candidates`。创建 run 时使用已保存 document map 的 `chunk_count` 建立计划；后台执行时才解析 DOCX 并生成正文 chunks。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
+启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。同一项目存在 `queued/running` run 时返回 409，避免并发 run 混写候选状态。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/merge_candidates/evaluate_candidates`。创建 run 时使用已保存 document map 的 `chunk_count` 建立计划，并持久化本次 run 设置；后台执行时才解析 DOCX 并生成正文 chunks。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -205,9 +205,15 @@ V2 当前审校计划不展示本地非 AI 规则 pass。默认不产出任何�
 
 V2 插件在项目 run 运行中轮询该接口，最长自动轮询 60 分钟。运行中展示 `total_chunks/completed_chunks/failed_chunks` 派生的分块进度：`completed_chunks + failed_chunks` 作为已处理块数，当前块显示为下一块待完成分块；轮询达到 60 分钟仍未终态时只停止前端自动刷新，继续展示后台仍可能运行和手动刷新/继续等待入口，不把任务标记为失败。
 
+### `POST /api/v2/projects/{project_id}/runs/{run_id}/retry-failed`
+
+手动重试 latest run 中当前仍失败的分块，只重跑失败 chunk，不新建 run，也不重跑全书。请求体复用 `V2RunCreateRequest`；正常新 run 已持久化设置，旧 run 没有 settings 时前端可补交当前 AI 配置。run 必须属于该 project，且必须是 latest run；运行中 run、无失败分块返回 409，project/run 不匹配返回 404。
+
+重试成功后，新候选以 `pending` 合并到同一个 run，已有 `pending/approved/rejected/written` 状态保持不变。若项目已经写回过且重试产生新增候选，项目回到 `waiting_for_approval`，`output_stale=true`；旧下载文件仍保留，但表示未包含新增建议。重试结束后 `failed_chunks/candidate_count` 反映同一个 run 的最新状态。
+
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
 
-以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`report_ready` 和 `error`。
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`retry_queued`、`chunk_retrying`、`writeback_completed`、`report_ready` 和 `error`。重试相关事件记录 `chunk_index/retry_count/elapsed_seconds/error_type/message` 等摘要字段，不记录完整正文或密钥。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
 
@@ -263,9 +269,9 @@ Request:
 
 ### `POST /api/v2/projects/{project_id}/writeback`
 
-DOCX 项目只写回 latest run 中的 `approved` 候选问题；旧 run 的 approved 候选不会被默认写入。没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后本次实际写入的 approved 候选变为 `written`，项目状态变为 `written`，项目摘要带上 `output_filename/download_url`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+DOCX 项目每次从原始 DOCX 重新生成结果文件，包含 latest run 中所有 `written + approved` 候选问题；旧 run 的 approved 候选不会被默认写入。没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后本次新写入的 approved 候选变为 `written`，原 `written` 状态保持不变，项目状态变为 `written`，项目摘要带上 `output_filename/download_url` 并清除 `output_stale=false`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
 
-Response：`V2WritebackResponse`，包含 `project_id/output_filename/download_url/comment_count/revision_count/fallback_count/failed_count/written_count`。
+Response：`V2WritebackResponse`，包含 `project_id/output_filename/download_url/comment_count/revision_count/fallback_count/failed_count/written_count/included_count`。`written_count` 表示本次新转为 `written` 的候选数；`included_count` 表示本次生成文件实际包含的候选总数。
 
 ### `POST /api/v2/projects/{project_id}/candidates/mark-written`
 
@@ -287,7 +293,7 @@ Response 包含 `project_id/updated_count/candidates`。
 
 ### `GET /api/v2/projects/{project_id}/download`
 
-下载 V2 写回后的 DOCX。尚未写回或项目输出文件丢失时返回 404。当前 V2 项目下载不返回 `expires_at` 或 `retention_days`，可下载性以项目 `output_filename` 和输出文件是否存在为准。
+下载 V2 写回后的 DOCX。尚未写回或项目输出文件丢失时返回 404。当前 V2 项目下载不返回 `expires_at` 或 `retention_days`，可下载性以项目 `output_filename` 和输出文件是否存在为准。若项目摘要 `output_stale=true`，下载文件仍可下载，但不包含重试后新增且尚未重新写回的建议。
 
 ### `POST /api/sessions`
 
@@ -625,6 +631,7 @@ Response:
 - 默认选中全部问题，用户可按严重程度、类别、定位状态和是否有 `replacement` 筛选。
 - 已勾选 + 批注模式 + 可定位：在 `original` 对应片段插入逐条批注。
 - 已勾选 + 修订+批注 + 可定位 + `replacement` 非空：临时开启 `TrackAll`，用 `replacement` 替换 `original`，生成 Word 原生修订，再把原因批注锚定到插入后的 `replacement` 文本。
+- 全书 DOCX 后端修订写回：优先处理单个 Word run 内的修订；若 `original` 在同一段落内跨多个连续 run，且这些 run 拥有同一个父节点，则把原 run 片段分别写成 `w:del`，在首个位置插入一个 `w:ins replacement`，批注锚定到插入文本。跨段落、非连续文本或复杂父节点不直接修订，继续降级为精准批注或汇总批注。`revision_count` 按成功修订的 issue 数计数，不按底层 `w:del` 节点数计数。
 - 已勾选 + 修订+批注 + 可定位 + 无 `replacement`：回退为原位批注。
 - 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条 1500 字以内；关闭默认截断后不限制总条数，单条超 1500 字继续拆分。
 - 未勾选问题不写回。
@@ -640,6 +647,11 @@ AI_PROVIDER_API=responses
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
+AI_REQUEST_TIMEOUT_MIN_SECONDS=60
+AI_REQUEST_TIMEOUT_MAX_SECONDS=900
+AI_REQUEST_TIMEOUT_BASE_SECONDS=60
+AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS=45
+AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS=75
 AI_FAST_MAX_TOKENS=8192
 AI_THINKING_MAX_TOKENS=16384
 BACKEND_HOST=127.0.0.1
@@ -660,6 +672,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。Xiaomi MiMo 示例：`{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
 - `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
+- AI 请求 timeout 使用动态估算，不再直接使用固定 `AI_REQUEST_TIMEOUT_SECONDS`；该旧字段保留兼容。计算规则：先用 `tiktoken` 估算完整上送 prompt/messages 的 `estimated_input_tokens`，再加上本次请求的输出 token 上限得到 `estimated_total_tokens`；`token_units = ceil(max(estimated_total_tokens, 1) / 1000)`；`fast` 使用 `AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS`，`thinking` 或 `reasoning_enabled=true` 使用 `AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS`；`raw_timeout = AI_REQUEST_TIMEOUT_BASE_SECONDS + token_units * seconds_per_1k`；最终 `timeout_seconds = clamp(raw_timeout, AI_REQUEST_TIMEOUT_MIN_SECONDS, AI_REQUEST_TIMEOUT_MAX_SECONDS)`。默认最小 60 秒、最大 900 秒。
 - `temperature` 是请求级参数，不需要环境变量；兼容底层 API schema 默认 `0.2`，当前 V2.2 插件工作台默认 `0.6`。
 - `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
 - `AGENT_WORKSPACE_DIR` 保存 V2 project/session/run/history schema 的 SQLite 文件和 V2 输出文件，默认 `backend/var/agent-workspace`。

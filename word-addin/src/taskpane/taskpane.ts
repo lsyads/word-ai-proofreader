@@ -19,6 +19,7 @@ import {
   getV2RunTrace,
   listV2Projects,
   markV2CandidatesWritten,
+  retryFailedV2Run,
   runV2Project,
   writebackV2Project,
 } from "./api";
@@ -62,6 +63,7 @@ type BusyAction =
   | "candidate_decision"
   | "loading_candidates"
   | "locating"
+  | "retrying_failed_chunks"
   | "writing_back"
   | "downloading_docx";
 
@@ -88,6 +90,7 @@ const BUSY_ACTION_MESSAGES: Record<BusyAction, string> = {
   downloading_docx: "正在下载审校后文件，请稍候。",
   loading_candidates: "正在刷新建议，请稍候。",
   locating: "正在定位 Word 原文，请稍候。",
+  retrying_failed_chunks: "正在重试失败分块，请稍候。",
   opening_project: "正在打开这次审校，请稍候。",
   refreshing_project: "正在刷新进度，请稍候。",
   refreshing_projects: "正在刷新最近审校，请稍候。",
@@ -147,6 +150,7 @@ function bindEvents() {
   getButton("refresh-trace").onclick = refreshCurrentProject;
   getButton("approve-all").onclick = () => decidePendingCandidates("approved");
   getButton("reject-all").onclick = () => decidePendingCandidates("rejected");
+  getButton("retry-failed-chunks").onclick = retryFailedChunks;
   getButton("writeback").onclick = writebackApproved;
   getButton("download-docx").onclick = downloadDocx;
   getButton("clear-debug-log").onclick = clearDebugLog;
@@ -300,6 +304,36 @@ async function runCurrentProject(signal: AbortSignal) {
   showMessage("已开始审校，完成后会显示可处理的建议。", "default");
   renderWorkspace();
   startRunPolling(currentProject.project_id, currentRun.run_id);
+}
+
+async function retryFailedChunks() {
+  if (!currentProject || !currentRun) {
+    return;
+  }
+  const abortController = startBusy("retrying_failed_chunks");
+  try {
+    const controls = getRunControls();
+    currentRun = await retryFailedV2Run(
+      currentProject.project_id,
+      currentRun.run_id,
+      currentSessionId || "",
+      controls.aiProfileId,
+      controls.providerApi,
+      controls.proofreadMode,
+      controls.reasoningEnabled,
+      controls.temperature,
+      abortController.signal
+    );
+    showMessage("已开始重试失败分块。", "default");
+    renderWorkspace();
+    startRunPolling(currentProject.project_id, currentRun.run_id);
+  } catch (error) {
+    showMessage(`重试失败分块失败：${getErrorMessage(error)}`, "error");
+    appendDebugLog("error", "V2 失败分块重试失败", { error: getErrorMessage(error) });
+  } finally {
+    stopBusy();
+    renderWorkspace();
+  }
 }
 
 async function refreshProjects() {
@@ -804,6 +838,7 @@ function mergeDocxWritebackResult(writeback: V2WritebackResponse) {
     approved_count: Math.max(0, currentProject.approved_count - writeback.written_count),
     output_filename: writeback.output_filename,
     download_url: writeback.download_url,
+    output_stale: false,
   };
   currentCandidates = currentCandidates.map((candidate) =>
     candidate.status === "approved" ? { ...candidate, status: "written" } : candidate
@@ -1222,11 +1257,30 @@ function renderMemory() {
 function renderReport() {
   const container = getElement("report");
   if (!currentReport || currentReport.written_count === 0) {
+    if (currentProject?.output_stale) {
+      container.className = "workspace-summary compact-report";
+      container.innerHTML = `
+        <div class="report-item">
+          <div class="item-title">审校后文件需重新生成</div>
+          <div class="item-body">当前下载文件未包含重试后的新增建议。接受新增建议后请重新写回生成新文件。</div>
+        </div>
+      `;
+      return;
+    }
     renderEmpty(container, "写回后显示简短报告。");
     return;
   }
+  const staleNotice = currentProject?.output_stale
+    ? `
+      <div class="report-item">
+        <div class="item-title">审校后文件需重新生成</div>
+        <div class="item-body">当前下载文件未包含重试后的新增建议。接受新增建议后请重新写回生成新文件。</div>
+      </div>
+    `
+    : "";
   container.className = "workspace-summary compact-report";
   container.innerHTML = `
+    ${staleNotice}
     <div class="summary-grid">
       ${summaryItem("已写入", String(currentReport.written_count))}
       ${summaryItem("待处理", String(currentReport.pending_count))}
@@ -1257,6 +1311,7 @@ function updateButtons() {
   const runInProgress = isRunInProgress();
   const approvedCount = currentProject?.approved_count || 0;
   const pendingCount = currentProject?.pending_count || 0;
+  const failedChunkCount = currentRun?.failed_chunks || 0;
   getButton("start-review").disabled = isBusy || runInProgress;
   setButtonLabel(
     "start-review",
@@ -1292,6 +1347,16 @@ function updateButtons() {
   );
   getButton("reject-all").disabled = isBusy || pendingCount === 0;
   setButtonLabel("reject-all", currentBusyAction === "bulk_decision" ? "处理中" : "忽略全部待处理");
+  getButton("retry-failed-chunks").disabled =
+    isBusy || !hasProject || !hasRun || runInProgress || failedChunkCount === 0;
+  setButtonLabel(
+    "retry-failed-chunks",
+    currentBusyAction === "retrying_failed_chunks"
+      ? "重试中"
+      : failedChunkCount > 0
+        ? `重试 ${failedChunkCount} 个失败分块`
+        : "重试失败分块"
+  );
   getButton("writeback").disabled = isBusy || approvedCount === 0;
   setButtonLabel(
     "writeback",
@@ -1526,6 +1591,7 @@ function translateStage(stage: string): string {
     plan_review: "正在准备审校",
     proofread_pass: "正在检查正文",
     queued: "排队中",
+    retry_failed_chunks: "正在重试失败分块",
     running: "审校中",
     style_rule_pass: "正在检查审读约束",
     succeeded: "已完成",

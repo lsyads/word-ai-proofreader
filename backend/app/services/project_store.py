@@ -4,6 +4,8 @@ import json
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +55,7 @@ class StoredProject:
     updated_at: str
     output_filename: str | None
     output_relative_path: str | None
+    output_stale: bool
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class StoredProjectSummary:
     updated_at: str
     output_filename: str | None
     output_relative_path: str | None
+    output_stale: bool
 
 
 ACTIVE_RUN_STATUSES = {"queued", "running"}
@@ -105,9 +109,9 @@ def create_project(
             INSERT INTO v2_projects (
                 project_id, source_type, status, source_filename, text_preview, book_json,
                 review_goal, source_bytes, created_at, updated_at, output_filename,
-                output_relative_path
+                output_relative_path, output_stale
             )
-            VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)
             """,
             (
                 project_id,
@@ -132,7 +136,7 @@ def require_project(project_id: str, settings: Settings | None = None) -> Stored
             """
             SELECT project_id, source_type, status, source_filename, text_preview,
                    book_json, review_goal, source_bytes, created_at, updated_at,
-                   output_filename, output_relative_path
+                   output_filename, output_relative_path, output_stale
             FROM v2_projects
             WHERE project_id = ?
             """,
@@ -150,7 +154,7 @@ def require_project_summary(project_id: str, settings: Settings | None = None) -
             """
             SELECT project_id, source_type, status, source_filename, text_preview,
                    book_json, review_goal, created_at, updated_at,
-                   output_filename, output_relative_path
+                   output_filename, output_relative_path, output_stale
             FROM v2_projects
             WHERE project_id = ?
             """,
@@ -222,10 +226,20 @@ def save_project_output(
         connection.execute(
             """
             UPDATE v2_projects
-            SET status = 'written', output_filename = ?, output_relative_path = ?, updated_at = ?
+            SET status = 'written', output_filename = ?, output_relative_path = ?, output_stale = 0, updated_at = ?
             WHERE project_id = ?
             """,
             (output_filename, relative_path, _now_iso(), project_id),
+        )
+        connection.commit()
+
+
+def mark_project_output_stale(project_id: str, stale: bool = True, settings: Settings | None = None) -> None:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        connection.execute(
+            "UPDATE v2_projects SET output_stale = ?, updated_at = ? WHERE project_id = ?",
+            (1 if stale else 0, _now_iso(), project_id),
         )
         connection.commit()
 
@@ -280,7 +294,13 @@ def get_review_plan(project_id: str, settings: Settings | None = None) -> V2Revi
     return V2ReviewPlanResponse.model_validate_json(row[0])
 
 
-def create_run(project_id: str, *, total_chunks: int, settings: Settings | None = None) -> V2RunResponse:
+def create_run(
+    project_id: str,
+    *,
+    total_chunks: int,
+    run_settings: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> V2RunResponse:
     _ensure_schema(settings)
     require_project_summary(project_id, settings)
     run_id = f"v2_run_{uuid.uuid4().hex}"
@@ -290,11 +310,18 @@ def create_run(project_id: str, *, total_chunks: int, settings: Settings | None 
             """
             INSERT INTO v2_runs (
                 run_id, project_id, status, stage, total_chunks, completed_chunks,
-                failed_chunks, candidate_count, error_message, created_at, updated_at
+                failed_chunks, candidate_count, error_message, settings_json, created_at, updated_at
             )
-            VALUES (?, ?, 'queued', 'queued', ?, 0, 0, 0, NULL, ?, ?)
+            VALUES (?, ?, 'queued', 'queued', ?, 0, 0, 0, NULL, ?, ?, ?)
             """,
-            (run_id, project_id, total_chunks, now, now),
+            (
+                run_id,
+                project_id,
+                total_chunks,
+                json.dumps(run_settings, ensure_ascii=False) if run_settings is not None else None,
+                now,
+                now,
+            ),
         )
         connection.commit()
     return require_run(project_id, run_id, settings)
@@ -362,6 +389,38 @@ def active_run(project_id: str, settings: Settings | None = None) -> V2RunRespon
     return require_run(project_id, row[0], settings) if row else None
 
 
+def get_run_settings(project_id: str, run_id: str, settings: Settings | None = None) -> dict[str, Any] | None:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            "SELECT settings_json FROM v2_runs WHERE project_id = ? AND run_id = ?",
+            (project_id, run_id),
+        ).fetchone()
+    if not row:
+        raise V2RunNotFound(run_id)
+    if not row[0]:
+        return None
+    try:
+        return json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+
+
+def save_run_settings(
+    project_id: str,
+    run_id: str,
+    run_settings: dict[str, Any],
+    settings: Settings | None = None,
+) -> None:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        connection.execute(
+            "UPDATE v2_runs SET settings_json = ?, updated_at = ? WHERE project_id = ? AND run_id = ?",
+            (json.dumps(run_settings, ensure_ascii=False), _now_iso(), project_id, run_id),
+        )
+        connection.commit()
+
+
 def update_run(
     project_id: str,
     run_id: str,
@@ -390,7 +449,7 @@ def update_run(
     if error_message is not None:
         fields.append("error_message = ?")
         values.append(error_message)
-    elif status in {"running", "waiting_for_approval", "succeeded", "partial_succeeded"}:
+    elif status in {"queued", "running", "waiting_for_approval", "succeeded", "partial_succeeded"}:
         fields.append("error_message = NULL")
     values.extend([project_id, run_id])
     with _connect(settings) as connection:
@@ -759,6 +818,7 @@ def project_response(project_id: str, settings: Settings | None = None) -> V2Pro
         approved_count=counts.get("approved", 0),
         output_filename=project.output_filename,
         download_url=f"/api/v2/projects/{project.project_id}/download" if project.output_filename else None,
+        output_stale=project.output_stale,
     )
 
 
@@ -781,10 +841,18 @@ def clear_store_for_tests(settings: Settings | None = None) -> None:
         shutil.rmtree(root)
 
 
-def _connect(settings: Settings | None = None) -> sqlite3.Connection:
+@contextmanager
+def _connect(settings: Settings | None = None) -> Iterator[sqlite3.Connection]:
     root = workspace_dir(settings)
     root.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(root / "projects.sqlite3")
+    connection = sqlite3.connect(root / "projects.sqlite3")
+    try:
+        yield connection
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _ensure_schema(settings: Settings | None = None) -> None:
@@ -803,7 +871,8 @@ def _ensure_schema(settings: Settings | None = None) -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 output_filename TEXT,
-                output_relative_path TEXT
+                output_relative_path TEXT,
+                output_stale INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -812,6 +881,8 @@ def _ensure_schema(settings: Settings | None = None) -> None:
             connection.execute("ALTER TABLE v2_projects ADD COLUMN source_type TEXT NOT NULL DEFAULT 'docx'")
         if "text_preview" not in columns:
             connection.execute("ALTER TABLE v2_projects ADD COLUMN text_preview TEXT")
+        if "output_stale" not in columns:
+            connection.execute("ALTER TABLE v2_projects ADD COLUMN output_stale INTEGER NOT NULL DEFAULT 0")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS v2_document_maps (
@@ -842,11 +913,15 @@ def _ensure_schema(settings: Settings | None = None) -> None:
                 failed_chunks INTEGER NOT NULL,
                 candidate_count INTEGER NOT NULL,
                 error_message TEXT,
+                settings_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(v2_runs)").fetchall()}
+        if "settings_json" not in run_columns:
+            connection.execute("ALTER TABLE v2_runs ADD COLUMN settings_json TEXT")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS v2_run_events (
@@ -945,6 +1020,7 @@ def _row_to_project(row: tuple) -> StoredProject:
         updated_at=row[9],
         output_filename=row[10],
         output_relative_path=row[11],
+        output_stale=bool(row[12]),
     )
 
 
@@ -961,6 +1037,7 @@ def _row_to_project_summary(row: tuple) -> StoredProjectSummary:
         updated_at=row[8],
         output_filename=row[9],
         output_relative_path=row[10],
+        output_stale=bool(row[11]),
     )
 
 

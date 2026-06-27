@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
+import tiktoken
 from pydantic import ValidationError
 
 from app.schemas import BookInfo, ProofreadIssue
@@ -150,8 +152,21 @@ async def proofread_with_ai(
 
     _debug_log_json("AI responses request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI responses request timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.post(
             _responses_url(profile),
             headers=headers,
@@ -221,8 +236,21 @@ async def stream_proofread_with_ai(
 
     _debug_log_json("AI responses stream request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI responses stream timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         async with client.stream(
             "POST",
             _responses_url(profile),
@@ -325,8 +353,21 @@ async def _proofread_with_chat(
 
     _debug_log_json("AI chat request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _chat_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI chat request timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.post(
             _chat_url(profile),
             headers=headers,
@@ -417,6 +458,98 @@ def _chat_dialect(profile: AIProfile) -> ChatDialect:
 
 def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
     return payload.get("max_tokens", payload.get("max_completion_tokens"))
+
+
+def _responses_timeout(
+    settings: Settings,
+    profile: AIProfile,
+    payload: dict[str, Any],
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+) -> tuple[float, dict[str, int]]:
+    input_tokens = _count_text_tokens(profile.model, _coerce_string(payload.get("input")))
+    output_token_limit = _coerce_int(payload.get("max_output_tokens"))
+    return _dynamic_timeout(settings, input_tokens, proofread_mode, reasoning_enabled, output_token_limit)
+
+
+def _chat_timeout(
+    settings: Settings,
+    profile: AIProfile,
+    payload: dict[str, Any],
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+) -> tuple[float, dict[str, int]]:
+    messages = payload.get("messages")
+    input_tokens = _count_chat_tokens(profile.model, messages if isinstance(messages, list) else [])
+    output_token_limit = _coerce_int(_chat_output_token_limit(payload))
+    return _dynamic_timeout(settings, input_tokens, proofread_mode, reasoning_enabled, output_token_limit)
+
+
+def _dynamic_timeout(
+    settings: Settings,
+    input_tokens: int,
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+    output_token_limit: int = 0,
+) -> tuple[float, dict[str, int]]:
+    estimated_input_tokens = max(input_tokens, 0)
+    estimated_output_tokens = max(output_token_limit, 0)
+    estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
+    token_units = max(1, math.ceil(max(estimated_total_tokens, 1) / 1000))
+    seconds_per_1k = (
+        settings.ai_thinking_timeout_seconds_per_1k_tokens
+        if proofread_mode == "thinking" or reasoning_enabled
+        else settings.ai_fast_timeout_seconds_per_1k_tokens
+    )
+    raw_timeout = settings.ai_request_timeout_base_seconds + token_units * seconds_per_1k
+    timeout = min(
+        settings.resolved_ai_request_timeout_max_seconds,
+        max(settings.ai_request_timeout_min_seconds, raw_timeout),
+    )
+    return timeout, {
+        "estimated_input_tokens": estimated_input_tokens,
+        "estimated_output_tokens": estimated_output_tokens,
+        "estimated_total_tokens": estimated_total_tokens,
+        "token_units": token_units,
+    }
+
+
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _count_text_tokens(model: str, text: str) -> int:
+    return len(_token_encoding(model).encode(text))
+
+
+def _count_chat_tokens(model: str, messages: list[Any]) -> int:
+    encoding = _token_encoding(model)
+    content_tokens = 0
+    message_count = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        message_count += 1
+        content_tokens += len(encoding.encode(_coerce_string(message.get("content", ""))))
+    return content_tokens + 4 * message_count + 2
+
+
+def _token_encoding(model: str) -> tiktoken.Encoding:
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
 
 
 def _build_system_prompt(proofread_mode: ProofreadMode) -> str:

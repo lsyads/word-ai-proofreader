@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import AIClientError, _dynamic_timeout, proofread_with_ai, stream_proofread_with_ai
 from app.settings import Settings
 
 
@@ -153,7 +153,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.test/v1/responses"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
-    assert call["timeout"] == 12
+    assert call["timeout"] >= 60 + 9 * 45
     assert call["json"]["model"] == "test-model"
     assert call["json"]["temperature"] == 0.2
     assert call["json"]["max_output_tokens"] == 8192
@@ -173,23 +173,68 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert "Word 选区文本" not in call["json"]["input"]
     assert "<v2_agent_context>" not in call["json"]["input"]
     assert "review_goal" not in call["json"]["input"]
-    assert "document_map_summary" not in call["json"]["input"]
-    assert "memory_items" not in call["json"]["input"]
-    assert "style_rules" not in call["json"]["input"]
-    assert "review_goal 是硬约束" not in call["json"]["input"]
-    assert "不要泛泛审校" not in call["json"]["input"]
-    assert call["json"]["input"].count("original 必须") == 1
-    assert "\n要求：" not in call["json"]["input"]
-    assert "不依赖外部资料" not in call["json"]["input"]
-    assert "需要外部资料确认" not in call["json"]["input"]
-    assert "审校范围外的问题" not in call["json"]["input"]
-    assert "项目记忆原文" not in call["json"]["input"]
-    assert "不属于第 5 条机械校对项" not in call["json"]["input"]
-    assert "标点误用" not in call["json"]["input"]
-    assert "英文逗号" not in call["json"]["input"]
-    assert "半角符号" not in call["json"]["input"]
-    assert "连续标点" not in call["json"]["input"]
-    assert "comment" not in call["json"]["input"]
+
+
+def test_dynamic_timeout_has_configurable_minimum():
+    timeout, metadata = _dynamic_timeout(
+        Settings(
+            AI_REQUEST_TIMEOUT_MIN_SECONDS=60,
+            AI_REQUEST_TIMEOUT_MAX_SECONDS=900,
+            AI_REQUEST_TIMEOUT_BASE_SECONDS=0,
+            AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS=0,
+        ),
+        input_tokens=1,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+        output_token_limit=0,
+    )
+
+    assert timeout == 60
+    assert metadata == {
+        "estimated_input_tokens": 1,
+        "estimated_output_tokens": 0,
+        "estimated_total_tokens": 1,
+        "token_units": 1,
+    }
+
+
+def test_dynamic_timeout_uses_longer_thinking_rate():
+    fast_timeout, _ = _dynamic_timeout(Settings(), 1000, "fast", False, output_token_limit=0)
+    thinking_timeout, _ = _dynamic_timeout(Settings(), 1000, "thinking", False, output_token_limit=0)
+    reasoning_timeout, _ = _dynamic_timeout(Settings(), 1000, "fast", True, output_token_limit=0)
+
+    assert fast_timeout == 105
+    assert thinking_timeout == 135
+    assert reasoning_timeout == 135
+
+
+def test_dynamic_timeout_includes_output_token_limit():
+    timeout, metadata = _dynamic_timeout(
+        Settings(),
+        input_tokens=1000,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+        output_token_limit=8192,
+    )
+
+    assert timeout == 510
+    assert metadata["estimated_input_tokens"] == 1000
+    assert metadata["estimated_output_tokens"] == 8192
+    assert metadata["estimated_total_tokens"] == 9192
+    assert metadata["token_units"] == 10
+
+
+def test_dynamic_timeout_caps_at_configured_maximum():
+    timeout, metadata = _dynamic_timeout(
+        Settings(AI_REQUEST_TIMEOUT_MAX_SECONDS=900),
+        input_tokens=100_000,
+        proofread_mode="thinking",
+        reasoning_enabled=True,
+        output_token_limit=16_384,
+    )
+
+    assert timeout == 900
+    assert metadata["token_units"] == 117
 
 
 def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):

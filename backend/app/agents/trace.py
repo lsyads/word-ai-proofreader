@@ -326,10 +326,18 @@ def trace_dir(settings: Settings | None = None) -> Path:
     return resolved_settings.agent_trace_dir
 
 
-def _connect(settings: Settings | None = None) -> sqlite3.Connection:
+@contextmanager
+def _connect(settings: Settings | None = None) -> Iterator[sqlite3.Connection]:
     root = trace_dir(settings)
     root.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(_db_path(settings))
+    connection = sqlite3.connect(_db_path(settings))
+    try:
+        yield connection
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _db_path(settings: Settings | None = None) -> Path:

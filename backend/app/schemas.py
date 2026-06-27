@@ -137,6 +137,7 @@ class DocxProofreadResult(BaseModel):
     application_mode: ApplicationMode
     output_filename: str | None = None
     download_url: str | None = None
+    output_stale: bool = False
     expires_at: str | None = None
     retention_days: int | None = None
     error_message: str | None = None
@@ -208,6 +209,8 @@ V2RunEventName = Literal[
     "pass_completed",
     "tool_started",
     "tool_completed",
+    "retry_queued",
+    "chunk_retrying",
     "candidate_found",
     "candidate_merged",
     "candidate_evaluated",
@@ -260,6 +263,7 @@ class V2ProjectResponse(BaseModel):
     approved_count: int = 0
     output_filename: str | None = None
     download_url: str | None = None
+    output_stale: bool = False
 
 
 class V2ProjectListResponse(BaseModel):
@@ -417,6 +421,7 @@ class V2WritebackResponse(BaseModel):
     fallback_count: int
     failed_count: int
     written_count: int
+    included_count: int
 
 
 class V2RunEventResponse(BaseModel):

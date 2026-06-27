@@ -4,6 +4,7 @@ import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeAlias
+from xml.etree import ElementTree as ET
 
 from fastapi.testclient import TestClient
 from app.agents import trace as agent_trace
@@ -345,6 +346,80 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     assert document_xml.index("<w:del") < document_xml.index("commentRangeStart")
     assert document_xml.index("commentRangeStart") < document_xml.index("<w:ins")
     assert document_xml.index("<w:ins") < document_xml.index("commentRangeEnd")
+
+
+def test_write_docx_result_inserts_revision_across_split_runs(tmp_path: Path):
+    source = make_docx(["这里有错字。"])
+    with zipfile.ZipFile(io.BytesIO(source)) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+    document_xml = document_xml.replace(
+        "<w:r><w:t>这里有错字。</w:t></w:r>",
+        "<w:r><w:t>这里有错</w:t></w:r><w:r><w:t>字。</w:t></w:r>",
+    )
+    source = replace_docx_entry(source, "word/document.xml", document_xml.encode())
+    document = docx_service.parse_docx(source)
+    start = document.text.index("错字")
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="错字",
+        replacement="正字",
+        suggestion="修正错字。",
+        chunk_index=0,
+        global_start=start,
+        global_end=start + 2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, [issue], "revision", output)
+
+    assert summary.comment_count == 1
+    assert summary.revision_count == 1
+    assert summary.fallback_count == 0
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    root = ET.fromstring(document_xml)
+    namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.findall(".//w:del", namespaces)) == 2
+    assert len(root.findall(".//w:ins", namespaces)) == 1
+    assert "正字" in document_xml
+    assert "修正错字" in comments_xml
+
+
+def test_write_docx_result_does_not_insert_revision_across_paragraphs(tmp_path: Path):
+    source = make_docx(["甲", "乙"])
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="甲乙",
+        replacement="甲丙",
+        suggestion="跨段落不应直接修订。",
+        chunk_index=0,
+        global_start=0,
+        global_end=2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(
+        source,
+        [issue],
+        "revision",
+        output,
+        fallback_summary_truncate_enabled=False,
+    )
+
+    assert summary.comment_count == 0
+    assert summary.revision_count == 0
+    assert summary.fallback_count == 1
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "<w:del" not in document_xml
+    assert "<w:ins" not in document_xml
+    assert "跨段落不应直接修订" in comments_xml
 
 
 def test_write_docx_result_comment_mode_does_not_insert_revision(tmp_path: Path):

@@ -2,7 +2,7 @@
 
 本文是当前 V2.2 Agent 工作台和兼容 V1 底层审校能力的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为一个开始审校按钮和候选问题工作区。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为开始审校、本次进度、审校建议、写回和下载审校后文件。
 
 ## 范围
 
@@ -11,8 +11,8 @@ V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/ru
 包含：
 
 - V2 当前选区审校项目和全书 `.docx` 审校项目。
-- V2 文档地图、审校计划、后台 Agent run、候选问题队列、项目记忆、审校报告和脱敏 run event trace。
-- 编辑确认队列：批准、拒绝、暂缓、当前选区已批准候选写回标记、DOCX 已批准候选后端写回和结果下载。
+- V2 文档地图、审校计划、后台 Agent run、候选问题队列、项目记忆、审校报告和脱敏 run event trace；插件把候选显示为审校建议。
+- 编辑确认队列：接受、忽略、暂缓、当前选区已接受建议写回标记、DOCX 已接受建议后端写回和结果下载。
 - Responses API、Chat Completions API 和未配置 Key 时的 mock fallback。
 - 兼容 V1 的结构化 `issues[]`、后端原文定位、`locator`、分块全局位置、分块任务和 DOCX 后端写回能力，作为 V2 复用的底层服务与直接 API 入口。
 
@@ -41,9 +41,9 @@ Word 当前选区或 DOCX 文件
   -> POST /api/v2/projects/{project_id}/runs
   -> backend 分块调用 AI、本地高置信规则、归并和 evaluator
   -> GET /api/v2/projects/{project_id}/candidates
-  -> editor 批准、拒绝或暂缓候选
-  -> 当前选区: Office.js 写回已批准候选后 mark-written
-  -> DOCX: POST /api/v2/projects/{project_id}/writeback 后下载结果 DOCX
+  -> editor 接受、忽略或暂缓建议
+  -> 当前选区: Office.js 写回已接受建议后 mark-written
+  -> DOCX: POST /api/v2/projects/{project_id}/writeback 后下载审校后文件
   -> 兼容底层入口: /api/proofread、/api/proofread/tasks、/api/proofread/docx/tasks
 ```
 
@@ -127,7 +127,7 @@ Response:
 
 ## V2 Agent 工作台 API
 
-V2 API 以审校项目为核心，V2.2 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。插件 UI 默认收敛为一个开始审校按钮和候选问题工作区，Agent 内部 trace/plan/memory 默认放入高级信息。
+V2 API 以审校项目为核心，V2.2 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。插件 UI 面向内部试点编辑收敛为普通使用路径：选择文本或文件、开始审校、查看建议、接受/忽略、写回或下载；Agent 内部 trace/plan/memory 和调试日志默认放入“排障信息（技术支持）”。
 
 ### `POST /api/v2/projects`
 
@@ -211,7 +211,7 @@ V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入�
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型、可直接替换文本和 evaluator 复核意见。`needs_human_review=false` 表示 evaluator 未标记为人工重点判断；候选仍必须由编辑批准后才能写回。
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型、可直接替换文本和 evaluator 复核意见。插件把候选显示为“审校建议”，把 `approved/rejected/written` 显示为“已接受/已忽略/已写入”；`needs_human_review=false` 表示 evaluator 未标记为人工重点判断，候选仍必须由编辑接受后才能写回。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
@@ -227,13 +227,13 @@ Request:
 }
 ```
 
-`status` 允许 `approved`、`rejected`、`deferred`。V2.2 插件默认只暴露批准和拒绝；`deferred` 保留给 API 兼容和后续更清晰的“稍后处理”设计。
+`status` 允许 `approved`、`rejected`、`deferred`。V2.2 插件默认把 `approved/rejected` 展示为“接受/忽略”；`deferred` 保留给 API 兼容和后续更清晰的“稍后处理”设计。
 
 编辑决策会派生轻量项目记忆，例如已批准的问题类别；不会把完整正文写入长期记忆。
 
 ### `POST /api/v2/projects/{project_id}/candidates/bulk-decisions`
 
-批量更新该项目所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“批准全部/拒绝全部”调用该接口，语义是处理所有待确认候选，而不是当前页。
+批量更新该项目所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“接受全部待处理/忽略全部待处理”调用该接口，并在执行前弹窗提示会处理所有待处理建议，而不是当前页。
 
 Request:
 
@@ -683,10 +683,10 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`。
 - 点击停止审校会中断前端请求并取消后端异步任务；分块审校保留已收到 issues 供查看和应用。
 - Word 中书名为空或空选区时显示错误，不调用审校接口。
-- 后端返回非空候选或兼容 `issues[]` 时，插件只展示结果；编辑批准候选并点击“写回已批准”后才写回 Word。
-- 全书 `.docx` 写回完成后插件显示后端保存的新文件名、保留期限和“下载结果 DOCX”按钮。
+- 后端返回非空候选或兼容 `issues[]` 时，插件只展示审校建议；编辑接受建议并点击写回按钮后才写回 Word。
+- 全书 `.docx` 写回完成后插件显示后端保存的新文件名、保留期限和“下载审校后文件”按钮。
 - 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 批注模式不改正文；修订+批注模式生成可接受/拒绝的 Word 修订，并把原因批注锚定到插入后的 `replacement` 文本，完成后恢复原修订设置。
 - 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订+批注。
 - `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
-- 插件工作台可恢复最近 V2 项目；本地工作区保存项目、run、候选、报告和结果索引，不把完整正文或原始 DOCX 写入长期记忆。兼容历史功能保留清空、导出 JSON、导入 JSON 能力。
+- 插件工作台可恢复最近 V2 审校；本地工作区保存项目、run、候选、报告和结果索引，不把完整正文或原始 DOCX 写入长期记忆。兼容历史功能保留清空、导出 JSON、导入 JSON 能力。

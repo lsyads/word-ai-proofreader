@@ -201,7 +201,7 @@ async function initializeProjects() {
     const lastProjectId = localStorage.getItem(LAST_PROJECT_ID_KEY);
     if (lastProjectId && recentProjects.some((project) => project.project_id === lastProjectId)) {
       await loadProject(lastProjectId, abortController.signal);
-      showMessage("已恢复最近审校项目。", "success");
+      showMessage("已恢复最近一次审校。", "success");
     }
   } catch (error) {
     appendDebugLog("warn", "加载最近项目失败", { error: getErrorMessage(error) });
@@ -214,14 +214,14 @@ async function startReview() {
   const abortController = startBusy();
   try {
     if (isRunInProgress()) {
-      showMessage("当前审校仍在运行，请刷新当前项目查看进度。", "default");
+      showMessage("本次审校仍在运行，请刷新进度查看最新结果。", "default");
       return;
     }
     if (!currentProject) {
       await createProjectForCurrentInputs(abortController.signal);
     }
     if (!currentProject) {
-      throw new Error("审校项目创建失败。");
+      throw new Error("本次审校创建失败。");
     }
     await runCurrentProject(abortController.signal);
   } catch (error) {
@@ -280,7 +280,7 @@ async function runCurrentProject(signal: AbortSignal) {
     controls.temperature,
     signal
   );
-  showMessage("已开始后台审校，前端会自动刷新运行状态。", "default");
+  showMessage("已开始审校，完成后会显示可处理的建议。", "default");
   renderWorkspace();
   startRunPolling(currentProject.project_id, currentRun.run_id);
 }
@@ -289,9 +289,9 @@ async function refreshProjects() {
   const abortController = startBusy();
   try {
     await loadRecentProjects(abortController.signal);
-    showMessage("最近项目已刷新。", "success");
+    showMessage("最近审校已刷新。", "success");
   } catch (error) {
-    showMessage(`刷新项目失败：${getErrorMessage(error)}`, "error");
+    showMessage(`刷新最近审校失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -302,9 +302,9 @@ async function openRecentProject(projectId: string) {
   const abortController = startBusy();
   try {
     await loadProject(projectId, abortController.signal);
-    showMessage("已打开审校项目。", "success");
+    showMessage("已打开这次审校。", "success");
   } catch (error) {
-    showMessage(`打开项目失败：${getErrorMessage(error)}`, "error");
+    showMessage(`打开审校失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -313,12 +313,13 @@ async function openRecentProject(projectId: string) {
 
 async function deleteProject(projectId: string) {
   if (currentProject?.project_id === projectId && isRunInProgress()) {
-    showMessage("当前项目仍在审校中，请等待完成或确认后台任务已停止后再删除。", "default");
+    showMessage("这次审校仍在运行，请等待完成后再删除。", "default");
     return;
   }
   const confirmed = await confirmAction(
-    "确认删除项目",
-    "删除后会清理该项目的候选问题、报告和生成的 DOCX 文件。这个操作不能撤销。"
+    "确认删除这次审校",
+    "删除后会清理本次建议、报告和生成的 DOCX 文件。这个操作不能撤销。",
+    "删除"
   );
   if (!confirmed) {
     return;
@@ -332,9 +333,9 @@ async function deleteProject(projectId: string) {
       await clearTrackedSelectionRange();
     }
     await loadRecentProjects(abortController.signal);
-    showMessage("项目已删除。", "success");
+    showMessage("这次审校已删除。", "success");
   } catch (error) {
-    showMessage(`删除项目失败：${getErrorMessage(error)}`, "error");
+    showMessage(`删除审校失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -440,7 +441,7 @@ function startRunPolling(projectId: string, runId: string) {
       } else if (result === "timed_out") {
         runPollingTimedOut = true;
         showMessage(
-          "已等待 30 分钟，审校可能仍在后台运行。你可以稍后刷新当前项目查看结果，或点击继续等待。",
+          "已等待 30 分钟，审校可能仍在后台运行。你可以稍后刷新进度查看结果，或点击继续等待。",
           "default"
         );
         appendDebugLog("warn", "前端轮询已到 30 分钟上限，后台任务未判定失败。", {
@@ -458,7 +459,7 @@ function startRunPolling(projectId: string, runId: string) {
       }
       runPollAbortController = null;
       isRunPolling = false;
-      showMessage("自动刷新运行状态中断，请刷新当前项目查看结果。", "default");
+      showMessage("自动刷新中断，请刷新进度查看结果。", "default");
       appendDebugLog("warn", "自动刷新运行状态中断", {
         error: getErrorMessage(error),
         project_id: projectId,
@@ -493,11 +494,11 @@ function showRunCompletionMessage() {
       error: currentRun.error_message || "unknown",
     });
   } else if (currentRun.status === "waiting_for_approval") {
-    showMessage("审校完成，请确认候选问题。", "success");
+    showMessage("审校完成，请查看并处理建议。", "success");
   } else if (isCompletedWithoutCandidates()) {
-    showMessage("审校完成，未发现需要确认的问题。", "success");
+    showMessage("审校完成，未发现需要处理的建议。", "success");
   } else if (currentRun.status === "partial_succeeded") {
-    showMessage("审校部分完成，请查看候选问题和运行记录。", "success");
+    showMessage("审校部分完成，请查看建议；排障信息里可查看运行记录。", "success");
   } else if (currentRun.status === "cancelled") {
     showMessage("审校已取消。", "default");
   } else {
@@ -564,10 +565,10 @@ async function refreshCurrentProject() {
       stopRunPolling();
       showRunCompletionMessage();
     } else {
-      showMessage("当前项目已刷新。", "success");
+      showMessage("进度已刷新。", "success");
     }
   } catch (error) {
-    showMessage(`刷新当前项目失败：${getErrorMessage(error)}`, "error");
+    showMessage(`刷新进度失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -579,7 +580,7 @@ function continueWaitingForRun() {
     return;
   }
   startRunPolling(currentProject.project_id, currentRun.run_id);
-  showMessage("继续等待后台审校结果，前端会自动刷新运行状态。", "default");
+  showMessage("继续等待审校结果，完成后会自动刷新建议。", "default");
   renderWorkspace();
 }
 
@@ -587,14 +588,23 @@ async function decidePendingCandidates(status: "approved" | "rejected") {
   if (!currentProject) {
     return;
   }
+  const actionLabel = status === "approved" ? "接受" : "忽略";
+  const confirmed = await confirmAction(
+    `确认${actionLabel}全部待处理建议`,
+    `这会${actionLabel}本次审校中所有待处理建议，不只处理当前页。写回前仍可在筛选中查看已${actionLabel}的建议。`,
+    `${actionLabel}全部`
+  );
+  if (!confirmed) {
+    return;
+  }
   const abortController = startBusy();
   try {
     await decideAllPendingV2Candidates(currentProject.project_id, status, abortController.signal);
     candidatePage = 1;
     await refreshWorkspaceData(abortController.signal);
-    showMessage("所有待确认候选问题已更新。", "success");
+    showMessage(`所有待处理建议已${actionLabel}。`, "success");
   } catch (error) {
-    showMessage(`批量更新候选问题失败：${getErrorMessage(error)}`, "error");
+    showMessage(`批量处理建议失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -622,9 +632,9 @@ async function decideCandidates(decisions: V2ApprovalDecision[]) {
     await loadCandidates(abortController.signal);
     currentReport = await getV2ReviewReport(currentProject.project_id, abortController.signal);
     currentProject = await getV2Project(currentProject.project_id, abortController.signal);
-    showMessage("候选问题已更新。", "success");
+    showMessage(formatDecisionMessage(decisions), "success");
   } catch (error) {
-    showMessage(`更新候选问题失败：${getErrorMessage(error)}`, "error");
+    showMessage(`处理建议失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -640,7 +650,7 @@ async function locateCandidate(candidateId: string) {
     return;
   }
   if (!canLocateCandidate(candidate)) {
-    showMessage("该候选问题缺少可定位原文，请写回后下载结果 DOCX 查看。", "default");
+    showMessage("这条建议缺少可定位原文；DOCX 写回后可在审校后文件中查看。", "default");
     return;
   }
   if (currentProject.source_type === "selection" && !currentSelectionText) {
@@ -657,7 +667,7 @@ async function locateCandidate(candidateId: string) {
     showMessage("已定位到 Word 原文。", "success");
   } catch (error) {
     const suffix =
-      currentProject.source_type === "docx" ? "。可写回后下载结果 DOCX 查看批注位置。" : "";
+      currentProject.source_type === "docx" ? "。可写回后下载审校后文件查看批注位置。" : "";
     showMessage(`定位失败：${getErrorMessage(error)}${suffix}`, "error");
   } finally {
     stopBusy();
@@ -673,16 +683,20 @@ async function writebackApproved() {
   try {
     const approved = await loadAllCandidatesByStatus("approved", abortController.signal);
     if (approved.length === 0) {
-      showMessage("没有已批准的候选问题可写回。", "error");
+      showMessage("没有已接受的建议可写回。请先接受需要写入 Word 的建议。", "error");
       return;
     }
+    const isDocxProject = currentProject.source_type === "docx";
     if (currentProject.source_type === "selection") {
       await writebackSelection(approved, abortController.signal);
     } else {
       await writebackDocx(abortController.signal);
     }
     await refreshWorkspaceData(abortController.signal);
-    showMessage("已写回已批准候选问题。", "success");
+    showMessage(
+      isDocxProject ? "已生成审校后文件，可点击下载。" : "已将接受的建议写回 Word。",
+      "success"
+    );
   } catch (error) {
     showMessage(`写回失败：${getErrorMessage(error)}`, "error");
     appendDebugLog("error", "V2 写回失败", { error: getErrorMessage(error) });
@@ -700,7 +714,7 @@ async function writebackSelection(approved: V2CandidateIssue[], signal: AbortSig
     throw new Error("当前 Word 环境不支持批注 API。");
   }
   if (!currentSelectionText) {
-    throw new Error("当前选区项目缺少缓存文本，请重新开始当前选区审校。");
+    throw new Error("当前选区缓存已丢失，请重新开始当前选区审校。");
   }
   const issues = approved.map(candidateToProofreadIssue);
   await applyIssuesToScope(currentSelectionText, issues, "selection", getApplicationMode(), {
@@ -741,7 +755,7 @@ async function downloadDocx() {
       currentProject.output_filename,
       abortController.signal
     );
-    showMessage(`已开始下载：${currentProject.output_filename}`, "success");
+    showMessage(`已开始下载审校后文件：${currentProject.output_filename}`, "success");
   } catch (error) {
     showMessage(`下载失败：${getErrorMessage(error)}`, "error");
   } finally {
@@ -784,7 +798,7 @@ function renderProjectBadge() {
 function renderProjectSummary() {
   const container = getElement("project-summary");
   if (!currentProject) {
-    renderEmpty(container, "暂无审校项目。");
+    renderEmpty(container, "暂无本次审校。");
     return;
   }
   container.className = "compact-status";
@@ -796,16 +810,16 @@ function renderProjectSummary() {
     <span>${translateStatus(
       getDisplayStatus(currentRun?.status || currentProject.status, currentProject.candidate_count)
     )}</span>
-    <span>候选 ${currentProject.candidate_count}</span>
-    <span>已批准 ${approvedCount}</span>
-    <span>${writtenCount > 0 ? `已写回 ${writtenCount}` : "未写回"}</span>
+    <span>建议 ${currentProject.candidate_count}</span>
+    <span>已接受 ${approvedCount}</span>
+    <span>${writtenCount > 0 ? `已写入 ${writtenCount}` : "未写入"}</span>
   `;
 }
 
 function renderRecentProjects() {
   const container = getElement("recent-projects");
   if (recentProjects.length === 0) {
-    renderEmpty(container, "暂无最近项目。");
+    renderEmpty(container, "暂无最近审校。");
     return;
   }
   container.className = "workspace-list";
@@ -817,7 +831,7 @@ function renderRecentProjects() {
             <span class="item-title">${escapeHtml(project.book.title || project.source_filename)}</span>
             <span class="item-meta">${translateStatus(project.source_type)} · ${translateStatus(
               getDisplayStatus(project.status, project.candidate_count)
-            )} · 候选 ${project.candidate_count}</span>
+            )} · 建议 ${project.candidate_count}</span>
           </button>
           <button class="ms-Button danger-button" data-delete-project-id="${escapeHtml(project.project_id)}" type="button">删除</button>
         </div>
@@ -938,14 +952,14 @@ function renderCandidates() {
   if (runPollingTimedOut && isRunInProgress()) {
     renderEmpty(
       container,
-      "后台审校时间较长。已停止自动轮询，请刷新当前项目查看结果，或点击继续等待。"
+      "审校时间较长，已停止自动刷新。你可以刷新进度查看结果，或点击继续等待。"
     );
     return;
   }
   if (isRunInProgress()) {
     renderEmpty(
       container,
-      `正在审校：${translateStatus(currentRun?.stage || currentRun?.status || "running")}`
+      `仍在审校：${translateStage(currentRun?.stage || currentRun?.status || "running")}`
     );
     return;
   }
@@ -953,10 +967,10 @@ function renderCandidates() {
     renderEmpty(
       container,
       candidateTotal === 0 && isCompletedWithoutCandidates()
-        ? "审校完成，未发现需要确认的问题。"
+        ? "审校完成，未发现需要处理的建议。"
         : candidateTotal === 0
-          ? "开始审校后显示候选问题。"
-          : "当前筛选下没有候选问题。"
+          ? "开始审校后显示建议。"
+          : "当前筛选下没有建议。"
     );
     return;
   }
@@ -974,28 +988,33 @@ function renderCandidateCard(candidate: V2CandidateIssue): string {
   const locateHint = canLocate
     ? ""
     : currentProject?.source_type === "docx"
-      ? "缺少可定位原文；写回后可在结果 DOCX 中查看。"
+      ? "缺少可定位原文；写回后可在审校后文件中查看。"
       : "缺少可定位原文。";
+  const replacement = candidate.replacement || "不直接替换，请按修改说明判断";
+  const riskHint = candidate.needs_human_review
+    ? "需要人工重点判断。"
+    : "置信度较高，仍需接受后才会写回。";
   return `
     <div class="candidate-item">
       <div class="candidate-header">
-        <div class="item-title">${escapeHtml(candidate.category)} · ${translateStatus(candidate.status)}</div>
-        <span class="severity ${candidate.severity}">${candidate.severity}</span>
+        <div class="item-title">${escapeHtml(translateCategory(candidate.category))} · ${translateStatus(candidate.status)}</div>
+        <span class="severity ${candidate.severity}">${translateSeverity(candidate.severity)}</span>
       </div>
       <div class="item-body"><strong>原文：</strong>${escapeHtml(candidate.original || "-")}</div>
-      <div class="item-body"><strong>建议：</strong>${escapeHtml(candidate.suggestion || "-")}</div>
-      <div class="item-body"><strong>替换：</strong>${escapeHtml(candidate.replacement || "需人工判断")}</div>
-      <div class="item-body"><strong>证据：</strong>${escapeHtml(candidate.evidence || "-")}</div>
+      <div class="item-body"><strong>建议改为：</strong>${escapeHtml(replacement)}</div>
+      <div class="item-body"><strong>修改说明：</strong>${escapeHtml(candidate.suggestion || "-")}</div>
+      <div class="item-body"><strong>依据：</strong>${escapeHtml(candidate.evidence || "-")}</div>
+      <div class="item-body"><strong>风险提示：</strong>${escapeHtml(riskHint)}</div>
       ${locateHint ? `<div class="item-meta">${locateHint}</div>` : ""}
       <details class="candidate-detail">
-        <summary>查看详情</summary>
-        <div class="item-meta">${escapeHtml(candidate.pass_name)} · 置信度 ${Math.round(candidate.confidence * 100)}% · ${escapeHtml(candidate.rule_id || candidate.evidence_kind)}</div>
+        <summary>查看技术详情</summary>
+        <div class="item-meta">${escapeHtml(translatePassName(candidate.pass_name))} · 置信度 ${Math.round(candidate.confidence * 100)}% · ${escapeHtml(candidate.rule_id || candidate.evidence_kind)}</div>
         <div class="item-meta">${escapeHtml(candidate.evaluation_note || candidate.self_check || "")}</div>
       </details>
       <div class="candidate-actions">
-        <button class="ms-Button" data-locate-candidate-id="${escapeHtml(candidate.candidate_id)}" type="button" ${canLocate ? "" : "disabled"}>定位</button>
-        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="approved" type="button">批准</button>
-        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="rejected" type="button">拒绝</button>
+        <button class="ms-Button" data-locate-candidate-id="${escapeHtml(candidate.candidate_id)}" type="button" ${canLocate ? "" : "disabled"}>定位原文</button>
+        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="approved" type="button">接受</button>
+        <button class="ms-Button" data-candidate-id="${escapeHtml(candidate.candidate_id)}" data-decision="rejected" type="button">忽略</button>
       </div>
     </div>
   `;
@@ -1026,9 +1045,10 @@ function updateCandidatePassFilterOptions() {
       : passNames;
   select.hidden = optionPassNames.length <= 1 && currentValue === "all";
   select.innerHTML = [
-    `<option value="all">全部阶段</option>`,
+    `<option value="all">全部来源</option>`,
     ...optionPassNames.map(
-      (passName) => `<option value="${escapeHtml(passName)}">${escapeHtml(passName)}</option>`
+      (passName) =>
+        `<option value="${escapeHtml(passName)}">${escapeHtml(translatePassName(passName))}</option>`
     ),
   ].join("");
   select.value = currentValue;
@@ -1053,7 +1073,7 @@ async function handleCandidateFilterChange() {
   try {
     await loadCandidates(abortController.signal);
   } catch (error) {
-    showMessage(`刷新候选问题失败：${getErrorMessage(error)}`, "error");
+    showMessage(`刷新建议失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -1073,7 +1093,7 @@ async function changeCandidatePage(nextPage: number) {
   try {
     await loadCandidates(abortController.signal);
   } catch (error) {
-    showMessage(`切换候选分页失败：${getErrorMessage(error)}`, "error");
+    showMessage(`切换建议分页失败：${getErrorMessage(error)}`, "error");
   } finally {
     stopBusy();
     renderWorkspace();
@@ -1123,10 +1143,10 @@ function renderReport() {
   container.className = "workspace-summary compact-report";
   container.innerHTML = `
     <div class="summary-grid">
-      ${summaryItem("已写回", String(currentReport.written_count))}
-      ${summaryItem("待确认", String(currentReport.pending_count))}
-      ${summaryItem("已拒绝", String(currentReport.rejected_count))}
-      ${summaryItem("问题总数", String(currentReport.issue_count))}
+      ${summaryItem("已写入", String(currentReport.written_count))}
+      ${summaryItem("待处理", String(currentReport.pending_count))}
+      ${summaryItem("已忽略", String(currentReport.rejected_count))}
+      ${summaryItem("建议总数", String(currentReport.issue_count))}
     </div>
     <details class="details-panel">
       <summary>查看完整报告</summary>
@@ -1153,11 +1173,10 @@ function updateButtons() {
   const approvedCount = currentProject?.approved_count || 0;
   const pendingCount = currentProject?.pending_count || 0;
   getButton("start-review").disabled = isBusy || runInProgress;
-  getButton("start-review").textContent = runInProgress
-    ? "审校进行中"
-    : hasProject
-      ? "重新审校"
-      : "开始审校";
+  setButtonLabel(
+    "start-review",
+    runInProgress ? "审校进行中" : hasProject ? "重新审校" : "开始审校"
+  );
   getButton("refresh-projects").disabled = isBusy;
   getButton("refresh-current-project").disabled = isBusy || !hasProject;
   getButton("refresh-trace").disabled = isBusy || !hasProject;
@@ -1166,15 +1185,17 @@ function updateButtons() {
   getButton("approve-all").disabled = isBusy || pendingCount === 0;
   getButton("reject-all").disabled = isBusy || pendingCount === 0;
   getButton("writeback").disabled = isBusy || approvedCount === 0;
+  setButtonLabel(
+    "writeback",
+    approvedCount > 0 ? `写回 ${approvedCount} 条已接受建议` : "先接受建议后写回"
+  );
   getButton("download-docx").disabled =
     isBusy ||
     isDownloadingDocx ||
     !currentProject ||
     currentProject.source_type !== "docx" ||
     !currentProject.output_filename;
-  getButton("download-docx").querySelector(".ms-Button-label").textContent = isDownloadingDocx
-    ? "下载中"
-    : "下载结果 DOCX";
+  setButtonLabel("download-docx", isDownloadingDocx ? "下载中" : "下载审校后文件");
 }
 
 function getValidatedBookInfo(): BookInfo | null {
@@ -1219,7 +1240,7 @@ function handleSourceTypeChange() {
 function updateDocxFileSummary() {
   const file = getDocxFile();
   getElement("docx-file-summary").textContent = file
-    ? `${file.name} · ${file.size} bytes`
+    ? `${file.name} · ${formatBytes(file.size)}`
     : "尚未选择 DOCX。";
 }
 
@@ -1274,11 +1295,11 @@ function candidateToProofreadIssue(candidate: V2CandidateIssue): ProofreadIssue 
 
 function formatCandidateSummary(): string {
   if ((currentProject?.candidate_count || 0) === 0 && isCompletedWithoutCandidates()) {
-    return "总数 0，未发现需要确认的问题。";
+    return "共 0 条建议，未发现需要处理的内容。";
   }
   const rejectedCount = currentReport?.rejected_count ?? "-";
   const writtenCount = currentReport?.written_count ?? "-";
-  return `项目总数 ${currentProject?.candidate_count || 0}，待确认 ${currentProject?.pending_count || 0}，已批准 ${currentProject?.approved_count || 0}，已拒绝 ${rejectedCount}，已写回 ${writtenCount}；当前筛选 ${candidateTotal} 条。`;
+  return `共 ${currentProject?.candidate_count || 0} 条建议，待处理 ${currentProject?.pending_count || 0}，已接受 ${currentProject?.approved_count || 0}，已忽略 ${rejectedCount}，已写入 ${writtenCount}；当前筛选 ${candidateTotal} 条。`;
 }
 
 function summaryItem(label: string, value: string): string {
@@ -1297,25 +1318,88 @@ function renderEmpty(element: HTMLElement, message: string) {
 
 function translateStatus(status: string): string {
   const labels: Record<string, string> = {
-    approved: "已批准",
+    approved: "已接受",
     cancelled: "已取消",
     created: "已创建",
-    deferred: "暂缓",
+    deferred: "稍后处理",
     docx: "DOCX",
     failed: "失败",
-    no_candidates: "未发现问题",
+    no_candidates: "未发现建议",
     not_started: "未开始",
-    partial_succeeded: "部分成功",
-    pending: "待确认",
+    partial_succeeded: "部分完成",
+    pending: "待处理",
     queued: "排队中",
-    rejected: "已拒绝",
+    rejected: "已忽略",
     running: "审校中",
     selection: "当前选区",
-    succeeded: "成功",
-    waiting_for_approval: "等待确认",
-    written: "已写回",
+    succeeded: "已完成",
+    waiting_for_approval: "等待处理",
+    written: "已写入",
   };
   return labels[status] || status;
+}
+
+function translateStage(stage: string): string {
+  const labels: Record<string, string> = {
+    consistency_pass: "正在检查前后一致性",
+    evaluate_candidates: "正在整理建议",
+    failed: "审校失败",
+    merge_candidates: "正在合并重复建议",
+    partial_succeeded: "部分完成",
+    plan_review: "正在准备审校",
+    proofread_pass: "正在检查正文",
+    queued: "排队中",
+    running: "审校中",
+    style_rule_pass: "正在检查体例",
+    succeeded: "已完成",
+    terminology_pass: "正在检查术语",
+    waiting_for_approval: "等待处理建议",
+  };
+  return labels[stage] || translateStatus(stage);
+}
+
+function translateSeverity(severity: string): string {
+  const labels: Record<string, string> = {
+    high: "高",
+    low: "低",
+    medium: "中",
+  };
+  return labels[severity] || severity;
+}
+
+function translateCategory(category: string): string {
+  const labels: Record<string, string> = {
+    fact: "事实核查",
+    grammar: "语句问题",
+    punctuation: "标点体例",
+    style: "体例建议",
+    terminology: "术语问题",
+    typo: "错别字",
+  };
+  return labels[category] || category;
+}
+
+function translatePassName(passName: string): string {
+  const labels: Record<string, string> = {
+    consistency_pass: "前后一致性",
+    proofread_pass: "基础审校",
+    style_rule_pass: "体例规则",
+    terminology_pass: "术语检查",
+  };
+  return labels[passName] || passName;
+}
+
+function formatDecisionMessage(decisions: V2ApprovalDecision[]): string {
+  const statuses = Array.from(new Set(decisions.map((decision) => decision.status)));
+  if (statuses.length === 1) {
+    if (statuses[0] === "approved") {
+      return "建议已接受。";
+    }
+    if (statuses[0] === "rejected") {
+      return "建议已忽略。";
+    }
+  }
+  return "建议已更新。";
 }
 
 function getDisplayStatus(status: string, candidateCount: number): string {
@@ -1363,6 +1447,16 @@ function showMessage(message: string, type: "default" | "error" | "success" = "d
   element.className = type === "default" ? "message" : `message is-${type}`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${bytes} bytes`;
+}
+
 function confirmAction(
   title: string,
   description: string,
@@ -1393,6 +1487,16 @@ function resolveConfirmDialog(confirmed: boolean) {
 
 function getButton(id: string): HTMLButtonElement {
   return document.getElementById(id) as HTMLButtonElement;
+}
+
+function setButtonLabel(id: string, label: string) {
+  const button = getButton(id);
+  const labelElement = button.querySelector(".ms-Button-label");
+  if (labelElement) {
+    labelElement.textContent = label;
+  } else {
+    button.textContent = label;
+  }
 }
 
 function getElement(id: string): HTMLElement {

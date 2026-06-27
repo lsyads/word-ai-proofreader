@@ -333,6 +333,14 @@ body {
   margin-top: 12px;
 }
 
+.nested-heading {
+  margin-top: 10px;
+}
+
+.nested-heading h3 {
+  margin: 0;
+}
+
 .details-panel summary,
 .candidate-detail summary {
   color: #605e5c;
@@ -359,6 +367,10 @@ body {
 .item-body {
   color: #605e5c;
   font-size: 12px;
+}
+
+.item-body strong {
+  color: #323130;
 }
 
 .candidate-item {
@@ -399,6 +411,11 @@ body {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.candidate-actions .ms-Button {
+  padding-left: 4px;
+  padding-right: 4px;
 }
 
 .candidate-detail {

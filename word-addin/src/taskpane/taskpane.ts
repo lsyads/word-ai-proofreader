@@ -27,6 +27,7 @@ import {
   AIProfile,
   ApplicationMode,
   BookInfo,
+  IssueApplicationSummary,
   ProofreadIssue,
   ProviderAPI,
   V2ApprovalDecision,
@@ -694,6 +695,7 @@ async function writebackApproved() {
     return;
   }
   const abortController = startBusy("writing_back");
+  let selectionSummary: IssueApplicationSummary | null = null;
   try {
     const approved = await loadAllCandidatesByStatus("approved", abortController.signal);
     if (approved.length === 0) {
@@ -702,7 +704,7 @@ async function writebackApproved() {
     }
     const isDocxProject = currentProject.source_type === "docx";
     if (currentProject.source_type === "selection") {
-      await writebackSelection(approved, abortController.signal);
+      selectionSummary = await writebackSelection(approved, abortController.signal);
     } else {
       const writeback = await writebackDocx(abortController.signal);
       mergeDocxWritebackResult(writeback);
@@ -710,7 +712,9 @@ async function writebackApproved() {
     try {
       await refreshWorkspaceData(abortController.signal);
       showMessage(
-        isDocxProject ? "已生成审校后文件，可点击下载。" : "已将接受的建议写回 Word。",
+        isDocxProject
+          ? "已生成审校后文件，可点击下载。"
+          : formatSelectionWritebackMessage(selectionSummary),
         "success"
       );
     } catch (refreshError) {
@@ -738,9 +742,12 @@ async function writebackApproved() {
   }
 }
 
-async function writebackSelection(approved: V2CandidateIssue[], signal: AbortSignal) {
+async function writebackSelection(
+  approved: V2CandidateIssue[],
+  signal: AbortSignal
+): Promise<IssueApplicationSummary> {
   if (!currentProject) {
-    return;
+    throw new Error("请先打开一个当前选区审校项目。");
   }
   if (!ensureWordCommentSupport()) {
     throw new Error("当前 Word 环境不支持批注 API。");
@@ -749,14 +756,30 @@ async function writebackSelection(approved: V2CandidateIssue[], signal: AbortSig
     throw new Error("当前选区缓存已丢失，请重新开始当前选区审校。");
   }
   const issues = approved.map(candidateToProofreadIssue);
-  await applyIssuesToScope(currentSelectionText, issues, "selection", getApplicationMode(), {
-    fallbackSummaryTruncateEnabled: getInput("fallback-summary-truncate-enabled").checked,
-  });
-  await markV2CandidatesWritten(
-    currentProject.project_id,
-    approved.map((candidate) => candidate.candidate_id),
-    signal
+  const summary = await applyIssuesToScope(
+    currentSelectionText,
+    issues,
+    "selection",
+    getApplicationMode(),
+    {
+      fallbackSummaryTruncateEnabled: getInput("fallback-summary-truncate-enabled").checked,
+    }
   );
+  const writtenCandidateIds = [
+    ...new Set([...summary.writtenIssueIds, ...summary.fallbackIssueIds]),
+  ];
+  if (writtenCandidateIds.length === 0 && approved.length > 0) {
+    throw new Error("当前选区写回失败，未能写入任何已接受建议。");
+  }
+  await markV2CandidatesWritten(currentProject.project_id, writtenCandidateIds, signal);
+  return summary;
+}
+
+function formatSelectionWritebackMessage(summary: IssueApplicationSummary | null): string {
+  if (summary && (summary.failedIssueIds.length > 0 || summary.truncatedIssueIds.length > 0)) {
+    return "部分建议未写入，仍保留为已接受。";
+  }
+  return "已将接受的建议写回 Word。";
 }
 
 async function writebackDocx(signal: AbortSignal): Promise<V2WritebackResponse> {
@@ -865,7 +888,10 @@ function renderProjectSummary() {
       <span>${currentProject.source_type === "selection" ? "当前选区" : "全书 DOCX"}</span>
       <span>${escapeHtml(currentProject.book.title)}</span>
       <span>${translateStatus(
-        getDisplayStatus(currentRun?.status || currentProject.status, currentProject.candidate_count)
+        getDisplayStatus(
+          currentRun?.status || currentProject.status,
+          currentProject.candidate_count
+        )
       )}</span>
       <span>建议 ${currentProject.candidate_count}</span>
       <span>已接受 ${approvedCount}</span>
@@ -1415,13 +1441,11 @@ function renderRunProgress(run: V2Run | null): string {
   `;
 }
 
-function getRunProgress(run: V2Run | null):
-  | {
-      stageLabel: string;
-      percent: number;
-      description: string;
-    }
-  | null {
+function getRunProgress(run: V2Run | null): {
+  stageLabel: string;
+  percent: number;
+  description: string;
+} | null {
   if (!run || run.total_chunks <= 0) {
     return null;
   }
@@ -1429,7 +1453,9 @@ function getRunProgress(run: V2Run | null):
   const completed = clampCount(run.completed_chunks, total);
   const failed = clampCount(run.failed_chunks, total - completed);
   const processed = Math.min(total, completed + failed);
-  const current = TERMINAL_RUN_STATUSES.has(run.status) ? processed : Math.min(total, processed + 1);
+  const current = TERMINAL_RUN_STATUSES.has(run.status)
+    ? processed
+    : Math.min(total, processed + 1);
   const percent = Math.round((processed / total) * 100);
   const currentText = TERMINAL_RUN_STATUSES.has(run.status)
     ? `已处理 ${processed}/${total} 块`

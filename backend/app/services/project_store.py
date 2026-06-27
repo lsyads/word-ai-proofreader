@@ -55,6 +55,24 @@ class StoredProject:
     output_relative_path: str | None
 
 
+@dataclass(frozen=True)
+class StoredProjectSummary:
+    project_id: str
+    source_type: str
+    status: str
+    source_filename: str
+    text_preview: str | None
+    book: BookInfo
+    review_goal: str
+    created_at: str
+    updated_at: str
+    output_filename: str | None
+    output_relative_path: str | None
+
+
+ACTIVE_RUN_STATUSES = {"queued", "running"}
+
+
 def workspace_dir(settings: Settings | None = None) -> Path:
     resolved_settings = settings or get_settings()
     return resolved_settings.agent_workspace_dir
@@ -123,6 +141,24 @@ def require_project(project_id: str, settings: Settings | None = None) -> Stored
     if not row:
         raise V2ProjectNotFound(project_id)
     return _row_to_project(row)
+
+
+def require_project_summary(project_id: str, settings: Settings | None = None) -> StoredProjectSummary:
+    _ensure_schema(settings)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            """
+            SELECT project_id, source_type, status, source_filename, text_preview,
+                   book_json, review_goal, created_at, updated_at,
+                   output_filename, output_relative_path
+            FROM v2_projects
+            WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+    if not row:
+        raise V2ProjectNotFound(project_id)
+    return _row_to_project_summary(row)
 
 
 def list_projects(limit: int = 20, settings: Settings | None = None) -> list[V2ProjectResponse]:
@@ -246,7 +282,7 @@ def get_review_plan(project_id: str, settings: Settings | None = None) -> V2Revi
 
 def create_run(project_id: str, *, total_chunks: int, settings: Settings | None = None) -> V2RunResponse:
     _ensure_schema(settings)
-    require_project(project_id, settings)
+    require_project_summary(project_id, settings)
     run_id = f"v2_run_{uuid.uuid4().hex}"
     now = _now_iso()
     with _connect(settings) as connection:
@@ -301,10 +337,27 @@ def latest_run(project_id: str, settings: Settings | None = None) -> V2RunRespon
             SELECT run_id
             FROM v2_runs
             WHERE project_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, run_id DESC
             LIMIT 1
             """,
             (project_id,),
+        ).fetchone()
+    return require_run(project_id, row[0], settings) if row else None
+
+
+def active_run(project_id: str, settings: Settings | None = None) -> V2RunResponse | None:
+    _ensure_schema(settings)
+    placeholders = ", ".join("?" for _ in ACTIVE_RUN_STATUSES)
+    with _connect(settings) as connection:
+        row = connection.execute(
+            f"""
+            SELECT run_id
+            FROM v2_runs
+            WHERE project_id = ? AND status IN ({placeholders})
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            (project_id, *sorted(ACTIVE_RUN_STATUSES)),
         ).fetchone()
     return require_run(project_id, row[0], settings) if row else None
 
@@ -392,11 +445,17 @@ def save_candidates(candidates: list[V2CandidateIssue], settings: Settings | Non
             connection.execute(
                 """
                 INSERT INTO v2_candidate_issues (
-                    candidate_id, project_id, run_id, status, issue_json, created_at, updated_at
+                    candidate_id, project_id, run_id, status, pass_name, category,
+                    severity, issue_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(candidate_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    run_id = excluded.run_id,
                     status = excluded.status,
+                    pass_name = excluded.pass_name,
+                    category = excluded.category,
+                    severity = excluded.severity,
                     issue_json = excluded.issue_json,
                     updated_at = excluded.updated_at
                 """,
@@ -405,6 +464,9 @@ def save_candidates(candidates: list[V2CandidateIssue], settings: Settings | Non
                     candidate.project_id,
                     candidate.run_id,
                     candidate.status,
+                    candidate.pass_name,
+                    candidate.category,
+                    candidate.severity,
                     candidate.model_dump_json(),
                     candidate.created_at,
                     candidate.updated_at,
@@ -417,6 +479,7 @@ def list_candidates(
     project_id: str,
     settings: Settings | None = None,
     *,
+    run_id: str | None = None,
     status: str | None = None,
     pass_name: str | None = None,
     limit: int | None = None,
@@ -425,11 +488,14 @@ def list_candidates(
     _ensure_schema(settings)
     where = ["project_id = ?"]
     params: list[Any] = [project_id]
+    if run_id:
+        where.append("run_id = ?")
+        params.append(run_id)
     if status:
         where.append("status = ?")
         params.append(status)
     if pass_name:
-        where.append("json_extract(issue_json, '$.pass_name') = ?")
+        where.append("pass_name = ?")
         params.append(pass_name)
     sql = f"""
             SELECT issue_json
@@ -449,17 +515,21 @@ def count_candidates(
     project_id: str,
     settings: Settings | None = None,
     *,
+    run_id: str | None = None,
     status: str | None = None,
     pass_name: str | None = None,
 ) -> int:
     _ensure_schema(settings)
     where = ["project_id = ?"]
     params: list[Any] = [project_id]
+    if run_id:
+        where.append("run_id = ?")
+        params.append(run_id)
     if status:
         where.append("status = ?")
         params.append(status)
     if pass_name:
-        where.append("json_extract(issue_json, '$.pass_name') = ?")
+        where.append("pass_name = ?")
         params.append(pass_name)
     with _connect(settings) as connection:
         row = connection.execute(
@@ -469,13 +539,35 @@ def count_candidates(
     return int(row[0]) if row else 0
 
 
+def candidate_status_counts(project_id: str, run_id: str | None, settings: Settings | None = None) -> dict[str, int]:
+    _ensure_schema(settings)
+    if not run_id:
+        return {}
+    with _connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM v2_candidate_issues
+            WHERE project_id = ? AND run_id = ?
+            GROUP BY status
+            """,
+            (project_id, run_id),
+        ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
+
+
 def update_candidate_statuses(
     project_id: str,
     decisions: dict[str, str],
+    *,
+    run_id: str | None = None,
     settings: Settings | None = None,
 ) -> int:
     _ensure_schema(settings)
-    candidates = {candidate.candidate_id: candidate for candidate in list_candidates(project_id, settings)}
+    candidates = {
+        candidate.candidate_id: candidate
+        for candidate in list_candidates(project_id, settings, run_id=run_id)
+    }
     missing = set(decisions) - set(candidates)
     if missing:
         raise V2CandidateNotFound(next(iter(missing)))
@@ -485,37 +577,56 @@ def update_candidate_statuses(
     with _connect(settings) as connection:
         for candidate_id, status in decisions.items():
             candidate = candidates[candidate_id].model_copy(update={"status": status, "updated_at": now})
+            where = ["project_id = ?", "candidate_id = ?"]
+            params: list[Any] = [status, candidate.model_dump_json(), now, project_id, candidate_id]
+            if run_id:
+                where.append("run_id = ?")
+                params.append(run_id)
             connection.execute(
-                """
+                f"""
                 UPDATE v2_candidate_issues
                 SET status = ?, issue_json = ?, updated_at = ?
-                WHERE project_id = ? AND candidate_id = ?
+                WHERE {" AND ".join(where)}
                 """,
-                (status, candidate.model_dump_json(), now, project_id, candidate_id),
+                tuple(params),
             )
             updated += 1
         connection.commit()
     return updated
 
 
-def mark_candidates_written(project_id: str, candidate_ids: list[str], settings: Settings | None = None) -> int:
-    return update_candidate_statuses(project_id, {candidate_id: "written" for candidate_id in candidate_ids}, settings)
+def mark_candidates_written(
+    project_id: str,
+    candidate_ids: list[str],
+    *,
+    run_id: str | None = None,
+    settings: Settings | None = None,
+) -> int:
+    return update_candidate_statuses(
+        project_id,
+        {candidate_id: "written" for candidate_id in candidate_ids},
+        run_id=run_id,
+        settings=settings,
+    )
 
 
 def update_all_pending_candidates(
     project_id: str,
     status: str,
+    *,
+    run_id: str | None = None,
     settings: Settings | None = None,
 ) -> int:
     _ensure_schema(settings)
     require_project(project_id, settings)
-    pending = list_candidates(project_id, settings, status="pending")
+    pending = list_candidates(project_id, settings, run_id=run_id, status="pending")
     if not pending:
         return 0
     return update_candidate_statuses(
         project_id,
         {candidate.candidate_id: status for candidate in pending},
-        settings,
+        run_id=run_id,
+        settings=settings,
     )
 
 
@@ -624,10 +735,11 @@ def get_report(project_id: str, settings: Settings | None = None) -> V2ReviewRep
 
 
 def project_response(project_id: str, settings: Settings | None = None) -> V2ProjectResponse:
-    project = require_project(project_id, settings)
-    candidates = list_candidates(project_id, settings)
+    project = require_project_summary(project_id, settings)
     run_count = _run_count(project_id, settings)
     latest = latest_run(project_id, settings)
+    counts = candidate_status_counts(project_id, latest.run_id if latest else None, settings)
+    candidate_count = sum(counts.values())
     return V2ProjectResponse(
         project_id=project.project_id,
         source_type=project.source_type,
@@ -642,9 +754,9 @@ def project_response(project_id: str, settings: Settings | None = None) -> V2Pro
         latest_run_id=latest.run_id if latest else None,
         latest_run_status=latest.status if latest else None,
         latest_run_stage=latest.stage if latest else None,
-        candidate_count=len(candidates),
-        pending_count=sum(1 for candidate in candidates if candidate.status == "pending"),
-        approved_count=sum(1 for candidate in candidates if candidate.status == "approved"),
+        candidate_count=candidate_count,
+        pending_count=counts.get("pending", 0),
+        approved_count=counts.get("approved", 0),
         output_filename=project.output_filename,
         download_url=f"/api/v2/projects/{project.project_id}/download" if project.output_filename else None,
     )
@@ -754,12 +866,24 @@ def _ensure_schema(settings: Settings | None = None) -> None:
                 project_id TEXT NOT NULL,
                 run_id TEXT NOT NULL,
                 status TEXT NOT NULL,
+                pass_name TEXT NOT NULL DEFAULT 'proofread_pass',
+                category TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT '',
                 issue_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        candidate_columns = {row[1] for row in connection.execute("PRAGMA table_info(v2_candidate_issues)").fetchall()}
+        if "pass_name" not in candidate_columns:
+            connection.execute(
+                "ALTER TABLE v2_candidate_issues ADD COLUMN pass_name TEXT NOT NULL DEFAULT 'proofread_pass'"
+            )
+        if "category" not in candidate_columns:
+            connection.execute("ALTER TABLE v2_candidate_issues ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+        if "severity" not in candidate_columns:
+            connection.execute("ALTER TABLE v2_candidate_issues ADD COLUMN severity TEXT NOT NULL DEFAULT ''")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS v2_reports (
@@ -784,6 +908,26 @@ def _ensure_schema(settings: Settings | None = None) -> None:
             )
             """
         )
+        _backfill_candidate_query_columns(connection)
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_v2_projects_updated ON v2_projects(updated_at, created_at)")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v2_runs_project_status_created
+            ON v2_runs(project_id, status, created_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v2_candidates_project_run_status_created
+            ON v2_candidate_issues(project_id, run_id, status, created_at, candidate_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_v2_candidates_project_run_pass
+            ON v2_candidate_issues(project_id, run_id, pass_name)
+            """
+        )
         connection.commit()
 
 
@@ -802,6 +946,48 @@ def _row_to_project(row: tuple) -> StoredProject:
         output_filename=row[10],
         output_relative_path=row[11],
     )
+
+
+def _row_to_project_summary(row: tuple) -> StoredProjectSummary:
+    return StoredProjectSummary(
+        project_id=row[0],
+        source_type=row[1],
+        status=row[2],
+        source_filename=row[3],
+        text_preview=row[4],
+        book=BookInfo.model_validate(json.loads(row[5])),
+        review_goal=row[6],
+        created_at=row[7],
+        updated_at=row[8],
+        output_filename=row[9],
+        output_relative_path=row[10],
+    )
+
+
+def _backfill_candidate_query_columns(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT candidate_id, issue_json, pass_name, category, severity
+        FROM v2_candidate_issues
+        WHERE category = '' OR severity = ''
+        """
+    ).fetchall()
+    for candidate_id, issue_json, pass_name, category, severity in rows:
+        try:
+            payload = json.loads(issue_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        resolved_pass_name = payload.get("pass_name") or pass_name or "proofread_pass"
+        resolved_category = payload.get("category") or category or ""
+        resolved_severity = payload.get("severity") or severity or ""
+        connection.execute(
+            """
+            UPDATE v2_candidate_issues
+            SET pass_name = ?, category = ?, severity = ?
+            WHERE candidate_id = ?
+            """,
+            (resolved_pass_name, resolved_category, resolved_severity, candidate_id),
+        )
 
 
 def _row_to_memory(row: tuple) -> V2MemoryItemResponse:

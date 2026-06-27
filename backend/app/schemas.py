@@ -364,6 +364,7 @@ class V2CandidateIssue(BaseModel):
 
 class V2CandidateListResponse(BaseModel):
     project_id: str
+    run_id: str | None = None
     candidates: list[V2CandidateIssue]
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1)

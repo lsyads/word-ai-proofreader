@@ -129,6 +129,8 @@ Response:
 
 V2 API 以审校项目为核心，V2.2 支持 `selection` 和 `docx` 两类项目。DOCX 项目创建和 V1 DOCX 任务一样使用原始 DOCX bytes 作为请求体，避免 Word WebView multipart 兼容问题。V2.2 存量数据独立保存到 `AGENT_WORKSPACE_DIR`，允许重建 schema，不读取或迁移 V1/V2 旧 history、trace、task 或 DOCX result index。插件 UI 面向内部试点编辑收敛为普通使用路径：选择文本或文件、开始审校、查看建议、接受/忽略、写回或下载；Agent 内部 trace/plan/memory 和调试日志默认放入“排障信息（技术支持）”。
 
+V2.2 保留同一项目的历史 run、候选和 run events，但面向编辑的默认工作台视图始终以 latest run 为准：项目摘要的候选数量、默认候选列表、审校报告、批量决策、当前选区 mark-written 和 DOCX 写回都只作用于最新一次 run。只有显式传入 `run_id` 查询候选列表时，才查看历史 run 候选。
+
 ### `POST /api/v2/projects`
 
 创建 V2 DOCX 审校项目，立即建立文档地图和默认审校计划。
@@ -141,7 +143,7 @@ Query：
 
 Request body：原始 `.docx` 二进制。
 
-Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/created_at/updated_at/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count/output_filename/download_url`。DOCX 项目的 `source_type` 为 `docx`。
+Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/created_at/updated_at/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count/output_filename/download_url`。DOCX 项目的 `source_type` 为 `docx`。`candidate_count/pending_count/approved_count` 默认只统计 latest run。
 
 ### `POST /api/v2/projects/selection`
 
@@ -166,7 +168,7 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 
 ### `GET /api/v2/projects/{project_id}`
 
-查询 V2 项目摘要。项目不存在返回 404。
+查询 V2 项目摘要。项目不存在返回 404。候选数量默认只统计 latest run；旧 run 的候选不会进入项目摘要。
 
 ### `DELETE /api/v2/projects/{project_id}`
 
@@ -195,7 +197,7 @@ V2 当前审校计划不展示本地非 AI 规则 pass。默认不产出任何�
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
-启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
+启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。同一项目存在 `queued/running` run 时返回 409，避免并发 run 混写候选状态。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/merge_candidates/evaluate_candidates`。创建 run 时使用已保存 document map 的 `chunk_count` 建立计划；后台执行时才解析 DOCX 并生成正文 chunks。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -213,11 +215,11 @@ V2 插件在项目 run 运行中轮询该接口，最长自动轮询 60 分钟�
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤候选来源。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分候选来源、证据类型、可直接替换文本和 evaluator 复核意见。插件把候选显示为“审校建议”，把 `approved/rejected/written` 显示为“已接受/已忽略/已写入”；`needs_human_review=false` 表示 evaluator 未标记为人工重点判断，候选仍必须由编辑接受后才能写回。
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤候选来源，可选 `run_id` 查询指定历史 run。未传 `run_id` 时默认查询 latest run；响应包含 `project_id/run_id/candidates/page/page_size/total/total_pages/has_previous/has_next`，其中 `run_id` 在项目尚无 run 时为 `null`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分候选来源、证据类型、可直接替换文本和 evaluator 复核意见。插件把候选显示为“审校建议”，把 `approved/rejected/written` 显示为“已接受/已忽略/已写入”；`needs_human_review=false` 表示 evaluator 未标记为人工重点判断，候选仍必须由编辑接受后才能写回。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
-批量更新候选问题决策。
+批量更新候选问题决策。默认只允许更新 latest run 中的候选；历史 run 的候选必须先通过显式候选查询查看，不会被默认决策接口误改。
 
 Request:
 
@@ -235,7 +237,7 @@ Request:
 
 ### `POST /api/v2/projects/{project_id}/candidates/bulk-decisions`
 
-批量更新该项目所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“接受全部待处理/忽略全部待处理”调用该接口，并在执行前弹窗提示会处理所有待处理建议，而不是当前页。
+批量更新 latest run 中所有 `pending` 候选问题，忽略分页、状态筛选和 pass 筛选。插件里的“接受全部待处理/忽略全部待处理”调用该接口，并在执行前弹窗提示会处理本次审校所有待处理建议，而不是当前页。历史 run 的 `pending` 候选不会被默认批量决策改动。
 
 Request:
 
@@ -261,13 +263,13 @@ Request:
 
 ### `POST /api/v2/projects/{project_id}/writeback`
 
-DOCX 项目只写回 `approved` 候选问题；没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后 approved 候选变为 `written`，项目状态变为 `written`，项目摘要带上 `output_filename/download_url`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+DOCX 项目只写回 latest run 中的 `approved` 候选问题；旧 run 的 approved 候选不会被默认写入。没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后本次实际写入的 approved 候选变为 `written`，项目状态变为 `written`，项目摘要带上 `output_filename/download_url`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
 
 Response：`V2WritebackResponse`，包含 `project_id/output_filename/download_url/comment_count/revision_count/fallback_count/failed_count/written_count`。
 
 ### `POST /api/v2/projects/{project_id}/candidates/mark-written`
 
-当前选区项目由 Word 插件完成 Office.js 写回后，调用该接口把已成功写回的候选标记为 `written`，并刷新项目报告。
+当前选区项目由 Word 插件完成 Office.js 写回后，调用该接口把 latest run 中已成功写回的候选标记为 `written`，并刷新项目报告。插件只提交 Office.js summary 中精准批注、精准修订或成功汇总批注对应的 candidate ids；未实际写入、fallback 插入失败或因汇总截断遗漏的候选保留为 `approved`。
 
 Request:
 
@@ -281,7 +283,7 @@ Response 包含 `project_id/updated_count/candidates`。
 
 ### `GET /api/v2/projects/{project_id}/report`
 
-返回审校报告，包含问题总数、各状态数量、severity/category/pass 分布和未处理事项。
+返回 latest run 的审校报告，包含问题总数、各状态数量、severity/category/pass 分布和未处理事项。历史 run 的候选不会进入默认报告。
 
 ### `GET /api/v2/projects/{project_id}/download`
 

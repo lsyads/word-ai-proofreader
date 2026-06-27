@@ -300,6 +300,7 @@ export async function getV2Candidates(
     pageSize?: number;
     status?: string;
     passName?: string;
+    runId?: string | null;
   } = {}
 ): Promise<V2CandidateList> {
   const params = new URLSearchParams({
@@ -311,6 +312,9 @@ export async function getV2Candidates(
   }
   if (options.passName && options.passName !== "all") {
     params.set("pass_name", options.passName);
+  }
+  if (options.runId) {
+    params.set("run_id", options.runId);
   }
   const response = await fetch(
     `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates?${params.toString()}`,

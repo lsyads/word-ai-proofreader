@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.agents import workspace as workspace_agent
 from app.agents import local_rules
 from app.main import app
-from app.schemas import ProofreadIssue, V2CandidateIssue
+from app.schemas import ProofreadIssue, V2CandidateIssue, V2RunCreateRequest
 from app.services.ai_client import AIClientError, AIProofreadResult
 from app.services import project_store
 
@@ -75,6 +75,7 @@ def make_candidate(
     project_id: str,
     index: int,
     *,
+    run_id: str = "v2_run_test",
     status: str = "pending",
     pass_name: str = "proofread_pass",
 ) -> V2CandidateIssue:
@@ -82,7 +83,7 @@ def make_candidate(
     return V2CandidateIssue(
         candidate_id=f"candidate_test_{index:02d}",
         project_id=project_id,
-        run_id="v2_run_test",
+        run_id=run_id,
         status=status,
         category="typo",
         severity="medium",
@@ -205,14 +206,15 @@ def test_v2_candidates_endpoint_paginates_and_filters():
     )
     assert create_response.status_code == 200
     project_id = create_response.json()["project_id"]
+    run = project_store.create_run(project_id, total_chunks=1)
     candidates = [
-        make_candidate(project_id, index, status="pending", pass_name="proofread_pass")
+        make_candidate(project_id, index, run_id=run.run_id, status="pending", pass_name="proofread_pass")
         for index in range(1, 26)
     ]
     candidates.extend(
         [
-            make_candidate(project_id, 26, status="approved", pass_name="custom_pass"),
-            make_candidate(project_id, 27, status="pending", pass_name="custom_pass"),
+            make_candidate(project_id, 26, run_id=run.run_id, status="approved", pass_name="custom_pass"),
+            make_candidate(project_id, 27, run_id=run.run_id, status="pending", pass_name="custom_pass"),
         ]
     )
     project_store.save_candidates(candidates)
@@ -220,6 +222,7 @@ def test_v2_candidates_endpoint_paginates_and_filters():
     first_page = client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10})
     assert first_page.status_code == 200
     payload = first_page.json()
+    assert payload["run_id"] == run.run_id
     assert payload["page"] == 1
     assert payload["page_size"] == 10
     assert payload["total"] == 27
@@ -259,11 +262,12 @@ def test_v2_bulk_decision_updates_all_pending_candidates():
     )
     assert create_response.status_code == 200
     project_id = create_response.json()["project_id"]
+    run = project_store.create_run(project_id, total_chunks=1)
     project_store.save_candidates(
         [
-            make_candidate(project_id, 1, status="pending"),
-            make_candidate(project_id, 2, status="pending"),
-            make_candidate(project_id, 3, status="approved"),
+            make_candidate(project_id, 1, run_id=run.run_id, status="pending"),
+            make_candidate(project_id, 2, run_id=run.run_id, status="pending"),
+            make_candidate(project_id, 3, run_id=run.run_id, status="approved"),
         ]
     )
 
@@ -284,6 +288,197 @@ def test_v2_bulk_decision_updates_all_pending_candidates():
         "candidate_test_02": "rejected",
         "candidate_test_03": "approved",
     }
+
+
+def test_v2_defaults_scope_candidates_summary_and_report_to_latest_run():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 31, run_id=old_run.run_id, status="pending"),
+            make_candidate(project_id, 32, run_id=old_run.run_id, status="approved"),
+        ]
+    )
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 41, run_id=new_run.run_id, status="pending"),
+            make_candidate(project_id, 42, run_id=new_run.run_id, status="approved"),
+            make_candidate(project_id, 43, run_id=new_run.run_id, status="rejected"),
+        ]
+    )
+
+    project_payload = client.get(f"/api/v2/projects/{project_id}").json()
+    assert project_payload["latest_run_id"] == new_run.run_id
+    assert project_payload["candidate_count"] == 3
+    assert project_payload["pending_count"] == 1
+    assert project_payload["approved_count"] == 1
+
+    default_candidates = client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10})
+    assert default_candidates.status_code == 200
+    default_payload = default_candidates.json()
+    assert default_payload["run_id"] == new_run.run_id
+    assert default_payload["total"] == 3
+    assert {item["candidate_id"] for item in default_payload["candidates"]} == {
+        "candidate_test_41",
+        "candidate_test_42",
+        "candidate_test_43",
+    }
+
+    old_candidates = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id, "page_size": 10},
+    )
+    assert old_candidates.status_code == 200
+    old_payload = old_candidates.json()
+    assert old_payload["run_id"] == old_run.run_id
+    assert old_payload["total"] == 2
+    assert {item["candidate_id"] for item in old_payload["candidates"]} == {
+        "candidate_test_31",
+        "candidate_test_32",
+    }
+
+    report = client.get(f"/api/v2/projects/{project_id}/report").json()
+    assert report["issue_count"] == 3
+    assert report["pending_count"] == 1
+    assert report["approved_count"] == 1
+    assert report["rejected_count"] == 1
+
+
+def test_v2_rejects_new_run_when_project_has_active_run():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    project_store.create_run(project_id, total_chunks=1)
+
+    response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+
+    assert response.status_code == 409
+
+
+def test_v2_bulk_decision_only_updates_latest_run_pending_candidates():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 51, run_id=old_run.run_id, status="pending"),
+            make_candidate(project_id, 52, run_id=new_run.run_id, status="pending"),
+            make_candidate(project_id, 53, run_id=new_run.run_id, status="approved"),
+        ]
+    )
+
+    response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/bulk-decisions",
+        json={"status": "rejected"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["updated_count"] == 1
+    old_candidate = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id},
+    ).json()["candidates"][0]
+    latest_statuses = {
+        item["candidate_id"]: item["status"]
+        for item in client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10}).json()[
+            "candidates"
+        ]
+    }
+    assert old_candidate["status"] == "pending"
+    assert latest_statuses == {
+        "candidate_test_52": "rejected",
+        "candidate_test_53": "approved",
+    }
+
+
+def test_v2_docx_writeback_only_marks_latest_run_approved_candidates():
+    source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查明显出版审校问题。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 61, run_id=old_run.run_id, status="approved"),
+            make_candidate(project_id, 62, run_id=new_run.run_id, status="approved"),
+        ]
+    )
+
+    response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "comment"})
+
+    assert response.status_code == 200
+    assert response.json()["written_count"] == 1
+    old_status = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id},
+    ).json()["candidates"][0]["status"]
+    latest_status = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]["status"]
+    assert old_status == "approved"
+    assert latest_status == "written"
+
+
+def test_v2_start_project_run_uses_document_map_chunk_count_without_docx_parse(monkeypatch):
+    source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查明显出版审校问题。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    expected_chunk_count = client.get(f"/api/v2/projects/{project_id}/document-map").json()["chunk_count"]
+
+    def fail_parse_docx(*args, **kwargs):
+        raise AssertionError("start_project_run should not parse DOCX")
+
+    monkeypatch.setattr(workspace_agent.docx_service, "parse_docx", fail_parse_docx)
+
+    run = workspace_agent.workspace_runner.start_project_run(project_id, V2RunCreateRequest())
+
+    assert run.status == "queued"
+    assert run.total_chunks == expected_chunk_count
 
 
 def test_local_non_ai_rules_do_not_emit_default_candidates():

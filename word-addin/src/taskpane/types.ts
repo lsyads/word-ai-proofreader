@@ -255,6 +255,7 @@ export interface V2CandidateIssue {
 
 export interface V2CandidateList {
   project_id: string;
+  run_id: string | null;
   candidates: V2CandidateIssue[];
   page: number;
   page_size: number;
@@ -420,6 +421,10 @@ export interface IssueApplicationSummary {
   fallbackCommentCount: number;
   failedCount: number;
   truncatedFallbackCount: number;
+  writtenIssueIds: string[];
+  fallbackIssueIds: string[];
+  failedIssueIds: string[];
+  truncatedIssueIds: string[];
 }
 
 export interface IssueApplicationProgress {

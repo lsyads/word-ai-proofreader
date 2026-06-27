@@ -98,14 +98,17 @@ class AgentWorkspaceRunner:
         return project_store.project_response(project.project_id)
 
     def start_project_run(self, project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
-        project = project_store.require_project(project_id)
-        prepared = self._prepare_source(project)
-        run = project_store.create_run(project_id, total_chunks=len(prepared.chunks))
+        project = project_store.require_project_summary(project_id)
+        active = project_store.active_run(project_id)
+        if active:
+            raise V2WorkspaceConflict("This project already has a queued or running review run.")
+        document_map = project_store.get_document_map(project_id)
+        run = project_store.create_run(project_id, total_chunks=document_map.chunk_count)
         plan = planner.create_review_plan(
             project_id,
             run.run_id,
             source_type=project.source_type,
-            document_map=prepared.document_map,
+            document_map=document_map,
         )
         project_store.save_review_plan(plan)
         project_store.update_project_status(project_id, "running")
@@ -225,7 +228,7 @@ class AgentWorkspaceRunner:
                 source_filename=refreshed_project.source_filename,
                 book=refreshed_project.book,
                 review_goal=refreshed_project.review_goal,
-                candidates=project_store.list_candidates(project_id),
+                candidates=project_store.list_candidates(project_id, run_id=run_id),
             )
             project_store.save_report(report)
             project_store.add_run_event(project_id, run_id, "report_ready", {"candidate_count": len(candidates)})
@@ -409,7 +412,10 @@ class AgentWorkspaceRunner:
         project = project_store.require_project(project_id)
         if project.source_type == "selection":
             raise V2WorkspaceConflict("Selection project writeback must be completed by the Word add-in.")
-        approved = [candidate for candidate in project_store.list_candidates(project_id) if candidate.status == "approved"]
+        latest = project_store.latest_run(project_id)
+        if not latest:
+            raise V2WorkspaceConflict("No review run is available to write back.")
+        approved = project_store.list_candidates(project_id, run_id=latest.run_id, status="approved")
         if not approved:
             raise V2WorkspaceConflict("No approved candidate issues are available to write back.")
 
@@ -424,7 +430,11 @@ class AgentWorkspaceRunner:
             fallback_summary_truncate_enabled=request.fallback_summary_truncate_enabled,
         )
         project_store.save_project_output(project_id, output_filename=output_filename, output_path=output_path)
-        project_store.mark_candidates_written(project_id, [candidate.candidate_id for candidate in approved])
+        project_store.mark_candidates_written(
+            project_id,
+            [candidate.candidate_id for candidate in approved],
+            run_id=latest.run_id,
+        )
         refreshed_project = project_store.require_project(project_id)
         report = report_service.build_review_report(
             project_id=project_id,
@@ -432,7 +442,7 @@ class AgentWorkspaceRunner:
             source_filename=refreshed_project.source_filename,
             book=refreshed_project.book,
             review_goal=refreshed_project.review_goal,
-            candidates=project_store.list_candidates(project_id),
+            candidates=project_store.list_candidates(project_id, run_id=latest.run_id),
         )
         project_store.save_report(report)
         return V2WritebackResponse(

@@ -467,7 +467,7 @@ def _build_system_prompt(proofread_mode: ProofreadMode, v2_context: V2PromptCont
 {BASE_SYSTEM_PROMPT}
 {MODE_PROMPTS[proofread_mode]}
 
-V2.1 Agent 工作台要求：
+V2.2 Agent 工作台要求：
 1. 你当前处在 {v2_context.pass_name} 阶段，必须优先完成该阶段职责，不要泛泛审校。
 2. 审校目标是硬约束，不是备注；候选问题必须服务审校目标。
 3. 结合项目记忆、出版体例规则和文档地图摘要判断问题，但 original 仍必须逐字来自 <text>。

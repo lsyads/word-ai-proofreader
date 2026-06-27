@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STYLE_RULES = [
     "标点应符合中文出版物体例，避免连续标点、英文逗号混用和半角符号误用。",
-    "数字、单位、年代和序号应前后一致；无法确认时标为需人工核查。",
-    "术语、人名、地名、机构名在同一项目内应保持一致。",
+    "数字、单位、年代和序号应前后一致；仅在文本内证据充分时提出候选。",
+    "术语、人名、地名、机构名在同一项目内应保持一致；证据不足时不生成低置信候选。",
 ]
 
 
@@ -119,7 +119,7 @@ class AgentWorkspaceRunner:
                 "step_count": len(plan.steps),
                 "enabled_steps": [step.step_id for step in plan.steps if step.enabled],
                 "review_goal_bound": True,
-                "message": "V2.1 审校计划已生成，审校目标已进入 Agent 上下文。",
+                "message": "V2.2 审校计划已生成，审校目标已进入 Agent 上下文。",
             },
         )
         project_store.update_run(project_id, run.run_id, status="queued", stage="queued")
@@ -129,7 +129,7 @@ class AgentWorkspaceRunner:
         try:
             await self._execute_project_run(project_id, run_id, request)
         except Exception:
-            logger.exception("V2.1 project run failed project_id=%s run_id=%s", project_id, run_id)
+            logger.exception("V2.2 project run failed project_id=%s run_id=%s", project_id, run_id)
             raise
 
     async def run_project(self, project_id: str, request: V2RunCreateRequest) -> V2RunResponse:
@@ -305,7 +305,7 @@ class AgentWorkspaceRunner:
                     "error",
                     {"tool_name": "proofread_document_chunk", "chunk_index": chunk.index, "message": str(exc)},
                 )
-                logger.exception("V2.1 chunk failed project_id=%s run_id=%s chunk_index=%s", project.project_id, run_id, chunk.index)
+                logger.exception("V2.2 chunk failed project_id=%s run_id=%s chunk_index=%s", project.project_id, run_id, chunk.index)
                 continue
 
             completed_chunks += 1
@@ -557,7 +557,7 @@ def _candidate_from_issue(
         global_start=issue.global_start,
         global_end=issue.global_end,
         locator=issue.locator,
-        self_check="已由 V2.1 evaluator 绑定位置、证据和审校目标，等待编辑确认。",
+        self_check="已由 V2.2 evaluator 绑定位置、证据和审校目标，等待编辑确认。",
         pass_name=pass_name,
         confidence=confidence,
         evidence_kind=evidence_kind or ("locator" if issue.locator else "context"),
@@ -579,6 +579,7 @@ def _candidate_from_local_rule(
         category=match.category,
         severity=match.severity,
         original=match.original,
+        replacement=match.replacement,
         suggestion=match.suggestion,
         start=match.start,
         rule_id=match.rule_id,
@@ -601,6 +602,7 @@ def _rule_issue(
     category: str,
     severity: str,
     original: str,
+    replacement: str | None,
     suggestion: str,
     start: int,
     rule_id: str,
@@ -610,7 +612,7 @@ def _rule_issue(
         category=category,
         severity=severity,
         original=original,
-        replacement=None,
+        replacement=replacement,
         suggestion=suggestion,
         start=start,
         end=start + len(original),
@@ -638,7 +640,7 @@ def _evaluate_candidate(candidate: V2CandidateIssue) -> V2CandidateIssue:
             "confidence": round(confidence, 2),
             "needs_human_review": needs_human_review,
             "evaluation_note": note,
-            "self_check": f"V2.1 复核：{note}",
+            "self_check": f"V2.2 复核：{note}",
             "updated_at": project_store._now_iso(),
         }
     )

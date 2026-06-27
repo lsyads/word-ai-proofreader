@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -8,6 +9,8 @@ from typing import Literal
 PassName = Literal["terminology_pass", "style_rule_pass", "consistency_pass"]
 Severity = Literal["low", "medium", "high"]
 EvidenceKind = Literal["rule", "document_map"]
+ReplacementBuilder = Callable[[re.Match[str]], str]
+HIGH_CONFIDENCE_LOCAL_RULE_MIN = 0.85
 
 
 @dataclass(frozen=True)
@@ -17,6 +20,7 @@ class LocalRuleMatch:
     category: str
     severity: Severity
     original: str
+    replacement: str | None
     suggestion: str
     start: int
     end: int
@@ -33,14 +37,9 @@ class RegexLocalRule:
     pattern: re.Pattern[str]
     suggestion: str
     confidence: float
+    replacement_builder: ReplacementBuilder
     evidence_kind: EvidenceKind = "rule"
 
-
-TERMINOLOGY_VARIANT_PAIRS = [
-    ("AI", "人工智能"),
-    ("责任编辑", "责编"),
-    ("DOCX", "docx"),
-]
 
 STYLE_RULES = [
     RegexLocalRule(
@@ -48,9 +47,10 @@ STYLE_RULES = [
         pass_name="style_rule_pass",
         category="style",
         severity="low",
-        pattern=re.compile(r"[。！？!?]{2,}"),
-        suggestion="连续标点可能不符合出版体例，请核对。",
-        confidence=0.74,
+        pattern=re.compile(r"([。！？!?])\1+"),
+        suggestion="连续同类句末标点可规范为单个标点。",
+        confidence=0.9,
+        replacement_builder=lambda match: match.group(1),
     ),
     RegexLocalRule(
         rule_id="style_ascii_comma",
@@ -58,8 +58,9 @@ STYLE_RULES = [
         category="style",
         severity="low",
         pattern=re.compile(r"[\u4e00-\u9fff],[\u4e00-\u9fff]"),
-        suggestion="中文语境中出现英文逗号，请确认是否应改为中文逗号。",
-        confidence=0.74,
+        suggestion="中文语境中出现英文逗号，建议改为中文逗号。",
+        confidence=0.92,
+        replacement_builder=lambda match: match.group(0).replace(",", "，"),
     ),
     RegexLocalRule(
         rule_id="style_halfwidth_parenthesis",
@@ -67,41 +68,28 @@ STYLE_RULES = [
         category="style",
         severity="low",
         pattern=re.compile(r"[\u4e00-\u9fff]\([^)]+\)"),
-        suggestion="中文正文中的半角括号可能不符合体例，请核对。",
-        confidence=0.74,
+        suggestion="中文正文中的半角括号建议改为全角括号。",
+        confidence=0.9,
+        replacement_builder=lambda match: match.group(0).replace("(", "（").replace(")", "）"),
     ),
 ]
 
 
 def run_terminology_rules(source_text: str) -> list[LocalRuleMatch]:
-    """Find configured terminology variants when both forms appear in the same project text."""
-    matches: list[LocalRuleMatch] = []
-    for left, right in TERMINOLOGY_VARIANT_PAIRS:
-        if left not in source_text or right not in source_text:
-            continue
-        for start in _find_all(source_text, right):
-            matches.append(
-                LocalRuleMatch(
-                    rule_id="terminology_variant_pair",
-                    pass_name="terminology_pass",
-                    category="consistency",
-                    severity="medium",
-                    original=right,
-                    suggestion=f"发现“{left}”与“{right}”并用，请确认本书术语或称谓是否统一。",
-                    start=start,
-                    end=start + len(right),
-                    confidence=0.68,
-                    evidence_kind="rule",
-                )
-            )
-    return matches
+    """Keep the terminology pass callable, but do not emit low-confidence local candidates by default."""
+    return []
 
 
 def run_style_rules(source_text: str) -> list[LocalRuleMatch]:
     """Find all non-overlapping local style-rule matches in project text."""
     matches: list[LocalRuleMatch] = []
     for rule in STYLE_RULES:
+        if rule.confidence < HIGH_CONFIDENCE_LOCAL_RULE_MIN:
+            continue
         for match in rule.pattern.finditer(source_text):
+            replacement = rule.replacement_builder(match)
+            if replacement == match.group(0):
+                continue
             matches.append(
                 LocalRuleMatch(
                     rule_id=rule.rule_id,
@@ -109,6 +97,7 @@ def run_style_rules(source_text: str) -> list[LocalRuleMatch]:
                     category=rule.category,
                     severity=rule.severity,
                     original=match.group(0),
+                    replacement=replacement,
                     suggestion=rule.suggestion,
                     start=match.start(),
                     end=match.end(),
@@ -120,41 +109,5 @@ def run_style_rules(source_text: str) -> list[LocalRuleMatch]:
 
 
 def run_consistency_rules(source_text: str, *, source_type: str) -> list[LocalRuleMatch]:
-    """Find coarse cross-document numeric consistency risks for DOCX projects."""
-    if source_type != "docx":
-        return []
-
-    numeric_tokens = re.findall(r"\d+(?:\.\d+)?(?:年|月|日|%|％|页|章|节)?", source_text)
-    if len(numeric_tokens) < 3:
-        return []
-
-    repeated_numbers = sorted({token for token in numeric_tokens if numeric_tokens.count(token) > 1})
-    matches: list[LocalRuleMatch] = []
-    for token in repeated_numbers:
-        start = source_text.find(token)
-        matches.append(
-            LocalRuleMatch(
-                rule_id="cross_chapter_numeric_consistency",
-                pass_name="consistency_pass",
-                category="consistency",
-                severity="medium",
-                original=token,
-                suggestion="全书出现多个数字/时间表达，请结合上下文核对统计口径、单位和前后一致性。",
-                start=start,
-                end=start + len(token),
-                confidence=0.62,
-                evidence_kind="document_map",
-            )
-        )
-    return matches
-
-
-def _find_all(source_text: str, needle: str) -> list[int]:
-    starts: list[int] = []
-    cursor = 0
-    while True:
-        start = source_text.find(needle, cursor)
-        if start < 0:
-            return starts
-        starts.append(start)
-        cursor = start + len(needle)
+    """Keep the consistency pass callable, but do not emit coarse repeated-number candidates by default."""
+    return []

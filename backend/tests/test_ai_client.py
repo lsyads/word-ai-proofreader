@@ -206,7 +206,7 @@ def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
     asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
 
     payload_input = FakeAsyncClient.calls[0]["json"]["input"]
-    assert "V2.1 Agent 工作台要求" in payload_input
+    assert "V2.2 Agent 工作台要求" in payload_input
     assert "重点检查术语一致性。" in payload_input
     assert "terminology_pass" in payload_input
     assert "text_len=100; blocks=2; chunks=1" in payload_input

@@ -1,6 +1,6 @@
 # Word AI 审校助手 API 契约与验收标准
 
-本文是当前 V1 基线和已实现 V2.1 Agent 工作台的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
+本文是当前 V2.2 Agent 工作台和兼容 V1 底层审校能力的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
 V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为一个开始审校按钮和候选问题工作区。
 
@@ -10,11 +10,11 @@ V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/ru
 
 包含：
 
-- 当前选区审校和全书 `.docx` 文件审校。
+- V2 当前选区审校项目和全书 `.docx` 审校项目。
+- V2 文档地图、审校计划、后台 Agent run、候选问题队列、项目记忆、审校报告和脱敏 run event trace。
+- 编辑确认队列：批准、拒绝、暂缓、当前选区已批准候选写回标记、DOCX 已批准候选后端写回和结果下载。
 - Responses API、Chat Completions API 和未配置 Key 时的 mock fallback。
-- 结构化 `issues[]`、后端原文定位、`locator`、分块全局位置和 DOCX 后端写回。
-- 审校进度 SSE、分块任务 SSE、轮询兜底、停止和重试分块。
-- 本地历史记录清空、导出、导入和可回写的新 schema 历史。
+- 兼容 V1 的结构化 `issues[]`、后端原文定位、`locator`、分块全局位置、分块任务和 DOCX 后端写回能力，作为 V2 复用的底层服务与直接 API 入口。
 
 不包含：
 
@@ -35,13 +35,16 @@ V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/ru
 
 ```text
 Word 当前选区或 DOCX 文件
-  -> word-addin 读取选区文本，或上传全书 .docx
-  -> 小选区: Responses POST /api/proofread/stream；Chat POST /api/proofread
-  -> 长选区: POST /api/proofread/tasks + SSE/轮询
-  -> 全书 DOCX: POST /api/proofread/docx/tasks + SSE/轮询
-  -> backend 调用 OpenAI 兼容 provider 或 mock
-  -> 当前选区: backend 计算 start/end/locator，word-addin 展示并按用户勾选写回
-  -> 全书 DOCX: backend 按 OOXML 位置映射写入批注或修订+批注，保存新 .docx，word-addin 展示下载入口
+  -> word-addin 创建 V2 selection 或 docx project
+  -> GET /api/v2/projects/{project_id}/document-map
+  -> GET /api/v2/projects/{project_id}/plan
+  -> POST /api/v2/projects/{project_id}/runs
+  -> backend 分块调用 AI、本地高置信规则、归并和 evaluator
+  -> GET /api/v2/projects/{project_id}/candidates
+  -> editor 批准、拒绝或暂缓候选
+  -> 当前选区: Office.js 写回已批准候选后 mark-written
+  -> DOCX: POST /api/v2/projects/{project_id}/writeback 后下载结果 DOCX
+  -> 兼容底层入口: /api/proofread、/api/proofread/tasks、/api/proofread/docx/tasks
 ```
 
 ## 通用模型
@@ -159,7 +162,7 @@ Response 同 `V2ProjectResponse`，其中 `source_type` 为 `selection`，`sourc
 
 ### `GET /api/v2/projects`
 
-返回最近 V2.1 项目列表，用于插件重新打开后恢复工作台。Query `limit` 默认 20，返回 `{"projects": [V2ProjectResponse]}`。
+返回最近 V2.2 项目列表，用于插件重新打开后恢复工作台。Query `limit` 默认 20，返回 `{"projects": [V2ProjectResponse]}`。
 
 ### `GET /api/v2/projects/{project_id}`
 
@@ -184,15 +187,15 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/plan`
 
-返回 V2.1 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。
+返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语一致性和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成术语并用和重复数字这类低置信本地候选。
 
 ### 本地 pass 规则
 
-V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入完整正文记忆。默认规则包括：`terminology_variant_pair` 检查 `AI/人工智能`、`责任编辑/责编`、`DOCX/docx` 并用；`style_consecutive_punctuation` 检查连续标点；`style_ascii_comma` 检查中文语境英文逗号；`style_halfwidth_parenthesis` 检查中文正文半角括号；`cross_chapter_numeric_consistency` 仅在 DOCX 项目中提示重复数字/时间表达的一致性风险。规则候选必须携带 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end`，同一规则的多处非重叠命中都应生成候选，再由归并阶段去重。
+V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入完整正文记忆。默认只保留高置信机械体例规则：`style_consecutive_punctuation` 将连续同类句末标点规范为单个标点，且不处理 `？！` 等混合标点；`style_ascii_comma` 将中文语境英文逗号改为中文逗号；`style_halfwidth_parenthesis` 将中文正文半角括号改为全角括号。默认规则候选必须携带 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，置信度不低于本地高置信门槛，并由归并阶段去重。`terminology_variant_pair` 和 `cross_chapter_numeric_consistency` 的 pass 入口保留，但默认不再产出低置信人工核查候选。
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
-启动一次 V2.1 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
+启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -208,7 +211,7 @@ V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入�
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.1 候选增加 `pass_name/confidence/evidence_kind/rule_id/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型和 evaluator 复核意见。
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型、可直接替换文本和 evaluator 复核意见。`needs_human_review=false` 表示 evaluator 未标记为人工重点判断；候选仍必须由编辑批准后才能写回。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
@@ -650,7 +653,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。Xiaomi MiMo 示例：`{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
 - `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
-- `temperature` 是请求级参数，插件默认 `0.2`，不需要环境变量。
+- `temperature` 是请求级参数，不需要环境变量；兼容底层 API schema 默认 `0.2`，当前 V2.2 插件工作台默认 `0.6`。
 - `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
 - `AGENT_WORKSPACE_DIR` 保存 V2 project/session/run/history schema 的 SQLite 文件和 V2 输出文件，默认 `backend/var/agent-workspace`。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
@@ -662,12 +665,15 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 未配置 `AI_API_KEY` 时返回 mock `issues[]`。
 - 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
 - `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
-- 普通审校、流式审校、分块任务和 DOCX 全书任务都接受 `temperature`；越界返回 422，合法值会传给 AI provider。
+- V2 selection 和 DOCX 项目可以创建文档地图、审校计划和 Agent run；run 完成后候选进入编辑确认队列，候选数为 0 时项目 run 状态为 `succeeded`。
+- 普通审校、流式审校、分块任务、DOCX 全书任务和 V2 Agent run 都接受 `temperature`；越界返回 422，合法值会传给 AI provider；V2.2 插件默认提交 `0.6`。
 - 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；新生成的 DOCX 持久化结果在服务重启后仍返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
 - 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异 issue 被过滤。
+- 默认本地规则只产出英文逗号、半角括号、连续同类句末标点三类高置信机械体例候选；候选包含 `replacement`，`evidence_kind="rule"`，且 `needs_human_review=false`。
+- `terminology_variant_pair` 和 `cross_chapter_numeric_consistency` 阶段入口保留，但默认不因术语并用或重复数字产出低置信人工核查候选。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区 `> 7000` 字时创建分块任务；全书正文上传 `.docx` 创建 DOCX 文件任务；默认 `chunk_size=5000`。
 - 分块任务返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标。
@@ -677,10 +683,10 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`。
 - 点击停止审校会中断前端请求并取消后端异步任务；分块审校保留已收到 issues 供查看和应用。
 - Word 中书名为空或空选区时显示错误，不调用审校接口。
-- 后端返回非空 `issues[]` 时，插件只展示结果；点击“应用 N 条到 Word”后才写回已选问题。
-- 全书 `.docx` 完成后插件显示后端保存的新文件名、保留期限和“下载审校后 Word”按钮。
+- 后端返回非空候选或兼容 `issues[]` 时，插件只展示结果；编辑批准候选并点击“写回已批准”后才写回 Word。
+- 全书 `.docx` 写回完成后插件显示后端保存的新文件名、保留期限和“下载结果 DOCX”按钮。
 - 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 批注模式不改正文；修订+批注模式生成可接受/拒绝的 Word 修订，并把原因批注锚定到插入后的 `replacement` 文本，完成后恢复原修订设置。
 - 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订+批注。
 - `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
-- 插件本地保存最近 20 条新 schema 历史，支持清空、导出 JSON、导入 JSON；DOCX 历史保存输出文件名、下载入口和过期时间，不保存原文件或全文。当前选区新历史可再次筛选、勾选、定位和应用，旧历史缺少 locator occurrence 时只读。
+- 插件工作台可恢复最近 V2 项目；本地工作区保存项目、run、候选、报告和结果索引，不把完整正文或原始 DOCX 写入长期记忆。兼容历史功能保留清空、导出 JSON、导入 JSON 能力。

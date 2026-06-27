@@ -216,6 +216,8 @@ def test_write_docx_result_inserts_comment(tmp_path: Path):
         document_xml = archive.read("word/document.xml").decode()
         comments_xml = archive.read("word/comments.xml").decode()
     assert "commentRangeStart" in document_xml
+    assert 'w:author="Word Proofreader"' in comments_xml
+    assert "Word AI Proofreader" not in comments_xml
     assert "修正错字" in comments_xml
 
 
@@ -331,7 +333,13 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     )
     output = tmp_path / "out.docx"
 
-    summary = docx_service.write_docx_result(source, [chunked_issue], "revision", output)
+    summary = docx_service.write_docx_result(
+        source,
+        [chunked_issue],
+        "revision",
+        output,
+        author="责任编辑",
+    )
 
     assert summary.comment_count == 1
     assert summary.revision_count == 1
@@ -341,6 +349,10 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     assert "commentRangeStart" in document_xml
     assert "<w:del" in document_xml
     assert "<w:ins" in document_xml
+    assert 'w:author="责任编辑"' in comments_xml
+    assert 'w:author="责任编辑"' in document_xml
+    assert "Word AI Proofreader" not in comments_xml
+    assert "Word AI Proofreader" not in document_xml
     assert "正字" in document_xml
     assert "修正错字" in comments_xml
     assert document_xml.index("<w:del") < document_xml.index("commentRangeStart")
@@ -651,7 +663,7 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Pa
         assert "word/document.xml" in archive.namelist()
 
 
-def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Path):
+def test_docx_task_api_passes_summary_truncate_setting_and_author(monkeypatch, tmp_path: Path):
     async def fake_proofread_text(
         text,
         book,
@@ -663,7 +675,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
     ):
         return []
 
-    captured: dict[str, bool] = {}
+    captured: dict[str, object] = {}
     original_write_docx_result = docx_service.write_docx_result
 
     def spy_write_docx_result(
@@ -672,14 +684,17 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
         application_mode,
         output_path,
         fallback_summary_truncate_enabled=True,
+        author=docx_service.DEFAULT_WRITEBACK_AUTHOR,
     ):
         captured["fallback_summary_truncate_enabled"] = fallback_summary_truncate_enabled
+        captured["author"] = author
         return original_write_docx_result(
             source_bytes,
             issues,
             application_mode,
             output_path,
             fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+            author=author,
         )
 
     monkeypatch.setattr(docx_task_service, "proofread_text", fake_proofread_text)
@@ -692,6 +707,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
             "book": json.dumps(BOOK, ensure_ascii=False),
             "application_mode": "comment",
             "fallback_summary_truncate_enabled": "false",
+            "author": "责任编辑",
         },
         content=make_docx(["第一章 开始", "没有问题。"]),
         headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
@@ -701,7 +717,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
     task_id = response.json()["task_id"]
     with client.stream("GET", f"/api/proofread/docx/tasks/{task_id}/events") as stream:
         assert "completed" in stream.read().decode()
-    assert captured == {"fallback_summary_truncate_enabled": False}
+    assert captured == {"fallback_summary_truncate_enabled": False, "author": "责任编辑"}
 
 
 def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Path):

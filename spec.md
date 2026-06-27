@@ -269,7 +269,7 @@ Request:
 
 ### `POST /api/v2/projects/{project_id}/writeback`
 
-DOCX 项目每次从原始 DOCX 重新生成结果文件，包含 latest run 中所有 `written + approved` 候选问题；旧 run 的 approved 候选不会被默认写入。没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后本次新写入的 approved 候选变为 `written`，原 `written` 状态保持不变，项目状态变为 `written`，项目摘要带上 `output_filename/download_url` 并清除 `output_stale=false`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+DOCX 项目每次从原始 DOCX 重新生成结果文件，包含 latest run 中所有 `written + approved` 候选问题；旧 run 的 approved 候选不会被默认写入。没有 approved 问题时返回 409。请求体包含 `application_mode`、`fallback_summary_truncate_enabled` 和可选 `author`。`author` 默认 `Word Proofreader`，用于后端生成 DOCX 时写入批注和修订的 OOXML author，空值按默认值处理。写回后本次新写入的 approved 候选变为 `written`，原 `written` 状态保持不变，项目状态变为 `written`，项目摘要带上 `output_filename/download_url` 并清除 `output_stale=false`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
 
 Response：`V2WritebackResponse`，包含 `project_id/output_filename/download_url/comment_count/revision_count/fallback_count/failed_count/written_count/included_count`。`written_count` 表示本次新转为 `written` 的候选数；`included_count` 表示本次生成文件实际包含的候选总数。
 
@@ -515,7 +515,7 @@ error
 创建全书 DOCX 文件审校任务。请求体是原始 `.docx` 二进制；元数据走 query 参数，避免 Word WebView 对 multipart 的兼容差异。
 
 ```http
-POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&provider_api=responses&proofread_mode=fast&reasoning_enabled=false&temperature=0.2&application_mode=comment&fallback_summary_truncate_enabled=true
+POST /api/proofread/docx/tasks?filename=书稿.docx&book={...}&provider_api=responses&proofread_mode=fast&reasoning_enabled=false&temperature=0.2&application_mode=comment&fallback_summary_truncate_enabled=true&author=Word%20Proofreader
 Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
 ```
 
@@ -526,6 +526,7 @@ Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 - `provider_api`、`proofread_mode`、`reasoning_enabled`、`temperature` 与普通审校一致。
 - `application_mode` 支持 `comment`、`revision`；`comment` 生成批注版 Word，`revision` 生成修订+批注版 Word。
 - `fallback_summary_truncate_enabled` 可选，默认 `true`；为 `false` 时未定位汇总批注不限制总条数，长内容按 1500 字预算拆成多条。
+- `author` 可选，默认 `Word Proofreader`；用于后端生成 DOCX 时写入批注和修订的 OOXML author，空值按默认值处理。
 
 Response:
 
@@ -636,7 +637,7 @@ Response:
 - 已勾选 + 无 locator 或定位失败：拆成短汇总批注，默认最多写入 10 条，每条 1500 字以内；关闭默认截断后不限制总条数，单条超 1500 字继续拆分。
 - 未勾选问题不写回。
 - 已成功提交的批注或修订不回滚；某批失败时换 fresh `Word.run` 重试或降级汇总。
-- 全书 DOCX：后端按 `application_mode` 直接生成新 Word 文件，插件不做逐条勾选和 Office.js 写回。
+- 全书 DOCX：后端按 `application_mode` 直接生成新 Word 文件，插件不做逐条勾选和 Office.js 写回；批注和修订的 author 默认 `Word Proofreader`，可由前端写回设置覆盖。
 
 ## 环境变量
 

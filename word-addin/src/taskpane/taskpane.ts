@@ -69,6 +69,7 @@ type BusyAction =
   | "downloading_docx";
 
 const DEFAULT_V2_TEMPERATURE = 0.6;
+const DEFAULT_WRITEBACK_AUTHOR = "Word Proofreader";
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
 const RUN_POLL_INTERVAL_MS = 2000;
 const RUN_POLL_TIMEOUT_MS = 60 * 60 * 1000;
@@ -180,6 +181,7 @@ function initializeDefaults() {
   getSelect("proofread-mode").value = "thinking";
   getInput("temperature").value = String(DEFAULT_V2_TEMPERATURE);
   getSelect("application-mode").value = "revision";
+  getInput("writeback-author").value = DEFAULT_WRITEBACK_AUTHOR;
   getInput("fallback-summary-truncate-enabled").checked = false;
   handleSourceTypeChange();
 }
@@ -826,6 +828,7 @@ async function writebackDocx(signal: AbortSignal): Promise<V2WritebackResponse> 
     currentProject.project_id,
     getApplicationMode(),
     getInput("fallback-summary-truncate-enabled").checked,
+    getWritebackAuthor(),
     signal
   );
 }
@@ -1407,6 +1410,10 @@ function getApplicationMode(): ApplicationMode {
   return getSelect("application-mode").value as ApplicationMode;
 }
 
+function getWritebackAuthor(): string {
+  return getInput("writeback-author").value.trim() || DEFAULT_WRITEBACK_AUTHOR;
+}
+
 function getSourceType(): SourceType {
   return getSelect("source-type").value as SourceType;
 }
@@ -1416,7 +1423,9 @@ function getDocxFile(): File | null {
 }
 
 function handleSourceTypeChange() {
-  getElement("docx-source-panel").hidden = getSourceType() !== "docx";
+  const isDocx = getSourceType() === "docx";
+  getElement("docx-source-panel").hidden = !isDocx;
+  getElement("writeback-author-field").hidden = !isDocx;
   if (currentProject) {
     resetProjectState();
     renderWorkspace();

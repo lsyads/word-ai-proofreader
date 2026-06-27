@@ -45,6 +45,7 @@ class DocxProofreadRequestData:
     temperature: float = DEFAULT_TEMPERATURE
     application_mode: docx_service.ApplicationMode = "comment"
     fallback_summary_truncate_enabled: bool = True
+    author: str = docx_service.DEFAULT_WRITEBACK_AUTHOR
 
 
 @dataclass
@@ -495,6 +496,7 @@ def _save_output_file(task: DocxProofreadTask) -> None:
         output_path,
         issue_count=task.issue_count,
         fallback_summary_truncate_enabled=task.request.fallback_summary_truncate_enabled,
+        author=task.request.author,
     )
     task.output_filename = output_filename
     task.output_path = output_path

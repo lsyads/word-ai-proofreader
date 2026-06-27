@@ -698,6 +698,7 @@ class AgentWorkspaceRunner:
             request.application_mode,
             output_path,
             fallback_summary_truncate_enabled=request.fallback_summary_truncate_enabled,
+            author=request.author,
         )
         project_store.save_project_output(project_id, output_filename=output_filename, output_path=output_path)
         project_store.mark_candidates_written(

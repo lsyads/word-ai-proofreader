@@ -423,6 +423,7 @@ class V2MarkWrittenResponse(BaseModel):
 class V2WritebackRequest(BaseModel):
     application_mode: ApplicationMode = "comment"
     fallback_summary_truncate_enabled: bool = True
+    author: str = Field(default="Word Proofreader", max_length=80)
 
 
 class V2WritebackResponse(BaseModel):

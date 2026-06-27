@@ -725,6 +725,7 @@ async def create_docx_proofread_task(
     temperature: float = Query(default=0.2, ge=0, le=1.5),
     application_mode: ApplicationMode = Query(default="comment"),
     fallback_summary_truncate_enabled: bool = Query(default=True),
+    author: str = Query(default=docx_service.DEFAULT_WRITEBACK_AUTHOR, max_length=80),
 ) -> DocxProofreadResult:
     if Path(filename).suffix.lower() == ".doc":
         raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
@@ -741,7 +742,7 @@ async def create_docx_proofread_task(
         raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
 
     logger.info(
-        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s application_mode=%s fallback_summary_truncate_enabled=%s",
+        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s application_mode=%s fallback_summary_truncate_enabled=%s author_len=%s",
         filename,
         len(content),
         _mask_session_id(session_id),
@@ -752,6 +753,7 @@ async def create_docx_proofread_task(
         temperature,
         application_mode,
         fallback_summary_truncate_enabled,
+        len(author.strip()),
     )
 
     try:
@@ -769,6 +771,7 @@ async def create_docx_proofread_task(
                 temperature=temperature,
                 application_mode=application_mode,
                 fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+                author=author,
             )
         )
     except docx_service.DocxError as exc:

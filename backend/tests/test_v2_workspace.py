@@ -784,11 +784,23 @@ def test_v2_retry_failed_chunks_merges_candidates_and_marks_written_output_stale
         json={"decisions": [{"candidate_id": first_candidate["candidate_id"], "status": "approved"}]},
     )
     assert approve_response.status_code == 200
-    writeback_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "revision"})
+    writeback_response = client.post(
+        f"/api/v2/projects/{project_id}/writeback",
+        json={"application_mode": "revision", "author": "出版社责任编辑"},
+    )
     assert writeback_response.status_code == 200
     assert writeback_response.json()["written_count"] == 1
     assert writeback_response.json()["included_count"] == 1
     assert client.get(f"/api/v2/projects/{project_id}").json()["output_stale"] is False
+    download = client.get(f"/api/v2/projects/{project_id}/download")
+    assert download.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert 'w:author="出版社责任编辑"' in comments_xml
+    assert 'w:author="出版社责任编辑"' in document_xml
+    assert "Word AI Proofreader" not in comments_xml
+    assert "Word AI Proofreader" not in document_xml
 
     retry_response = client.post(f"/api/v2/projects/{project_id}/runs/{run_id}/retry-failed", json={})
     assert retry_response.status_code == 200

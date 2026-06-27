@@ -444,6 +444,7 @@ export async function writebackV2Project(
   projectId: string,
   applicationMode: ApplicationMode,
   fallbackSummaryTruncateEnabled: boolean,
+  author: string,
   signal: AbortSignal
 ): Promise<V2WritebackResponse> {
   const response = await fetch(
@@ -457,6 +458,7 @@ export async function writebackV2Project(
       body: JSON.stringify({
         application_mode: applicationMode,
         fallback_summary_truncate_enabled: fallbackSummaryTruncateEnabled,
+        author,
       }),
     }
   );

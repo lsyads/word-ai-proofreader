@@ -15,6 +15,7 @@ from app.schemas import ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue
 from app.services import chunking
 
 ApplicationMode = Literal["comment", "revision"]
+DEFAULT_WRITEBACK_AUTHOR = "Word Proofreader"
 
 WORD_DOCUMENT_PATH = "word/document.xml"
 WORD_RELS_PATH = "word/_rels/document.xml.rels"
@@ -142,11 +143,12 @@ def write_docx_result(
     application_mode: ApplicationMode,
     output_path: Path,
     fallback_summary_truncate_enabled: bool = True,
+    author: str = DEFAULT_WRITEBACK_AUTHOR,
 ) -> WritebackSummary:
     document = parse_docx(source_bytes)
     source_text = document.text
     source_chunks = {chunk.index: chunk for chunk in split_docx_into_chunks(document)}
-    package = _DocxPackage(document.entries, document.document_root)
+    package = _DocxPackage(document.entries, document.document_root, _normalize_writeback_author(author))
     summary = WritebackSummary()
     fallback_issues: list[ChunkedProofreadIssue] = []
 
@@ -1028,10 +1030,16 @@ def _restore_root_namespace_declarations(xml_bytes: bytes, namespaces: list[tupl
     return f"{xml[:root_end]}{''.join(declarations)}{xml[root_end:]}".encode("utf-8")
 
 
+def _normalize_writeback_author(author: str | None) -> str:
+    normalized = (author or "").strip()
+    return normalized or DEFAULT_WRITEBACK_AUTHOR
+
+
 class _DocxPackage:
-    def __init__(self, entries: dict[str, bytes], document_root: ET.Element) -> None:
+    def __init__(self, entries: dict[str, bytes], document_root: ET.Element, author: str) -> None:
         self.entries = dict(entries)
         self.document_root = document_root
+        self.author = author
         self.document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
         _register_namespaces(self.document_namespaces)
         self.comments_root = self._ensure_comments_root()
@@ -1049,7 +1057,7 @@ class _DocxPackage:
             _w("comment"),
             {
                 _w("id"): str(comment_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )
@@ -1072,7 +1080,7 @@ class _DocxPackage:
             _w("del"),
             {
                 _w("id"): str(revision_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )
@@ -1086,7 +1094,7 @@ class _DocxPackage:
             _w("ins"),
             {
                 _w("id"): str(revision_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )

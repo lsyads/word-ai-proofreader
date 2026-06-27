@@ -52,13 +52,11 @@ export async function getAIProfiles(): Promise<AIProfile[]> {
 export async function createV2Project(
   file: File,
   book: BookInfo,
-  reviewGoal: string,
   signal: AbortSignal
 ): Promise<V2Project> {
   const params = new URLSearchParams({
     filename: file.name,
     book: JSON.stringify(book),
-    review_goal: reviewGoal,
   });
   const response = await fetch(`${API_BASE_URL}/api/v2/projects?${params.toString()}`, {
     method: "POST",
@@ -79,7 +77,6 @@ export async function createV2Project(
 export async function createV2SelectionProject(
   text: string,
   book: BookInfo,
-  reviewGoal: string,
   sessionId: string | null,
   signal: AbortSignal
 ): Promise<V2Project> {
@@ -92,7 +89,6 @@ export async function createV2SelectionProject(
     body: JSON.stringify({
       text,
       book,
-      review_goal: reviewGoal,
       session_id: sessionId,
     }),
   });

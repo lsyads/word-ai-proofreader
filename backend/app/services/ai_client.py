@@ -43,16 +43,6 @@ class AIStreamEvent:
     data: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class V2PromptContext:
-    review_goal: str
-    source_type: str
-    pass_name: str
-    document_map_summary: str
-    memory_items: list[dict[str, Any]]
-    style_rules: list[str]
-
-
 BASE_SYSTEM_PROMPT = """
 你是出版社责任编辑的中文审校助手。审校 <text> 中的待审文本片段，并返回紧凑 JSON。
 
@@ -60,14 +50,15 @@ BASE_SYSTEM_PROMPT = """
 {"issues":[{"id":"issue-1","category":"typo","severity":"low","original":"原文片段","replacement":"可直接替换文本或 null","suggestion":"给责任编辑看的建议"}]}
 
 硬性规则：
-1. 只判断 <text> 内文本；<book>、<v2_agent_context> 和标签本身只作背景。
+1. 只判断 <text> 内文本；<book> 和标签本身只作背景。
 2. original 必须是 <text> 内连续原文，不能改写、概括、补全或跨不连续位置。
-3. 只输出明确、可定位、服务审校目标的问题；没有问题返回 {"issues":[]}。
-4. replacement 仅在可直接替换 original 时填写；需核查、可能误改、较大重写、事实/逻辑/体例疑问时填 null，并在 suggestion 说明需人工核查。
+3. 只输出能在 <text> 中连续定位 original，且 suggestion 能说明具体问题的候选；没有问题返回 {"issues":[]}。
+4. replacement 仅在 original 可被一个确定文本直接替换，且不需要改动句子或段落结构时填写；需要外部资料、编辑取舍、跨句/跨段改写或没有唯一替换文本时填 null，并在 suggestion 说明需人工核查。
 5. 不输出纯风格偏好、主观润色、扩写、标题美化、化学表达式小标，以及标点、空格、制表符、换行、全半角和中英文符号替换等机械校对项。
-6. 只返回 JSON；顶层只包含 issues；不要 Markdown、解释、代码块或多余文本。
-7. suggestion 写给责任编辑看，简短说明问题原因和处理建议，不超过 100 个汉字。
-8. 不复述完整正文、密钥、认证头或项目记忆原文。
+6. 审校范围外的问题，只有属于事实准确性、语义理解、逻辑关系、知识表述或出版判断问题，且不属于第 5 条机械校对项时，才可以输出；优先使用最接近的 category，无法归类时使用 other。
+7. 只返回 JSON；顶层只包含 issues；不要 Markdown、解释、代码块或多余文本。
+8. suggestion 写给责任编辑看，简短说明问题原因和处理建议，不超过 100 个汉字。
+9. 不复述完整正文、密钥、认证头或项目记忆原文。
 
 严重程度：
 - high：事实、知识点、数据、公式错误，严重逻辑矛盾，影响出版准确性的硬伤。
@@ -77,7 +68,7 @@ BASE_SYSTEM_PROMPT = """
 category 只能使用：
 - typo：错别字、漏字、多字
 - grammar：语法、病句、搭配不当、语义不清、指代不明、整段不通顺
-- punctuation：历史兼容字段；机械校对项不要输出，后端会兜底过滤
+- punctuation：历史兼容字段；模型不要主动使用，后端会兜底过滤机械校对项
 - consistency：前后不一致、称谓/数字/时间/单位/数据不一致
 - fact：事实疑问、知识点错误、概念混淆、数据错误、公式错误、明显事实冲突
 - style：出版物体例硬伤
@@ -91,13 +82,12 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 
 审校范围：
 1. 错别字、漏字、多字。
-2. 明显病句、搭配不当、语义不清、指代不明。
-3. 明显前后矛盾、称谓不一致、数字/时间/单位前后不一致。
-4. 明显影响理解或出版准确性的本书约定风险。
+2. 病句、搭配不当、语义不清、指代不明。
+3. 前后矛盾、称谓不一致、数字/时间/单位前后不一致。
+4. 影响理解或出版准确性的本书约定风险。
 
 取舍标准：
-1. 只处理高置信度、文本内即可判断、通常不需要外部资料的问题。
-2. 不把正常表达改成个人偏好的表达。
+1. 只输出不依赖外部资料、可由 <text> 或 <book> 背景判断、可连续定位、不需要跨段改写的问题。
 """.strip(),
 
     "thinking": """
@@ -106,23 +96,15 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 审校范围：
 1. 基础语言问题：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明。
 2. 表达与逻辑问题：整段是否通顺，句间逻辑是否连贯，主谓宾关系是否清楚，表述是否符合正式出版物规范。
-3. 知识点问题：概念、术语、定义、分类、原理、因果关系、适用条件、实验方法、专业表述是否准确严谨。
-4. 数据与公式问题：数字、单位、比例、公式、范围、阈值、时间、数量级、统计口径是否错误、矛盾或疑似缺少依据。
-5. 事实与审读问题：明显事实冲突、前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、明显影响理解的本书约定风险。
+3. 知识点问题：概念、术语、定义、分类、原理、因果关系、适用条件、实验方法、专业表述是否与上下文、通用知识或 <book> 背景冲突。
+4. 数据与公式问题：数字、单位、比例、公式、范围、阈值、时间、数量级、统计口径是否错误、矛盾或缺少可判断依据。
+5. 事实与审读问题：事实冲突、前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、影响理解的本书约定风险。
 
 取舍标准：
-1. 可以结合文本本身、通用知识和项目上下文判断问题。
-2. 不把正常表达改成个人偏好的表达。
+1. 可以结合 <text>、通用知识和 <book> 背景判断事实、知识、数据、公式、逻辑、因果和体例问题。
+2. 需要外部资料确认或编辑取舍的问题，replacement 填 null。
 """.strip(),
 }
-
-
-V2_AGENT_PROMPT = """
-V2 Agent 上下文使用规则：
-1. <v2_agent_context>.review_goal 是硬约束；候选问题必须服务该目标。
-2. pass_name 表示当前审校阶段，优先完成该阶段职责，不要泛泛审校。
-3. 可结合 document_map_summary、memory_items、style_rules 判断问题；它们不是待审正文，不得在输出中原样复述。
-""".strip()
 
 
 async def proofread_with_ai(
@@ -134,7 +116,6 @@ async def proofread_with_ai(
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
-    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
     try:
@@ -152,7 +133,6 @@ async def proofread_with_ai(
             proofread_mode=proofread_mode,
             reasoning_enabled=reasoning_enabled,
             temperature=temperature,
-            v2_context=v2_context,
         )
 
     _ensure_responses_api(profile)
@@ -164,7 +144,6 @@ async def proofread_with_ai(
         profile,
         proofread_mode=proofread_mode,
         temperature=temperature,
-        v2_context=v2_context,
     )
     logger.info(
         "AI responses request started profile_id=%s model=%s proofread_mode=%s temperature=%s text_len=%s max_output_tokens=%s",
@@ -326,7 +305,6 @@ async def _proofread_with_chat(
     proofread_mode: ProofreadMode,
     reasoning_enabled: bool,
     temperature: float,
-    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     _ensure_api_key(profile)
     dialect = _chat_dialect(profile)
@@ -339,7 +317,6 @@ async def _proofread_with_chat(
         reasoning_enabled=reasoning_enabled,
         temperature=temperature,
         dialect=dialect,
-        v2_context=v2_context,
     )
     logger.info(
         "AI chat request started profile_id=%s model=%s dialect=%s proofread_mode=%s reasoning_enabled=%s temperature=%s text_len=%s output_token_limit=%s",
@@ -390,11 +367,10 @@ def _build_responses_payload(
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
-    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": profile.model,
-        "input": f"{_build_system_prompt(proofread_mode, v2_context)}\n\n{_build_user_prompt(text, book, v2_context)}",
+        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
         "temperature": temperature,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
@@ -415,14 +391,13 @@ def _build_chat_payload(
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
     dialect: ChatDialect | None = None,
-    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     resolved_dialect = dialect or _chat_dialect(profile)
     payload: dict[str, Any] = {
         "model": profile.model,
         "messages": [
-            {"role": "system", "content": _build_system_prompt(proofread_mode, v2_context)},
-            {"role": "user", "content": _build_user_prompt(text, book, v2_context)},
+            {"role": "system", "content": _build_system_prompt(proofread_mode)},
+            {"role": "user", "content": _build_user_prompt(text, book)},
         ],
         "temperature": temperature,
     }
@@ -451,36 +426,16 @@ def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
     return payload.get("max_tokens", payload.get("max_completion_tokens"))
 
 
-def _build_system_prompt(proofread_mode: ProofreadMode, v2_context: V2PromptContext | None = None) -> str:
-    prompt_parts = [BASE_SYSTEM_PROMPT, MODE_PROMPTS[proofread_mode]]
-    if v2_context is None:
-        return "\n\n".join(prompt_parts)
-
-    return "\n\n".join([*prompt_parts, V2_AGENT_PROMPT])
+def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
+    return "\n\n".join([BASE_SYSTEM_PROMPT, MODE_PROMPTS[proofread_mode]])
 
 
-def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | None = None) -> str:
+def _build_user_prompt(text: str, book: BookInfo) -> str:
     book_context = json.dumps(
         book.model_dump(),
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    v2_context_block = ""
-    if v2_context is not None:
-        context_payload = {
-            "review_goal": v2_context.review_goal,
-            "source_type": v2_context.source_type,
-            "pass_name": v2_context.pass_name,
-            "document_map_summary": v2_context.document_map_summary,
-            "memory_items": v2_context.memory_items,
-            "style_rules": v2_context.style_rules,
-        }
-        v2_context_block = f"""
-<v2_agent_context>
-{json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))}
-</v2_agent_context>
-""".strip()
-
     prompt_parts = [
         f"""
 <book>
@@ -488,8 +443,6 @@ def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | 
 </book>
 """.strip()
     ]
-    if v2_context_block:
-        prompt_parts.append(v2_context_block)
 
     prompt_parts.append(
         f"""

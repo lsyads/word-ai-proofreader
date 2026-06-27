@@ -20,15 +20,8 @@ from app.schemas import (
 from app.services import chunk_service, chunking, document_map_service, project_store, report_service
 from app.services import docx as docx_service
 from app.services import proofread as proofread_service
-from app.services.ai_client import V2PromptContext
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_STYLE_RULES = [
-    "事实、逻辑、概念、数据和因果关系应准确清楚；证据不足时不生成候选。",
-    "术语、人名、地名、机构名、称谓和关键数字在同一项目内应保持一致。",
-    "只关注责任编辑需要判断的审读风险；符号、空格、全半角和中英文符号转换等机械校对项不进入候选队列。",
-]
 
 
 class V2WorkspaceConflict(RuntimeError):
@@ -64,7 +57,6 @@ class AgentWorkspaceRunner:
             planner.create_review_plan(
                 project.project_id,
                 source_type="docx",
-                review_goal=review_goal,
                 document_map=document_map,
             )
         )
@@ -92,7 +84,6 @@ class AgentWorkspaceRunner:
             planner.create_review_plan(
                 project.project_id,
                 source_type="selection",
-                review_goal=review_goal,
                 document_map=document_map,
             )
         )
@@ -106,7 +97,6 @@ class AgentWorkspaceRunner:
             project_id,
             run.run_id,
             source_type=project.source_type,
-            review_goal=project.review_goal,
             document_map=prepared.document_map,
         )
         project_store.save_review_plan(plan)
@@ -118,8 +108,7 @@ class AgentWorkspaceRunner:
             {
                 "step_count": len(plan.steps),
                 "enabled_steps": [step.step_id for step in plan.steps if step.enabled],
-                "review_goal_bound": True,
-                "message": "V2.2 审校计划已生成，审校目标已进入 Agent 上下文。",
+                "message": "V2.2 审校计划已生成。",
             },
         )
         project_store.update_run(project_id, run.run_id, status="queued", stage="queued")
@@ -141,7 +130,6 @@ class AgentWorkspaceRunner:
         project = project_store.require_project(project_id)
         prepared = self._prepare_source(project)
         plan = project_store.get_review_plan(project_id)
-        memory_items = project_store.list_memory_items(project_id)
         candidates: list[V2CandidateIssue] = []
         completed_chunks = 0
         failed_chunks = 0
@@ -153,7 +141,6 @@ class AgentWorkspaceRunner:
                 run_id=run_id,
                 request=request,
                 prepared=prepared,
-                memory_items=memory_items,
             )
             for step in plan.steps:
                 if not step.enabled or step.step_id in {"plan_review", "proofread_pass", "human_approval"}:
@@ -258,7 +245,6 @@ class AgentWorkspaceRunner:
         run_id: str,
         request: V2RunCreateRequest,
         prepared: PreparedSource,
-        memory_items: list,
     ) -> tuple[list[V2CandidateIssue], int, int]:
         candidates: list[V2CandidateIssue] = []
         completed_chunks = 0
@@ -267,7 +253,7 @@ class AgentWorkspaceRunner:
             project.project_id,
             run_id,
             "pass_started",
-            {"pass_name": "proofread_pass", "chunk_count": len(prepared.chunks), "review_goal_bound": True},
+            {"pass_name": "proofread_pass", "chunk_count": len(prepared.chunks)},
         )
         for chunk in prepared.chunks:
             project_store.update_run(
@@ -295,7 +281,6 @@ class AgentWorkspaceRunner:
                     proofread_mode=request.proofread_mode,
                     reasoning_enabled=request.reasoning_enabled,
                     temperature=request.temperature,
-                    v2_context=self._prompt_context(project, "proofread_pass", prepared.document_map, memory_items),
                 )
             except Exception as exc:
                 failed_chunks += 1
@@ -426,34 +411,6 @@ class AgentWorkspaceRunner:
         document_map = project_store.get_document_map(project.project_id)
         return PreparedSource(source_text=source_text, chunks=chunks, document_map=document_map)
 
-    def _prompt_context(
-        self,
-        project: project_store.StoredProject,
-        pass_name: str,
-        document_map: V2DocumentMapResponse,
-        memory_items: list,
-    ) -> V2PromptContext:
-        return V2PromptContext(
-            review_goal=project.review_goal,
-            source_type=project.source_type,
-            pass_name=pass_name,
-            document_map_summary=(
-                f"text_len={document_map.text_len}; blocks={document_map.block_count}; "
-                f"chunks={document_map.chunk_count}"
-            ),
-            memory_items=[
-                {
-                    "kind": item.kind,
-                    "key": item.key,
-                    "value": item.value,
-                    "source": item.source,
-                    "confidence": item.confidence,
-                }
-                for item in memory_items[:20]
-            ],
-            style_rules=DEFAULT_STYLE_RULES,
-        )
-
     def _add_candidate_found_event(self, candidate: V2CandidateIssue) -> None:
         project_store.add_run_event(
             candidate.project_id,
@@ -557,7 +514,7 @@ def _candidate_from_issue(
         global_start=issue.global_start,
         global_end=issue.global_end,
         locator=issue.locator,
-        self_check="已由 V2.2 evaluator 绑定位置、证据和审校目标，等待编辑确认。",
+        self_check="已由 V2.2 evaluator 绑定位置和证据，等待编辑确认。",
         pass_name=pass_name,
         confidence=confidence,
         evidence_kind=evidence_kind or ("locator" if issue.locator else "context"),

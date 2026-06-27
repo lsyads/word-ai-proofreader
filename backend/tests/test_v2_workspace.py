@@ -147,6 +147,8 @@ def test_v2_project_run_approval_writeback_report_and_download():
     trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
     assert trace_response.status_code == 200
     assert "第一章 开始" not in trace_response.text
+    assert "review_goal_bound" not in trace_response.text
+    assert "审校目标已进入 Agent 上下文" not in trace_response.text
     assert any(event["event"] == "candidate_found" for event in trace_response.json()["events"])
     assert any(event["event"] == "pass_started" for event in trace_response.json()["events"])
     assert any(event["event"] == "candidate_evaluated" for event in trace_response.json()["events"])

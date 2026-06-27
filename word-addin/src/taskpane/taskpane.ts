@@ -51,8 +51,6 @@ import {
 type SourceType = "selection" | "docx";
 type RunPollResult = "completed" | "timed_out" | "aborted";
 
-const DEFAULT_REVIEW_GOAL =
-  "完成出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。";
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
 const RUN_POLL_INTERVAL_MS = 2000;
@@ -145,7 +143,6 @@ function bindEvents() {
 }
 
 function initializeDefaults() {
-  getTextArea("review-goal").value = DEFAULT_REVIEW_GOAL;
   getSelect("proofread-mode").value = "thinking";
   getInput("temperature").value = String(DEFAULT_V2_TEMPERATURE);
   getSelect("application-mode").value = "revision";
@@ -233,7 +230,6 @@ async function createProjectForCurrentInputs(signal: AbortSignal) {
   if (!book) {
     throw new Error("请先填写书名。");
   }
-  const reviewGoal = getTextArea("review-goal").value.trim() || DEFAULT_REVIEW_GOAL;
   const sourceType = getSourceType();
   resetProjectState();
   if (sourceType === "selection") {
@@ -241,7 +237,6 @@ async function createProjectForCurrentInputs(signal: AbortSignal) {
     currentProject = await createV2SelectionProject(
       currentSelectionText,
       book,
-      reviewGoal,
       currentSessionId,
       signal
     );
@@ -251,7 +246,7 @@ async function createProjectForCurrentInputs(signal: AbortSignal) {
     if (!file) {
       throw new Error("请先选择一个 .docx 文件。");
     }
-    currentProject = await createV2Project(file, book, reviewGoal, signal);
+    currentProject = await createV2Project(file, book, signal);
     currentSelectionText = "";
   }
   currentDocumentMap = await getV2DocumentMap(currentProject.project_id, signal);

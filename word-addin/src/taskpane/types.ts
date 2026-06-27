@@ -149,7 +149,6 @@ export interface V2Project {
   source_filename: string;
   text_preview?: string | null;
   book: BookInfo;
-  review_goal: string;
   created_at: string;
   updated_at: string;
   run_count: number;
@@ -326,7 +325,6 @@ export interface V2ReviewReport {
   status: V2ProjectStatus;
   source_filename: string;
   book: BookInfo;
-  review_goal: string;
   issue_count: number;
   pending_count: number;
   approved_count: number;

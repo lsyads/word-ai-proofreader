@@ -12,12 +12,8 @@ def create_review_plan(
     document_map: V2DocumentMapResponse | None = None,
 ) -> V2ReviewPlanResponse:
     """Create the deterministic V2.2 publishing-review plan for one project run."""
-    normalized_goal = review_goal.lower()
     text_len = document_map.text_len if document_map else 0
     is_book_scope = source_type == "docx" or text_len >= 7000
-    wants_terms = any(keyword in normalized_goal for keyword in ("术语", "专名", "人名", "地名", "机构", "一致"))
-    wants_style = any(keyword in normalized_goal for keyword in ("审读", "本书约定", "出版规范", "体例"))
-    wants_consistency = is_book_scope or any(keyword in normalized_goal for keyword in ("全书", "跨章节", "一致", "前后"))
 
     return V2ReviewPlanResponse(
         project_id=project_id,
@@ -27,15 +23,15 @@ def create_review_plan(
                 step_id="plan_review",
                 title="生成审校计划",
                 tool_name="create_review_plan",
-                description="根据审校目标、来源类型和文档地图决定本次 Agent run 的专项 pass。",
+                description="根据来源类型和文档地图决定本次 Agent run 的专项 pass。",
                 status="succeeded" if run_id else "pending",
-                reason="V2.2 每次 run 都重新绑定审校目标和文档地图。",
+                reason="V2.2 每次 run 都重新构建文档地图和分阶段审校计划。",
             ),
             V2ReviewPlanStep(
                 step_id="proofread_pass",
                 title="基础语言审校",
                 tool_name="proofread_document_chunk",
-                description="复用 V1 分块、AI 审校和定位能力，但使用 V2.2 审校目标上下文 prompt。",
+                description="复用 V1 分块、AI 审校和定位能力，按统一出版审校 prompt 执行。",
                 reason="明显错别字、漏字、多字、语病、事实和逻辑风险始终启用；机械校对项默认过滤。",
             ),
             V2ReviewPlanStep(
@@ -43,15 +39,15 @@ def create_review_plan(
                 title="术语与专名一致性",
                 tool_name="check_terminology_consistency",
                 description="保留术语与专名一致性阶段入口；默认不生成本地非 AI 候选。",
-                enabled=is_book_scope or wants_terms,
-                reason="全书项目或目标提到术语/专名/一致性时保留阶段可观测性，候选主要来自 AI 或编辑记忆。",
+                enabled=is_book_scope,
+                reason="全书项目保留术语与专名一致性阶段可观测性；默认不生成本地非 AI 候选。",
             ),
             V2ReviewPlanStep(
                 step_id="style_rule_pass",
                 title="责任编辑审读约束",
                 tool_name="check_style_rules",
                 description="保留审读约束阶段入口；默认不生成符号、空格、全半角等机械校对候选。",
-                enabled=wants_style or bool(review_goal),
+                enabled=False,
                 reason="责任编辑工作台关注事实、逻辑、语义和本书约定风险；机械校对项默认不进入确认队列。",
             ),
             V2ReviewPlanStep(
@@ -59,8 +55,8 @@ def create_review_plan(
                 title="跨章节一致性",
                 tool_name="check_cross_chapter_consistency",
                 description="保留跨章节一致性阶段入口；默认不生成本地非 AI 候选。",
-                enabled=wants_consistency,
-                reason="DOCX/长文本或目标提到全书、跨章节、前后一致时保留阶段可观测性，候选主要来自 AI 或编辑记忆。",
+                enabled=is_book_scope,
+                reason="DOCX/长文本保留跨章节一致性阶段可观测性；默认不生成本地非 AI 候选。",
             ),
             V2ReviewPlanStep(
                 step_id="merge_candidates",

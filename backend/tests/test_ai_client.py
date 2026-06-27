@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, V2PromptContext, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import AIClientError, proofread_with_ai, stream_proofread_with_ai
 from app.settings import Settings
 
 
@@ -165,8 +165,19 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert '"introduction":"这是一部测试图书。"' in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
     assert "待审文本片段" in call["json"]["input"]
-    assert "机械校对项不要输出" in call["json"]["input"]
+    assert "模型不要主动使用，后端会兜底过滤机械校对项" in call["json"]["input"]
+    assert "属于事实准确性、语义理解、逻辑关系、知识表述或出版判断问题" in call["json"]["input"]
+    assert "不属于第 5 条机械校对项" in call["json"]["input"]
+    assert "无法归类时使用 other" in call["json"]["input"]
+    assert "- other：其他" in call["json"]["input"]
     assert "Word 选区文本" not in call["json"]["input"]
+    assert "<v2_agent_context>" not in call["json"]["input"]
+    assert "review_goal" not in call["json"]["input"]
+    assert "document_map_summary" not in call["json"]["input"]
+    assert "memory_items" not in call["json"]["input"]
+    assert "style_rules" not in call["json"]["input"]
+    assert "review_goal 是硬约束" not in call["json"]["input"]
+    assert "不要泛泛审校" not in call["json"]["input"]
     assert call["json"]["input"].count("original 必须") == 1
     assert "\n要求：" not in call["json"]["input"]
     assert "标点误用" not in call["json"]["input"]
@@ -198,33 +209,6 @@ def test_proofread_with_ai_uses_custom_temperature_for_responses(monkeypatch):
     assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.7
 
 
-def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
-    FakeAsyncClient.calls = []
-    FakeAsyncClient.response = FakeResponse(payload=response_payload())
-    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
-
-    context = V2PromptContext(
-        review_goal="重点检查术语一致性。",
-        source_type="docx",
-        pass_name="terminology_pass",
-        document_map_summary="text_len=100; blocks=2; chunks=1",
-        memory_items=[{"kind": "preference", "key": "approved_issue_categories", "value": "style"}],
-        style_rules=["统一术语。"],
-    )
-
-    asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
-
-    payload_input = FakeAsyncClient.calls[0]["json"]["input"]
-    assert "V2 Agent 上下文使用规则" in payload_input
-    assert "重点检查术语一致性。" in payload_input
-    assert "terminology_pass" in payload_input
-    assert "text_len=100; blocks=2; chunks=1" in payload_input
-    assert "approved_issue_categories" in payload_input
-    assert "style_rules" in payload_input
-    assert "统一术语。" in payload_input
-    assert payload_input.count("original 必须") == 1
-
-
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=chat_payload())
@@ -251,8 +235,19 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
     assert "待审文本片段" in call["json"]["messages"][0]["content"]
-    assert "机械校对项不要输出" in call["json"]["messages"][0]["content"]
+    assert "模型不要主动使用，后端会兜底过滤机械校对项" in call["json"]["messages"][0]["content"]
+    assert "属于事实准确性、语义理解、逻辑关系、知识表述或出版判断问题" in call["json"]["messages"][0]["content"]
+    assert "不属于第 5 条机械校对项" in call["json"]["messages"][0]["content"]
+    assert "无法归类时使用 other" in call["json"]["messages"][0]["content"]
+    assert "- other：其他" in call["json"]["messages"][0]["content"]
     assert "Word 选区文本" not in call["json"]["messages"][0]["content"]
+    assert "<v2_agent_context>" not in call["json"]["messages"][0]["content"]
+    assert "review_goal" not in call["json"]["messages"][0]["content"]
+    assert "document_map_summary" not in call["json"]["messages"][0]["content"]
+    assert "memory_items" not in call["json"]["messages"][0]["content"]
+    assert "style_rules" not in call["json"]["messages"][0]["content"]
+    assert "review_goal 是硬约束" not in call["json"]["messages"][0]["content"]
+    assert "不要泛泛审校" not in call["json"]["messages"][0]["content"]
     assert call["json"]["messages"][0]["content"].count("original 必须") == 1
     assert "标点误用" not in call["json"]["messages"][0]["content"]
     assert "英文逗号" not in call["json"]["messages"][0]["content"]

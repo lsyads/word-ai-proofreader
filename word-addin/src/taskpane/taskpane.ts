@@ -67,7 +67,7 @@ type BusyAction =
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
 const RUN_POLL_INTERVAL_MS = 2000;
-const RUN_POLL_TIMEOUT_MS = 30 * 60 * 1000;
+const RUN_POLL_TIMEOUT_MS = 60 * 60 * 1000;
 const TERMINAL_RUN_STATUSES = new Set([
   "waiting_for_approval",
   "succeeded",
@@ -455,10 +455,10 @@ function startRunPolling(projectId: string, runId: string) {
       } else if (result === "timed_out") {
         runPollingTimedOut = true;
         showMessage(
-          "已等待 30 分钟，审校可能仍在后台运行。你可以稍后刷新进度查看结果，或点击继续等待。",
+          "已等待 60 分钟，审校可能仍在后台运行。你可以稍后刷新进度查看结果，或点击继续等待。",
           "default"
         );
-        appendDebugLog("warn", "前端轮询已到 30 分钟上限，后台任务未判定失败。", {
+        appendDebugLog("warn", "前端轮询已到 60 分钟上限，后台任务未判定失败。", {
           project_id: projectId,
           run_id: runId,
           status: currentRun?.status,
@@ -857,18 +857,21 @@ function renderProjectSummary() {
     renderEmpty(container, "暂无本次审校。");
     return;
   }
-  container.className = "compact-status";
+  container.className = "project-summary";
   const approvedCount = currentProject.approved_count;
   const writtenCount = currentReport?.written_count || 0;
   container.innerHTML = `
-    <span>${currentProject.source_type === "selection" ? "当前选区" : "全书 DOCX"}</span>
-    <span>${escapeHtml(currentProject.book.title)}</span>
-    <span>${translateStatus(
-      getDisplayStatus(currentRun?.status || currentProject.status, currentProject.candidate_count)
-    )}</span>
-    <span>建议 ${currentProject.candidate_count}</span>
-    <span>已接受 ${approvedCount}</span>
-    <span>${writtenCount > 0 ? `已写入 ${writtenCount}` : "未写入"}</span>
+    <div class="project-summary-chips">
+      <span>${currentProject.source_type === "selection" ? "当前选区" : "全书 DOCX"}</span>
+      <span>${escapeHtml(currentProject.book.title)}</span>
+      <span>${translateStatus(
+        getDisplayStatus(currentRun?.status || currentProject.status, currentProject.candidate_count)
+      )}</span>
+      <span>建议 ${currentProject.candidate_count}</span>
+      <span>已接受 ${approvedCount}</span>
+      <span>${writtenCount > 0 ? `已写入 ${writtenCount}` : "未写入"}</span>
+    </div>
+    ${renderRunProgress(currentRun)}
   `;
 }
 
@@ -1006,14 +1009,14 @@ function renderCandidates() {
   renderCandidatePagination();
   getElement("candidate-summary").textContent = formatCandidateSummary();
   if (runPollingTimedOut && isRunInProgress()) {
-    renderEmpty(
+    renderProgressEmpty(
       container,
       "审校时间较长，已停止自动刷新。你可以刷新进度查看结果，或点击继续等待。"
     );
     return;
   }
   if (isRunInProgress()) {
-    renderEmpty(
+    renderProgressEmpty(
       container,
       `仍在审校：${translateStage(currentRun?.stage || currentRun?.status || "running")}`
     );
@@ -1393,6 +1396,55 @@ function formatCandidateSummary(): string {
   return `共 ${currentProject?.candidate_count || 0} 条建议，待处理 ${currentProject?.pending_count || 0}，已接受 ${currentProject?.approved_count || 0}，已忽略 ${rejectedCount}，已写入 ${writtenCount}；当前筛选 ${candidateTotal} 条。`;
 }
 
+function renderRunProgress(run: V2Run | null): string {
+  const progress = getRunProgress(run);
+  if (!progress) {
+    return "";
+  }
+  return `
+    <div class="run-progress" aria-label="审校分块进度">
+      <div class="run-progress-header">
+        <span>${escapeHtml(progress.stageLabel)}</span>
+        <span>${progress.percent}%</span>
+      </div>
+      <div class="run-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}">
+        <div class="run-progress-value" style="width: ${progress.percent}%"></div>
+      </div>
+      <div class="run-progress-meta">${escapeHtml(progress.description)}</div>
+    </div>
+  `;
+}
+
+function getRunProgress(run: V2Run | null):
+  | {
+      stageLabel: string;
+      percent: number;
+      description: string;
+    }
+  | null {
+  if (!run || run.total_chunks <= 0) {
+    return null;
+  }
+  const total = run.total_chunks;
+  const completed = clampCount(run.completed_chunks, total);
+  const failed = clampCount(run.failed_chunks, total - completed);
+  const processed = Math.min(total, completed + failed);
+  const current = TERMINAL_RUN_STATUSES.has(run.status) ? processed : Math.min(total, processed + 1);
+  const percent = Math.round((processed / total) * 100);
+  const currentText = TERMINAL_RUN_STATUSES.has(run.status)
+    ? `已处理 ${processed}/${total} 块`
+    : `正在处理第 ${current}/${total} 块`;
+  return {
+    stageLabel: translateStage(run.stage || run.status),
+    percent,
+    description: `${currentText}，已完成 ${completed}，失败 ${failed}`,
+  };
+}
+
+function clampCount(value: number, max: number): number {
+  return Math.max(0, Math.min(max, value || 0));
+}
+
 function summaryItem(label: string, value: string): string {
   return `
     <div class="summary-item">
@@ -1405,6 +1457,14 @@ function summaryItem(label: string, value: string): string {
 function renderEmpty(element: HTMLElement, message: string) {
   element.className = "workspace-empty";
   element.textContent = message;
+}
+
+function renderProgressEmpty(element: HTMLElement, message: string) {
+  element.className = "workspace-empty run-progress-empty";
+  element.innerHTML = `
+    <div>${escapeHtml(message)}</div>
+    ${renderRunProgress(currentRun)}
+  `;
 }
 
 function translateStatus(status: string): string {

@@ -8,7 +8,7 @@ from app.agents import workspace as workspace_agent
 from app.agents import local_rules
 from app.main import app
 from app.schemas import ProofreadIssue, V2CandidateIssue
-from app.services.ai_client import AIProofreadResult
+from app.services.ai_client import AIClientError, AIProofreadResult
 from app.services import project_store
 
 
@@ -385,6 +385,73 @@ def test_v2_selection_project_with_no_candidates_completes_successfully(monkeypa
     trace = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace").json()
     assert any(event["event"] == "review_completed" for event in trace["events"])
     assert not any(event["event"] == "waiting_for_approval" for event in trace["events"])
+
+
+def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
+    async def fake_proofread_text_with_context(text, *args, **kwargs):
+        if "乙" in text:
+            raise AIClientError("chunk failed with Authorization: Bearer secret-token")
+        return [
+            ProofreadIssue(
+                id="issue-1",
+                category="typo",
+                severity="medium",
+                original="甲甲",
+                replacement="甲乙",
+                suggestion="修正明显错字。",
+                start=0,
+                end=2,
+            )
+        ]
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    text = ("甲" * 4999 + "。") + ("乙" * 4999 + "。")
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": text,
+            "book": BOOK,
+            "review_goal": "检查长选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}").json()
+
+    assert run["status"] == "waiting_for_approval"
+    assert run["total_chunks"] == 2
+    assert run["completed_chunks"] == 1
+    assert run["failed_chunks"] == 1
+    assert run["candidate_count"] == 1
+
+    trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
+    assert trace_response.status_code == 200
+    trace = trace_response.json()
+    tool_started = [event for event in trace["events"] if event["event"] == "tool_started"]
+    tool_completed = [event for event in trace["events"] if event["event"] == "tool_completed"]
+    errors = [event for event in trace["events"] if event["event"] == "error"]
+    assert len(tool_started) == 2
+    assert len(tool_completed) == 1
+    assert errors
+    assert tool_started[0]["data"]["total_chunks"] == 2
+    assert tool_completed[0]["data"]["completed_chunks"] == 1
+    assert tool_completed[0]["data"]["failed_chunks"] == 0
+    assert tool_completed[0]["data"]["candidate_count"] == 1
+    chunk_error = next(event for event in errors if event["data"].get("tool_name") == "proofread_document_chunk")
+    assert chunk_error["data"]["completed_chunks"] == 1
+    assert chunk_error["data"]["failed_chunks"] == 1
+    assert chunk_error["data"]["message"] == "chunk failed with Authorization: Bearer [REDACTED]"
+    serialized_trace = json.dumps(trace, ensure_ascii=False)
+    assert "secret-token" not in serialized_trace
+    assert "甲甲甲甲" not in serialized_trace
+    assert "乙乙乙乙" not in serialized_trace
 
 
 def test_v2_docx_repeated_numbers_do_not_create_local_candidates(monkeypatch):

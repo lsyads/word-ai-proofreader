@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from app.agents import memory, planner
 from app.schemas import (
@@ -22,6 +24,12 @@ from app.services import docx as docx_service
 from app.services import proofread as proofread_service
 
 logger = logging.getLogger(__name__)
+_SECRET_PATTERNS = (
+    re.compile(r"(Authorization\s*[:=]\s*Bearer\s+)[^\s,;}]+", re.IGNORECASE),
+    re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),
+    re.compile(r"(api[_-]?key\s*[:=]\s*)[^\s,;}]+", re.IGNORECASE),
+)
+_MAX_EVENT_ERROR_LENGTH = 1000
 
 
 class V2WorkspaceConflict(RuntimeError):
@@ -258,7 +266,13 @@ class AgentWorkspaceRunner:
                 project.project_id,
                 run_id,
                 "tool_started",
-                {"tool_name": "proofread_document_chunk", "pass_name": "proofread_pass", "chunk_index": chunk.index},
+                _chunk_event_data(
+                    chunk_index=chunk.index,
+                    total_chunks=len(prepared.chunks),
+                    completed_chunks=completed_chunks,
+                    failed_chunks=failed_chunks,
+                    candidate_count=len(candidates),
+                ),
             )
             try:
                 issues = await proofread_service.proofread_text_with_context(
@@ -273,11 +287,27 @@ class AgentWorkspaceRunner:
                 )
             except Exception as exc:
                 failed_chunks += 1
+                project_store.update_run(
+                    project.project_id,
+                    run_id,
+                    status="running",
+                    stage="proofread_pass",
+                    completed_chunks=completed_chunks,
+                    failed_chunks=failed_chunks,
+                    candidate_count=len(candidates),
+                )
                 project_store.add_run_event(
                     project.project_id,
                     run_id,
                     "error",
-                    {"tool_name": "proofread_document_chunk", "chunk_index": chunk.index, "message": str(exc)},
+                    _chunk_event_data(
+                        chunk_index=chunk.index,
+                        total_chunks=len(prepared.chunks),
+                        completed_chunks=completed_chunks,
+                        failed_chunks=failed_chunks,
+                        candidate_count=len(candidates),
+                        message=_safe_event_error(str(exc)),
+                    ),
                 )
                 logger.exception("V2.2 chunk failed project_id=%s run_id=%s chunk_index=%s", project.project_id, run_id, chunk.index)
                 continue
@@ -291,6 +321,15 @@ class AgentWorkspaceRunner:
             candidates.extend(chunk_candidates)
             for candidate in chunk_candidates:
                 self._add_candidate_found_event(candidate)
+            project_store.update_run(
+                project.project_id,
+                run_id,
+                status="running",
+                stage="proofread_pass",
+                completed_chunks=completed_chunks,
+                failed_chunks=failed_chunks,
+                candidate_count=len(candidates),
+            )
             project_store.add_run_event(
                 project.project_id,
                 run_id,
@@ -299,6 +338,11 @@ class AgentWorkspaceRunner:
                     "tool_name": "proofread_document_chunk",
                     "pass_name": "proofread_pass",
                     "chunk_index": chunk.index,
+                    "current_chunk": chunk.index + 1,
+                    "total_chunks": len(prepared.chunks),
+                    "completed_chunks": completed_chunks,
+                    "failed_chunks": failed_chunks,
+                    "candidate_count": len(candidates),
                     "issue_count": len(chunk_candidates),
                 },
             )
@@ -506,6 +550,39 @@ def _chunked_issue_from_candidate(candidate: V2CandidateIssue) -> ChunkedProofre
 def _preview(text: str) -> str:
     normalized = " ".join(text.split())
     return normalized[:120] + ("..." if len(normalized) > 120 else "")
+
+
+def _chunk_event_data(
+    *,
+    chunk_index: int,
+    total_chunks: int,
+    completed_chunks: int,
+    failed_chunks: int,
+    candidate_count: int,
+    message: str | None = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "tool_name": "proofread_document_chunk",
+        "pass_name": "proofread_pass",
+        "chunk_index": chunk_index,
+        "current_chunk": chunk_index + 1,
+        "total_chunks": total_chunks,
+        "completed_chunks": completed_chunks,
+        "failed_chunks": failed_chunks,
+        "candidate_count": candidate_count,
+    }
+    if message is not None:
+        data["message"] = message
+    return data
+
+
+def _safe_event_error(value: str) -> str:
+    sanitized = value
+    for pattern in _SECRET_PATTERNS:
+        sanitized = pattern.sub(r"\1[REDACTED]", sanitized)
+    if len(sanitized) > _MAX_EVENT_ERROR_LENGTH:
+        return sanitized[:_MAX_EVENT_ERROR_LENGTH] + "...[truncated]"
+    return sanitized
 
 
 workspace_runner = AgentWorkspaceRunner()

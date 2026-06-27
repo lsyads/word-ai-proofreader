@@ -278,35 +278,14 @@ def test_v2_bulk_decision_updates_all_pending_candidates():
     }
 
 
-def test_local_rule_table_finds_all_matches_with_rule_metadata():
+def test_local_non_ai_rules_do_not_emit_default_candidates():
     text = "AI 与人工智能并用。人工智能再次出现。这里有中文,逗号。还有中文,逗号！！中文(括号)。不要处理？！"
-    terminology = local_rules.run_terminology_rules(text)
-    style = local_rules.run_style_rules(text)
+    repeated_numbers = "第1章统计10页。第2章仍为10页。第3章记录20页。"
 
-    assert terminology == []
-
-    style_rule_ids = [match.rule_id for match in style]
-    assert style_rule_ids.count("style_ascii_comma") == 2
-    assert "style_consecutive_punctuation" in style_rule_ids
-    assert "style_halfwidth_parenthesis" in style_rule_ids
-    assert all(match.confidence >= local_rules.HIGH_CONFIDENCE_LOCAL_RULE_MIN for match in style)
-    assert all(match.replacement for match in style)
-    assert all(match.pass_name == "style_rule_pass" for match in style)
-    assert all(match.evidence_kind == "rule" for match in style)
-    assert all(match.start < match.end for match in style)
-    assert not any(match.original == "？！" for match in style)
-    assert ("文,逗", "文，逗") in [(match.original, match.replacement) for match in style]
-    assert ("！！", "！") in [(match.original, match.replacement) for match in style]
-    assert ("文(括号)", "文（括号）") in [(match.original, match.replacement) for match in style]
-
-
-def test_local_consistency_rule_is_docx_scoped():
-    text = "第1章统计10页。第2章仍为10页。第3章记录20页。"
-    selection_matches = local_rules.run_consistency_rules(text, source_type="selection")
-    docx_matches = local_rules.run_consistency_rules(text, source_type="docx")
-
-    assert selection_matches == []
-    assert docx_matches == []
+    assert local_rules.run_terminology_rules(text) == []
+    assert local_rules.run_style_rules(text) == []
+    assert local_rules.run_consistency_rules(repeated_numbers, source_type="selection") == []
+    assert local_rules.run_consistency_rules(repeated_numbers, source_type="docx") == []
 
 
 def test_v2_selection_project_run_writeback_conflict_and_mark_written():
@@ -431,7 +410,7 @@ def test_v2_docx_repeated_numbers_do_not_create_local_candidates(monkeypatch):
     assert client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"] == []
 
 
-def test_v2_high_confidence_local_style_candidates_skip_human_review(monkeypatch):
+def test_v2_local_style_rules_do_not_emit_candidates_when_ai_returns_empty(monkeypatch):
     async def fake_proofread_text_with_context(*args, **kwargs):
         return []
 
@@ -453,19 +432,14 @@ def test_v2_high_confidence_local_style_candidates_skip_human_review(monkeypatch
 
     run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
     assert run_response.status_code == 200
-    run = get_completed_run(project_id, run_response.json()["run_id"])
-    assert run["candidate_count"] == 3
+    run_status_response = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}")
+    assert run_status_response.status_code == 200
+    run = run_status_response.json()
+    assert run["status"] == "succeeded"
+    assert run["candidate_count"] == 0
 
     candidates = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"]
-    assert {candidate["rule_id"] for candidate in candidates} == {
-        "style_ascii_comma",
-        "style_consecutive_punctuation",
-        "style_halfwidth_parenthesis",
-    }
-    assert all(candidate["pass_name"] == "style_rule_pass" for candidate in candidates)
-    assert all(candidate["replacement"] for candidate in candidates)
-    assert all(candidate["confidence"] >= local_rules.HIGH_CONFIDENCE_LOCAL_RULE_MIN for candidate in candidates)
-    assert all(candidate["needs_human_review"] is False for candidate in candidates)
+    assert candidates == []
 
 
 def test_v2_delete_selection_project_removes_related_workspace_data():

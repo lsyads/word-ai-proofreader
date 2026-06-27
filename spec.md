@@ -39,7 +39,7 @@ Word 当前选区或 DOCX 文件
   -> GET /api/v2/projects/{project_id}/document-map
   -> GET /api/v2/projects/{project_id}/plan
   -> POST /api/v2/projects/{project_id}/runs
-  -> backend 分块调用 AI、本地高置信规则、归并和 evaluator
+  -> backend 分块调用 AI、执行可观测 pass、归并和 evaluator
   -> GET /api/v2/projects/{project_id}/candidates
   -> editor 接受、忽略或暂缓建议
   -> 当前选区: Office.js 写回已接受建议后 mark-written
@@ -187,11 +187,11 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/plan`
 
-返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语一致性和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成术语并用和重复数字这类低置信本地候选。
+返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语、体例和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成本地非 AI 候选。
 
 ### 本地 pass 规则
 
-V2 本地 pass 规则以可审计规则表实现，不调用模型、不写入完整正文记忆。默认只保留高置信机械体例规则：`style_consecutive_punctuation` 将连续同类句末标点规范为单个标点，且不处理 `？！` 等混合标点；`style_ascii_comma` 将中文语境英文逗号改为中文逗号；`style_halfwidth_parenthesis` 将中文正文半角括号改为全角括号。默认规则候选必须携带 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，置信度不低于本地高置信门槛，并由归并阶段去重。`terminology_variant_pair` 和 `cross_chapter_numeric_consistency` 的 pass 入口保留，但默认不再产出低置信人工核查候选。
+V2 本地 pass 入口保留为可审计阶段，不调用模型、不写入完整正文记忆。默认不产出任何本地非 AI 规则候选，包括英文逗号、半角括号、连续标点、术语并用和重复数字一致性风险；这类机械校对属于校对公司任务，不进入责任编辑确认队列。候选字段仍保留 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，用于历史数据、AI 候选和未来扩展兼容。
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
@@ -672,8 +672,8 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
 - 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异 issue 被过滤。
-- 默认本地规则只产出英文逗号、半角括号、连续同类句末标点三类高置信机械体例候选；候选包含 `replacement`，`evidence_kind="rule"`，且 `needs_human_review=false`。
-- `terminology_variant_pair` 和 `cross_chapter_numeric_consistency` 阶段入口保留，但默认不因术语并用或重复数字产出低置信人工核查候选。
+- 默认不产出本地非 AI 规则候选；英文逗号、半角括号、连续标点、术语并用和重复数字一致性风险不会由本地规则进入确认队列。
+- `terminology_pass`、`style_rule_pass` 和 `consistency_pass` 阶段入口保留，候选主要来自 AI 审校、编辑记忆或未来扩展能力。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区 `> 7000` 字时创建分块任务；全书正文上传 `.docx` 创建 DOCX 文件任务；默认 `chunk_size=5000`。
 - 分块任务返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标。

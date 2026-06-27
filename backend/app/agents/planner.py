@@ -16,7 +16,7 @@ def create_review_plan(
     text_len = document_map.text_len if document_map else 0
     is_book_scope = source_type == "docx" or text_len >= 7000
     wants_terms = any(keyword in normalized_goal for keyword in ("术语", "专名", "人名", "地名", "机构", "一致"))
-    wants_style = any(keyword in normalized_goal for keyword in ("体例", "标点", "数字", "格式", "出版", "全半角"))
+    wants_style = any(keyword in normalized_goal for keyword in ("审读", "本书约定", "出版规范", "体例"))
     wants_consistency = is_book_scope or any(keyword in normalized_goal for keyword in ("全书", "跨章节", "一致", "前后"))
 
     return V2ReviewPlanResponse(
@@ -36,7 +36,7 @@ def create_review_plan(
                 title="基础语言审校",
                 tool_name="proofread_document_chunk",
                 description="复用 V1 分块、AI 审校和定位能力，但使用 V2.2 审校目标上下文 prompt。",
-                reason="基础错别字、语病、标点和明确体例问题始终启用。",
+                reason="明显错别字、漏字、多字、语病、事实和逻辑风险始终启用；机械校对项默认过滤。",
             ),
             V2ReviewPlanStep(
                 step_id="terminology_pass",
@@ -48,11 +48,11 @@ def create_review_plan(
             ),
             V2ReviewPlanStep(
                 step_id="style_rule_pass",
-                title="出版体例规则",
+                title="责任编辑审读约束",
                 tool_name="check_style_rules",
-                description="保留体例规则阶段入口；默认不生成英文逗号、半角括号、连续标点等本地机械候选。",
+                description="保留审读约束阶段入口；默认不生成符号、空格、全半角等机械校对候选。",
                 enabled=wants_style or bool(review_goal),
-                reason="责任编辑工作台以 AI 审校和编辑确认建议为主，机械体例规则默认不进入确认队列。",
+                reason="责任编辑工作台关注事实、逻辑、语义和本书约定风险；机械校对项默认不进入确认队列。",
             ),
             V2ReviewPlanStep(
                 step_id="consistency_pass",

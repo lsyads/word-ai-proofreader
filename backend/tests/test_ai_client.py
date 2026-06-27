@@ -164,6 +164,15 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert '"title":"测试书名"' in call["json"]["input"]
     assert '"introduction":"这是一部测试图书。"' in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
+    assert "待审文本片段" in call["json"]["input"]
+    assert "机械校对项不要输出" in call["json"]["input"]
+    assert "Word 选区文本" not in call["json"]["input"]
+    assert call["json"]["input"].count("original 必须") == 1
+    assert "\n要求：" not in call["json"]["input"]
+    assert "标点误用" not in call["json"]["input"]
+    assert "英文逗号" not in call["json"]["input"]
+    assert "半角符号" not in call["json"]["input"]
+    assert "连续标点" not in call["json"]["input"]
     assert "comment" not in call["json"]["input"]
 
 
@@ -206,11 +215,14 @@ def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
     asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
 
     payload_input = FakeAsyncClient.calls[0]["json"]["input"]
-    assert "V2.2 Agent 工作台要求" in payload_input
+    assert "V2 Agent 上下文使用规则" in payload_input
     assert "重点检查术语一致性。" in payload_input
     assert "terminology_pass" in payload_input
     assert "text_len=100; blocks=2; chunks=1" in payload_input
     assert "approved_issue_categories" in payload_input
+    assert "style_rules" in payload_input
+    assert "统一术语。" in payload_input
+    assert payload_input.count("original 必须") == 1
 
 
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):
@@ -238,6 +250,14 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["max_tokens"] == 8192
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
+    assert "待审文本片段" in call["json"]["messages"][0]["content"]
+    assert "机械校对项不要输出" in call["json"]["messages"][0]["content"]
+    assert "Word 选区文本" not in call["json"]["messages"][0]["content"]
+    assert call["json"]["messages"][0]["content"].count("original 必须") == 1
+    assert "标点误用" not in call["json"]["messages"][0]["content"]
+    assert "英文逗号" not in call["json"]["messages"][0]["content"]
+    assert "半角符号" not in call["json"]["messages"][0]["content"]
+    assert "连续标点" not in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
     assert call["json"]["reasoning"] == {"enabled": False}
     assert "max_completion_tokens" not in call["json"]
@@ -245,6 +265,7 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert "response_format" not in call["json"]
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
     assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
+    assert "\n要求：" not in call["json"]["messages"][1]["content"]
 
 
 def test_proofread_with_ai_uses_selected_profile(monkeypatch):

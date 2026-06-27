@@ -54,44 +54,30 @@ class V2PromptContext:
 
 
 BASE_SYSTEM_PROMPT = """
-你是出版社责任编辑的中文审校助手。请审校用户提供的 Word 选区文本，并返回结构化JSON结果。
+你是出版社责任编辑的中文审校助手。审校 <text> 中的待审文本片段，并返回紧凑 JSON。
 
-返回格式：
-{
-  "issues": [
-    {
-      "id": "issue-1",
-      "category": "typo",
-      "severity": "low",
-      "original": "原文片段",
-      "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
-      "suggestion": "给责任编辑看的修改建议"
-    }
-  ]
-}
+输出 JSON：
+{"issues":[{"id":"issue-1","category":"typo","severity":"low","original":"原文片段","replacement":"可直接替换文本或 null","suggestion":"给责任编辑看的建议"}]}
 
-基本要求：
-1. 只审校 <text> 标签内文本，不审校 <book> 信息或标签本身。
-2. 只输出能在原文中定位的明确问题，不为凑数量输出低置信度问题。
-3. 忽略可改可不改、纯风格偏好、主观润色、扩写、标题美化建议，忽略化学表达式小标问题。
-4. 忽略空格、制表符等空白字符问题。
-
-输出要求：
-1. 只返回紧凑 JSON，不要 Markdown、解释、代码块或多余文本。
-2. 顶层只包含 issues 字段；没有明确问题时返回 {"issues": []}。
-3. original 必须逐字摘录自 <text> 内的连续原文片段，不得改写、概括、补全或跨不连续位置。
-4. replacement 只能填写可直接替换 original 的正文文本；不能直接替换、涉及较大重写、事实待核、逻辑疑问、体例疑问时，必须为 null。
-5. suggestion 写给责任编辑看，简短说明问题原因和处理建议，不超过 100 个汉字。
+硬性规则：
+1. 只判断 <text> 内文本；<book>、<v2_agent_context> 和标签本身只作背景。
+2. original 必须是 <text> 内连续原文，不能改写、概括、补全或跨不连续位置。
+3. 只输出明确、可定位、服务审校目标的问题；没有问题返回 {"issues":[]}。
+4. replacement 仅在可直接替换 original 时填写；需核查、可能误改、较大重写、事实/逻辑/体例疑问时填 null，并在 suggestion 说明需人工核查。
+5. 不输出纯风格偏好、主观润色、扩写、标题美化、化学表达式小标，以及标点、空格、制表符、换行、全半角和中英文符号替换等机械校对项。
+6. 只返回 JSON；顶层只包含 issues；不要 Markdown、解释、代码块或多余文本。
+7. suggestion 写给责任编辑看，简短说明问题原因和处理建议，不超过 100 个汉字。
+8. 不复述完整正文、密钥、认证头或项目记忆原文。
 
 严重程度：
 - high：事实、知识点、数据、公式错误，严重逻辑矛盾，影响出版准确性的硬伤。
 - medium：明显病句、搭配不当、语义不清、指代不明、段落逻辑不顺、体例明显不一致。
-- low：错别字、漏字、多字、标点误用、轻微明确问题。
+- low：错别字、漏字、多字、轻微但明确的问题。
 
 category 只能使用：
 - typo：错别字、漏字、多字
 - grammar：语法、病句、搭配不当、语义不清、指代不明、整段不通顺
-- punctuation：标点误用
+- punctuation：历史兼容字段；机械校对项不要输出，后端会兜底过滤
 - consistency：前后不一致、称谓/数字/时间/单位/数据不一致
 - fact：事实疑问、知识点错误、概念混淆、数据错误、公式错误、明显事实冲突
 - style：出版物体例硬伤
@@ -107,8 +93,7 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 1. 错别字、漏字、多字。
 2. 明显病句、搭配不当、语义不清、指代不明。
 3. 明显前后矛盾、称谓不一致、数字/时间/单位前后不一致。
-4. 标点误用。
-5. 明显出版物体例硬伤。
+4. 明显影响理解或出版准确性的本书约定风险。
 
 取舍标准：
 1. 只处理高置信度、文本内即可判断、通常不需要外部资料的问题。
@@ -119,18 +104,25 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 当前模式：深度审校。
 
 审校范围：
-1. 基础语言问题：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明、标点误用。
+1. 基础语言问题：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明。
 2. 表达与逻辑问题：整段是否通顺，句间逻辑是否连贯，主谓宾关系是否清楚，表述是否符合正式出版物规范。
 3. 知识点问题：概念、术语、定义、分类、原理、因果关系、适用条件、实验方法、专业表述是否准确严谨。
 4. 数据与公式问题：数字、单位、比例、公式、范围、阈值、时间、数量级、统计口径是否错误、矛盾或疑似缺少依据。
-5. 事实与体例问题：明显事实冲突、前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、出版物体例硬伤。
+5. 事实与审读问题：明显事实冲突、前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、明显影响理解的本书约定风险。
 
 取舍标准：
-1. 能根据文本本身或通用知识明确判断的问题，可以给出 replacement。
-2. 需要外部资料、全书上下文或专业人工确认的问题，replacement 必须为 null，并在 suggestion 中写明“需人工核查”。
-3. 不把正常表达改成个人偏好的表达。
+1. 可以结合文本本身、通用知识和项目上下文判断问题。
+2. 不把正常表达改成个人偏好的表达。
 """.strip(),
 }
+
+
+V2_AGENT_PROMPT = """
+V2 Agent 上下文使用规则：
+1. <v2_agent_context>.review_goal 是硬约束；候选问题必须服务该目标。
+2. pass_name 表示当前审校阶段，优先完成该阶段职责，不要泛泛审校。
+3. 可结合 document_map_summary、memory_items、style_rules 判断问题；它们不是待审正文，不得在输出中原样复述。
+""".strip()
 
 
 async def proofread_with_ai(
@@ -460,20 +452,11 @@ def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
 
 
 def _build_system_prompt(proofread_mode: ProofreadMode, v2_context: V2PromptContext | None = None) -> str:
+    prompt_parts = [BASE_SYSTEM_PROMPT, MODE_PROMPTS[proofread_mode]]
     if v2_context is None:
-        return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
+        return "\n\n".join(prompt_parts)
 
-    return f"""
-{BASE_SYSTEM_PROMPT}
-{MODE_PROMPTS[proofread_mode]}
-
-V2.2 Agent 工作台要求：
-1. 你当前处在 {v2_context.pass_name} 阶段，必须优先完成该阶段职责，不要泛泛审校。
-2. 审校目标是硬约束，不是备注；候选问题必须服务审校目标。
-3. 结合项目记忆、出版体例规则和文档地图摘要判断问题，但 original 仍必须逐字来自 <text>。
-4. 对证据不足、可能误改、需要全书核验的问题，replacement 必须为 null，并在 suggestion 中标明需人工核查。
-5. 不要把完整正文、密钥、Authorization 或项目记忆原样复述到输出中。
-""".strip()
+    return "\n\n".join([*prompt_parts, V2_AGENT_PROMPT])
 
 
 def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | None = None) -> str:
@@ -498,25 +481,24 @@ def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | 
 </v2_agent_context>
 """.strip()
 
-    return f"""
-请审校 <text> 标签内的 Word 选区文本。
-
-<book> 为书籍背景信息，仅用于理解语境，不属于待审正文：
+    prompt_parts = [
+        f"""
 <book>
 {book_context}
 </book>
+""".strip()
+    ]
+    if v2_context_block:
+        prompt_parts.append(v2_context_block)
 
-{v2_context_block}
-
-要求：
-1. 只审校 <text> 内文本。
-2. original 必须来自 <text> 内的原文片段。
-3. 不要对 <book>、标签或标签外内容输出问题。
-
+    prompt_parts.append(
+        f"""
 <text>
 {text}
 </text>
 """.strip()
+    )
+    return "\n\n".join(prompt_parts)
 
 
 def _debug_log_json(message: str, payload: Any) -> None:

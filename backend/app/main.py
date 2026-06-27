@@ -269,7 +269,10 @@ async def create_v2_project(
     request: Request,
     filename: str = Query(..., min_length=1),
     book: str = Query(..., min_length=1),
-    review_goal: str = Query(default="完成全书出版审校，输出候选问题、证据、写回结果和审校报告。", min_length=1),
+    review_goal: str = Query(
+        default="完成全书出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。",
+        min_length=1,
+    ),
 ) -> V2ProjectResponse:
     if Path(filename).suffix.lower() == ".doc":
         raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")

@@ -51,7 +51,8 @@ import {
 type SourceType = "selection" | "docx";
 type RunPollResult = "completed" | "timed_out" | "aborted";
 
-const DEFAULT_REVIEW_GOAL = "完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。";
+const DEFAULT_REVIEW_GOAL =
+  "完成出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。";
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
 const RUN_POLL_INTERVAL_MS = 2000;
@@ -1341,7 +1342,7 @@ function translateStage(stage: string): string {
     proofread_pass: "正在检查正文",
     queued: "排队中",
     running: "审校中",
-    style_rule_pass: "正在检查体例",
+    style_rule_pass: "正在检查审读约束",
     succeeded: "已完成",
     terminology_pass: "正在检查术语",
     waiting_for_approval: "等待处理建议",
@@ -1362,8 +1363,8 @@ function translateCategory(category: string): string {
   const labels: Record<string, string> = {
     fact: "事实核查",
     grammar: "语句问题",
-    punctuation: "标点体例",
-    style: "体例建议",
+    punctuation: "历史标点类",
+    style: "审读风险",
     terminology: "术语问题",
     typo: "错别字",
   };
@@ -1374,7 +1375,7 @@ function translatePassName(passName: string): string {
   const labels: Record<string, string> = {
     consistency_pass: "前后一致性",
     proofread_pass: "基础审校",
-    style_rule_pass: "体例规则",
+    style_rule_pass: "审读约束",
     terminology_pass: "术语检查",
   };
   return labels[passName] || passName;
@@ -1416,7 +1417,7 @@ function translateMemoryKind(kind: string): string {
     book_convention: "本书约定",
     observation: "审校记录",
     preference: "编辑偏好",
-    style_rule: "体例规则",
+    style_rule: "审读约定",
     terminology: "术语",
   };
   return labels[kind] || kind;

@@ -222,7 +222,10 @@ V2RunEventName = Literal[
 
 class V2ProjectCreateRequest(BaseModel):
     book: BookInfo
-    review_goal: str = Field(default="完成全书出版审校，输出候选问题、证据、写回结果和审校报告。", min_length=1)
+    review_goal: str = Field(
+        default="完成全书出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。",
+        min_length=1,
+    )
 
 
 class V2SelectionProjectCreateRequest(V2ProjectCreateRequest):

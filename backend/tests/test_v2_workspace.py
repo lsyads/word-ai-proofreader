@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from app.agents import workspace as workspace_agent
 from app.agents import local_rules
 from app.main import app
-from app.schemas import V2CandidateIssue
+from app.schemas import ProofreadIssue, V2CandidateIssue
+from app.services.ai_client import AIProofreadResult
 from app.services import project_store
 
 
@@ -440,6 +441,53 @@ def test_v2_local_style_rules_do_not_emit_candidates_when_ai_returns_empty(monke
 
     candidates = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"]
     assert candidates == []
+
+
+def test_v2_filters_ai_mechanical_copyediting_candidates(monkeypatch):
+    async def fake_proofread_with_ai(*args, **kwargs):
+        return AIProofreadResult(
+            response_id="resp-1",
+            issues=[
+                ProofreadIssue(
+                    id="ai-issue-punctuation",
+                    category="punctuation",
+                    severity="low",
+                    original="中文,逗号",
+                    replacement="中文，逗号",
+                    suggestion="替换符号。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-space",
+                    category="style",
+                    severity="low",
+                    original="A B",
+                    replacement="AB",
+                    suggestion="删除空格。",
+                ),
+            ],
+        )
+
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+    monkeypatch.setattr(workspace_agent.proofread_service, "proofread_with_ai", fake_proofread_with_ai)
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有中文,逗号，也有 A B。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run_status_response = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}")
+    assert run_status_response.status_code == 200
+    run = run_status_response.json()
+    assert run["status"] == "succeeded"
+    assert run["candidate_count"] == 0
+    assert client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"] == []
 
 
 def test_v2_delete_selection_project_removes_related_workspace_data():

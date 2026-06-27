@@ -90,7 +90,7 @@ Word 当前选区或 DOCX 文件
 - `severity` 只允许 `low`、`medium`、`high`。
 - AI 原始输出只需要包含 `id/category/severity/original/replacement/suggestion`，不返回 `start/end/comment/locator`。
 - `replacement` 可为 `null`；空字符串归一为 `null`。不能直接替换正文的问题必须返回 `null`。
-- 如果 `original` 与 `replacement` 去掉所有空白后完全一致，后端过滤该 issue。
+- 如果 `original` 与 `replacement` 去掉所有空白后完全一致，或只改变标点符号、空格、全半角和中英文符号形式，后端过滤该 issue；`category="punctuation"` 也会按机械校对项过滤。
 - `start/end` 由后端按 `original` 在请求文本中计算；找不到时为 `null`。
 - `locator` 是 Word 精准写回定位包；不可靠时为 `null`，前端应用时降级为汇总批注。
 
@@ -187,11 +187,11 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/plan`
 
-返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、体例规则、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语、体例和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成本地非 AI 候选。
+返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、审读约束、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语、本书约定和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成本地非 AI 候选。
 
 ### 本地 pass 规则
 
-V2 本地 pass 入口保留为可审计阶段，不调用模型、不写入完整正文记忆。默认不产出任何本地非 AI 规则候选，包括英文逗号、半角括号、连续标点、术语并用和重复数字一致性风险；这类机械校对属于校对公司任务，不进入责任编辑确认队列。候选字段仍保留 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，用于历史数据、AI 候选和未来扩展兼容。
+V2 本地 pass 入口保留为可审计阶段，不调用模型、不写入完整正文记忆。默认不产出任何本地非 AI 规则候选。标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，即使 AI 返回也会被后端过滤，不进入责任编辑确认队列。候选字段仍保留 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，用于历史数据、AI 候选和未来扩展兼容。
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
@@ -247,11 +247,11 @@ Request:
 
 ### `GET /api/v2/projects/{project_id}/memory`
 
-返回项目记忆列表。记忆项包含 `memory_id/kind/key/value/source/confidence/created_at/updated_at`，默认保存术语、体例规则、编辑偏好、本书约定或候选摘要，不保存完整正文。
+返回项目记忆列表。记忆项包含 `memory_id/kind/key/value/source/confidence/created_at/updated_at`，默认保存术语、审读约定、编辑偏好、本书约定或候选摘要，不保存完整正文。
 
 ### `POST /api/v2/projects/{project_id}/memory`
 
-手动新增项目记忆。Request 包含 `kind/key/value/source/confidence`，用于把责任编辑确认过的术语、体例或本书约定写入后续 Agent run 上下文。
+手动新增项目记忆。Request 包含 `kind/key/value/source/confidence`，用于把责任编辑确认过的术语、审读约定或本书约定写入后续 Agent run 上下文。
 
 ### `DELETE /api/v2/projects/{project_id}/memory/{memory_id}`
 
@@ -671,8 +671,8 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
-- 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异 issue 被过滤。
-- 默认不产出本地非 AI 规则候选；英文逗号、半角括号、连续标点、术语并用和重复数字一致性风险不会由本地规则进入确认队列。
+- 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异、纯符号差异和 `punctuation` 类 issue 被过滤。
+- 默认不产出本地非 AI 规则候选；标点符号、空格、全半角和中英文符号转换等机械校对项不会进入责任编辑确认队列。
 - `terminology_pass`、`style_rule_pass` 和 `consistency_pass` 阶段入口保留，候选主要来自 AI 审校、编辑记忆或未来扩展能力。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - 当前选区 `> 7000` 字时创建分块任务；全书正文上传 `.docx` 创建 DOCX 文件任务；默认 `chunk_size=5000`。

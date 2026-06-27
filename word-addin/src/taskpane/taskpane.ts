@@ -1,4 +1,4 @@
-/* global AbortController, AbortSignal, File, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Office, document, localStorage, window */
+/* global AbortController, AbortSignal, File, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, Office, document, window */
 
 import {
   createSession,
@@ -54,7 +54,6 @@ type RunPollResult = "completed" | "timed_out" | "aborted";
 const DEFAULT_REVIEW_GOAL = "完成出版审校，找出明显错别字、语病、体例问题和上下文一致性风险。";
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
-const LAST_PROJECT_ID_KEY = "docpilot_v2_last_project_id";
 const RUN_POLL_INTERVAL_MS = 2000;
 const RUN_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const TERMINAL_RUN_STATUSES = new Set([
@@ -198,11 +197,6 @@ async function initializeProjects() {
   const abortController = new AbortController();
   try {
     await loadRecentProjects(abortController.signal);
-    const lastProjectId = localStorage.getItem(LAST_PROJECT_ID_KEY);
-    if (lastProjectId && recentProjects.some((project) => project.project_id === lastProjectId)) {
-      await loadProject(lastProjectId, abortController.signal);
-      showMessage("已恢复最近一次审校。", "success");
-    }
   } catch (error) {
     appendDebugLog("warn", "加载最近项目失败", { error: getErrorMessage(error) });
   } finally {
@@ -261,7 +255,6 @@ async function createProjectForCurrentInputs(signal: AbortSignal) {
   }
   currentDocumentMap = await getV2DocumentMap(currentProject.project_id, signal);
   currentPlan = await getV2ReviewPlan(currentProject.project_id, signal);
-  localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
   await loadRecentProjects(signal);
 }
 
@@ -329,7 +322,6 @@ async function deleteProject(projectId: string) {
     await deleteV2Project(projectId, abortController.signal);
     if (currentProject?.project_id === projectId) {
       resetProjectState();
-      localStorage.removeItem(LAST_PROJECT_ID_KEY);
       await clearTrackedSelectionRange();
     }
     await loadRecentProjects(abortController.signal);
@@ -374,7 +366,6 @@ async function loadProject(projectId: string, signal: AbortSignal) {
     currentRun = await getV2Run(currentProject.project_id, currentProject.latest_run_id, signal);
   }
   await refreshWorkspaceData(signal);
-  localStorage.setItem(LAST_PROJECT_ID_KEY, currentProject.project_id);
 }
 
 async function pollRunUntilFinished(

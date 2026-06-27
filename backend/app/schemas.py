@@ -197,6 +197,18 @@ class AgentRunTraceResponse(BaseModel):
     chunks: list[AgentChunkTraceResponse]
 
 
+class AITimeoutEstimate(BaseModel):
+    timeout_seconds: float = Field(..., ge=0)
+    started_at: str
+    deadline_at: str
+    estimated_input_tokens: int = Field(..., ge=0)
+    estimated_output_tokens: int = Field(..., ge=0)
+    estimated_total_tokens: int = Field(..., ge=0)
+    token_units: int = Field(..., ge=1)
+    proofread_mode: Literal["fast", "thinking"]
+    reasoning_enabled: bool
+
+
 V2ProjectStatus = Literal["created", "running", "waiting_for_approval", "succeeded", "written", "failed", "cancelled"]
 V2RunStatus = Literal["queued", "running", "waiting_for_approval", "succeeded", "partial_succeeded", "failed", "cancelled"]
 V2CandidateStatus = Literal["pending", "approved", "rejected", "deferred", "written"]
@@ -338,6 +350,7 @@ class V2RunResponse(BaseModel):
     error_message: str | None = None
     created_at: str
     updated_at: str
+    current_timeout: AITimeoutEstimate | None = None
 
 
 class V2CandidateIssue(BaseModel):

@@ -27,6 +27,7 @@ ProofreadMode = Literal["fast", "thinking"]
 ChatDialect = Literal["default", "xiaomimimo"]
 DEFAULT_TEMPERATURE = 0.2
 logger = logging.getLogger(__name__)
+_TOKENIZER_UNAVAILABLE_MODELS: set[str] = set()
 
 
 class AIClientError(RuntimeError):
@@ -43,6 +44,28 @@ class AIProofreadResult:
 class AIStreamEvent:
     event: str
     data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AIRequestTimeoutEstimate:
+    timeout_seconds: float
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_total_tokens: int
+    token_units: int
+    proofread_mode: ProofreadMode
+    reasoning_enabled: bool
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "timeout_seconds": self.timeout_seconds,
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "estimated_output_tokens": self.estimated_output_tokens,
+            "estimated_total_tokens": self.estimated_total_tokens,
+            "token_units": self.token_units,
+            "proofread_mode": self.proofread_mode,
+            "reasoning_enabled": self.reasoning_enabled,
+        }
 
 
 BASE_SYSTEM_PROMPT = """
@@ -314,6 +337,56 @@ async def stream_proofread_with_ai(
                     raise AIClientError(f"AI provider Responses API returned {event_name}")
 
 
+def estimate_proofread_request_timeout(
+    text: str,
+    book: BookInfo,
+    settings: Settings | None = None,
+    ai_profile_id: str | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> AIRequestTimeoutEstimate:
+    settings = settings or get_settings()
+    try:
+        profile = resolve_ai_profile(settings, ai_profile_id)
+        provider_api = resolve_provider_api(profile, provider_api)
+    except AIProfileError as exc:
+        raise AIClientError(str(exc)) from exc
+
+    if provider_api == "chat":
+        payload = _build_chat_payload(
+            text,
+            book,
+            settings,
+            profile,
+            proofread_mode=proofread_mode,
+            reasoning_enabled=reasoning_enabled,
+            temperature=temperature,
+        )
+        timeout_seconds, timeout_meta = _chat_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    else:
+        payload = _build_responses_payload(
+            text,
+            book,
+            settings,
+            profile,
+            proofread_mode=proofread_mode,
+            temperature=temperature,
+        )
+        timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+
+    return AIRequestTimeoutEstimate(
+        timeout_seconds=timeout_seconds,
+        estimated_input_tokens=timeout_meta["estimated_input_tokens"],
+        estimated_output_tokens=timeout_meta["estimated_output_tokens"],
+        estimated_total_tokens=timeout_meta["estimated_total_tokens"],
+        token_units=timeout_meta["token_units"],
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+    )
+
+
 def _ensure_responses_api(profile: AIProfile) -> None:
     _ensure_api_key(profile)
 
@@ -530,19 +603,51 @@ def _coerce_int(value: Any) -> int:
 
 
 def _count_text_tokens(model: str, text: str) -> int:
-    return len(_token_encoding(model).encode(text))
+    if model in _TOKENIZER_UNAVAILABLE_MODELS:
+        return _approximate_token_count(text)
+    try:
+        return len(_token_encoding(model).encode(text))
+    except Exception as exc:
+        _TOKENIZER_UNAVAILABLE_MODELS.add(model)
+        logger.warning(
+            "tiktoken encoding unavailable, using approximate token count model=%s error_type=%s",
+            model,
+            type(exc).__name__,
+        )
+        return _approximate_token_count(text)
 
 
 def _count_chat_tokens(model: str, messages: list[Any]) -> int:
-    encoding = _token_encoding(model)
-    content_tokens = 0
-    message_count = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        message_count += 1
-        content_tokens += len(encoding.encode(_coerce_string(message.get("content", ""))))
-    return content_tokens + 4 * message_count + 2
+    if model in _TOKENIZER_UNAVAILABLE_MODELS:
+        content = "\n".join(
+            _coerce_string(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict)
+        )
+        return _approximate_token_count(content) + 4 * len(messages) + 2
+    try:
+        encoding = _token_encoding(model)
+        content_tokens = 0
+        message_count = 0
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_count += 1
+            content_tokens += len(encoding.encode(_coerce_string(message.get("content", ""))))
+        return content_tokens + 4 * message_count + 2
+    except Exception as exc:
+        _TOKENIZER_UNAVAILABLE_MODELS.add(model)
+        logger.warning(
+            "tiktoken chat encoding unavailable, using approximate token count model=%s error_type=%s",
+            model,
+            type(exc).__name__,
+        )
+        content = "\n".join(
+            _coerce_string(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict)
+        )
+        return _approximate_token_count(content) + 4 * len(messages) + 2
 
 
 def _token_encoding(model: str) -> tiktoken.Encoding:
@@ -550,6 +655,10 @@ def _token_encoding(model: str) -> tiktoken.Encoding:
         return tiktoken.encoding_for_model(model)
     except KeyError:
         return tiktoken.get_encoding("cl100k_base")
+
+
+def _approximate_token_count(text: str) -> int:
+    return max(1, math.ceil(len(text) / 2))
 
 
 def _build_system_prompt(proofread_mode: ProofreadMode) -> str:

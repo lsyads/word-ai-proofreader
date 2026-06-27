@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.schemas import (
+    AITimeoutEstimate,
     BookInfo,
     V2CandidateIssue,
     V2DocumentMapResponse,
@@ -353,6 +354,7 @@ def require_run(project_id: str, run_id: str, settings: Settings | None = None) 
         error_message=row[8],
         created_at=row[9],
         updated_at=row[10],
+        current_timeout=_current_timeout_for_run(project_id, run_id, row[2], settings),
     )
 
 
@@ -1086,6 +1088,62 @@ def _run_count(project_id: str, settings: Settings | None = None) -> int:
     with _connect(settings) as connection:
         row = connection.execute("SELECT COUNT(*) FROM v2_runs WHERE project_id = ?", (project_id,)).fetchone()
     return int(row[0]) if row else 0
+
+
+def _current_timeout_for_run(
+    project_id: str,
+    run_id: str,
+    status: str,
+    settings: Settings | None = None,
+) -> AITimeoutEstimate | None:
+    if status not in ACTIVE_RUN_STATUSES:
+        return None
+
+    with _connect(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT event, data_json
+            FROM v2_run_events
+            WHERE project_id = ? AND run_id = ?
+            ORDER BY id DESC
+            """,
+            (project_id, run_id),
+        ).fetchall()
+
+    finished_keys: set[tuple[int, int | None]] = set()
+    for event, data_json in rows:
+        try:
+            data = json.loads(data_json)
+        except json.JSONDecodeError:
+            continue
+        key = _chunk_event_key(data)
+        if key is None:
+            continue
+        if event in {"tool_completed", "error"}:
+            finished_keys.add(key)
+            continue
+        if event in {"tool_started", "chunk_retrying"}:
+            if key in finished_keys:
+                return None
+            timeout = data.get("timeout")
+            if not isinstance(timeout, dict):
+                return None
+            try:
+                return AITimeoutEstimate.model_validate(timeout)
+            except ValueError:
+                return None
+
+    return None
+
+
+def _chunk_event_key(data: dict[str, Any]) -> tuple[int, int | None] | None:
+    if data.get("tool_name") != "proofread_document_chunk":
+        return None
+    chunk_index = data.get("chunk_index")
+    if not isinstance(chunk_index, int):
+        return None
+    retry_count = data.get("retry_count")
+    return chunk_index, retry_count if isinstance(retry_count, int) else None
 
 
 def _now_iso() -> str:

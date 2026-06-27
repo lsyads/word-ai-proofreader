@@ -6,7 +6,13 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, _dynamic_timeout, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import (
+    AIClientError,
+    _dynamic_timeout,
+    estimate_proofread_request_timeout,
+    proofread_with_ai,
+    stream_proofread_with_ai,
+)
 from app.settings import Settings
 
 
@@ -222,6 +228,29 @@ def test_dynamic_timeout_includes_output_token_limit():
     assert metadata["estimated_output_tokens"] == 8192
     assert metadata["estimated_total_tokens"] == 9192
     assert metadata["token_units"] == 10
+
+
+def test_proofread_timeout_estimate_exposes_safe_metadata():
+    estimate = estimate_proofread_request_timeout(
+        "这是一段文本。",
+        book(),
+        settings=settings(),
+        proofread_mode="thinking",
+        reasoning_enabled=True,
+        temperature=0.6,
+    )
+
+    payload = estimate.model_dump()
+    assert payload["timeout_seconds"] >= 60
+    assert payload["estimated_input_tokens"] > 0
+    assert payload["estimated_output_tokens"] == 16384
+    assert payload["estimated_total_tokens"] >= payload["estimated_output_tokens"]
+    assert payload["token_units"] >= 17
+    assert payload["proofread_mode"] == "thinking"
+    assert payload["reasoning_enabled"] is True
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "这是一段文本" not in serialized
+    assert "test-key" not in serialized
 
 
 def test_dynamic_timeout_caps_at_configured_maximum():

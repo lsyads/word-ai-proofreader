@@ -201,7 +201,7 @@ V2 当前审校计划不展示本地非 AI 规则 pass。默认不产出任何�
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
-查询 V2 run 状态、chunk 统计和候选问题数量。
+查询 V2 run 状态、chunk 统计和候选问题数量。运行中如果后端已经开始当前分块 AI 请求，响应可包含 `current_timeout`，用于前端显示当前分块动态等待倒计时；字段来自 run event 中的安全摘要，不包含正文、prompt、payload、API Key、Authorization 或 Bearer token。
 
 V2 插件在项目 run 运行中轮询该接口，最长自动轮询 60 分钟。运行中展示 `total_chunks/completed_chunks/failed_chunks` 派生的分块进度：`completed_chunks + failed_chunks` 作为已处理块数，当前块显示为下一块待完成分块；轮询达到 60 分钟仍未终态时只停止前端自动刷新，继续展示后台仍可能运行和手动刷新/继续等待入口，不把任务标记为失败。
 
@@ -213,7 +213,7 @@ V2 插件在项目 run 运行中轮询该接口，最长自动轮询 60 分钟�
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/events`
 
-以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`retry_queued`、`chunk_retrying`、`writeback_completed`、`report_ready` 和 `error`。重试相关事件记录 `chunk_index/retry_count/elapsed_seconds/error_type/message` 等摘要字段，不记录完整正文或密钥。
+以 SSE 回放该 run 的事件。事件名包括 `plan_created`、`pass_started`、`pass_completed`、`tool_started`、`tool_completed`、`candidate_found`、`candidate_merged`、`candidate_evaluated`、`memory_updated`、`waiting_for_approval`、`review_completed`、`retry_queued`、`chunk_retrying`、`writeback_completed`、`report_ready` 和 `error`。`tool_started` 和重试用的 `chunk_retrying` 可在 `data.timeout` 中记录当前 AI 请求的动态 timeout 摘要：`timeout_seconds/started_at/deadline_at/estimated_input_tokens/estimated_output_tokens/estimated_total_tokens/token_units/proofread_mode/reasoning_enabled`。重试相关事件记录 `chunk_index/retry_count/elapsed_seconds/error_type/message` 等摘要字段，不记录完整正文或密钥。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}/trace`
 
@@ -696,7 +696,7 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - V2 当前审校计划只展示实际执行阶段；候选主要来自 AI 审校、编辑记忆或未来扩展能力。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
 - V2 插件主链路中，当前选区和全书 `.docx` 都先创建 V2 项目，再启动项目 run；兼容底层直接 API 仍保留 `/api/proofread/tasks` 分块任务和 `/api/proofread/docx/tasks` DOCX 文件任务，默认 `chunk_size=5000`。
-- V2 插件自动轮询项目 run 最长 60 分钟，并在“本次进度”和运行中的建议区域按 chunk 展示总数、已完成、失败、当前处理块和百分比；轮询超时是可恢复等待态，不等同于后端失败。
+- V2 插件自动轮询项目 run 最长 60 分钟，并在“本次进度”和运行中的建议区域按 chunk 展示总数、已完成、失败、当前处理块、百分比和当前分块 AI 请求动态 timeout 倒计时；轮询超时是可恢复等待态，不等同于后端失败。
 - 分块任务返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；SSE 不可用时前端轮询任务状态。
 - 兼容底层分块任务当前 chunk 超过前端等待阈值后可重试当前分块；终态任务存在失败 chunk 时可重试失败分块。

@@ -5,10 +5,12 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.agents import memory, planner
 from app.schemas import (
+    AITimeoutEstimate,
     BookInfo,
     ChunkedProofreadIssue,
     ProofreadIssue,
@@ -313,6 +315,7 @@ class AgentWorkspaceRunner:
             {"pass_name": "proofread_pass", "chunk_count": len(prepared.chunks)},
         )
         for chunk in prepared.chunks:
+            timeout = _timeout_estimate_event_data(chunk.text, project.book, request)
             project_store.update_run(
                 project.project_id,
                 run_id,
@@ -332,6 +335,7 @@ class AgentWorkspaceRunner:
                     completed_chunks=completed_chunks,
                     failed_chunks=failed_chunks,
                     candidate_count=len(candidates),
+                    timeout=timeout,
                 ),
             )
             try:
@@ -453,6 +457,7 @@ class AgentWorkspaceRunner:
 
         for chunk in retry_chunks:
             retry_count = retry_counts.get(chunk.index, 0) + 1
+            timeout = _timeout_estimate_event_data(chunk.text, project.book, retry_request)
             started_at = time.monotonic()
             project_store.add_run_event(
                 project_id,
@@ -465,6 +470,7 @@ class AgentWorkspaceRunner:
                     failed_chunks=len(failed_indices),
                     candidate_count=len(existing_candidates) + len(new_candidates),
                     retry_count=retry_count,
+                    timeout=timeout,
                     message=f"正在重新审校第 {chunk.index + 1}/{len(prepared.chunks)} 块。",
                 ),
             )
@@ -872,6 +878,7 @@ def _chunk_event_data(
     retry_count: int | None = None,
     elapsed_seconds: float | None = None,
     error_type: str | None = None,
+    timeout: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "tool_name": "proofread_document_chunk",
@@ -891,7 +898,32 @@ def _chunk_event_data(
         data["elapsed_seconds"] = elapsed_seconds
     if error_type is not None:
         data["error_type"] = error_type
+    if timeout is not None:
+        data["timeout"] = timeout
     return data
+
+
+def _timeout_estimate_event_data(
+    text: str,
+    book: BookInfo,
+    request: V2RunCreateRequest,
+) -> dict[str, Any]:
+    started_at = datetime.now(UTC)
+    estimate = proofread_service.estimate_proofread_text_timeout(
+        text,
+        book,
+        ai_profile_id=request.ai_profile_id,
+        provider_api=request.provider_api,
+        proofread_mode=request.proofread_mode,
+        reasoning_enabled=request.reasoning_enabled,
+        temperature=request.temperature,
+    )
+    deadline_at = started_at + timedelta(seconds=estimate.timeout_seconds)
+    return AITimeoutEstimate(
+        **estimate.model_dump(),
+        started_at=started_at.isoformat(),
+        deadline_at=deadline_at.isoformat(),
+    ).model_dump()
 
 
 def _elapsed_seconds(started_at: float) -> float:

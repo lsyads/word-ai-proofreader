@@ -25,6 +25,7 @@ import {
 } from "./api";
 import { appendDebugLog, clearDebugLog } from "./debug";
 import {
+  AITimeoutEstimate,
   AIProfile,
   ApplicationMode,
   BookInfo,
@@ -119,6 +120,7 @@ let runPollingTimedOut = false;
 let runPollAbortController: AbortController | null = null;
 let runPollingProjectId: string | null = null;
 let runPollingRunId: string | null = null;
+let runTimeoutTickerId: number | null = null;
 let candidatePage = 1;
 const candidatePageSize = 20;
 let candidateTotal = 0;
@@ -890,6 +892,8 @@ function renderWorkspace() {
   renderMemory();
   renderReport();
   updateButtons();
+  syncRunTimeoutTicker();
+  refreshRunTimeoutCountdown();
 }
 
 function renderProjectBadge() {
@@ -1449,6 +1453,7 @@ function stopBusy() {
 
 function resetProjectState() {
   stopRunPolling();
+  stopRunTimeoutTicker();
   currentProject = null;
   currentDocumentMap = null;
   currentPlan = null;
@@ -1492,6 +1497,8 @@ function renderRunProgress(run: V2Run | null): string {
   if (!progress) {
     return "";
   }
+  const timeout = getActiveRunTimeout(run);
+  const timeoutState = timeout ? formatRunTimeoutCountdown(timeout) : null;
   return `
     <div class="run-progress" aria-label="审校分块进度">
       <div class="run-progress-header">
@@ -1502,6 +1509,11 @@ function renderRunProgress(run: V2Run | null): string {
         <div class="run-progress-value" style="width: ${progress.percent}%"></div>
       </div>
       <div class="run-progress-meta">${escapeHtml(progress.description)}</div>
+      ${
+        timeoutState
+          ? `<div class="run-progress-timeout${timeoutState.expired ? " is-expired" : ""}" data-run-timeout-countdown>${escapeHtml(timeoutState.text)}</div>`
+          : ""
+      }
     </div>
   `;
 }
@@ -1534,6 +1546,76 @@ function getRunProgress(run: V2Run | null): {
 
 function clampCount(value: number, max: number): number {
   return Math.max(0, Math.min(max, value || 0));
+}
+
+function getActiveRunTimeout(run: V2Run | null): AITimeoutEstimate | null {
+  if (!run || TERMINAL_RUN_STATUSES.has(run.status) || !run.current_timeout) {
+    return null;
+  }
+  const deadlineMs = Date.parse(run.current_timeout.deadline_at);
+  return Number.isFinite(deadlineMs) ? run.current_timeout : null;
+}
+
+function syncRunTimeoutTicker() {
+  if (getActiveRunTimeout(currentRun)) {
+    if (runTimeoutTickerId === null) {
+      runTimeoutTickerId = window.setInterval(refreshRunTimeoutCountdown, 1000);
+    }
+    return;
+  }
+  stopRunTimeoutTicker();
+}
+
+function stopRunTimeoutTicker() {
+  if (runTimeoutTickerId !== null) {
+    window.clearInterval(runTimeoutTickerId);
+    runTimeoutTickerId = null;
+  }
+}
+
+function refreshRunTimeoutCountdown() {
+  const timeout = getActiveRunTimeout(currentRun);
+  const elements = document.querySelectorAll<HTMLElement>("[data-run-timeout-countdown]");
+  if (!timeout) {
+    elements.forEach((element) => {
+      element.textContent = "";
+      element.classList.remove("is-expired");
+    });
+    return;
+  }
+  const state = formatRunTimeoutCountdown(timeout);
+  elements.forEach((element) => {
+    element.textContent = state.text;
+    element.classList.toggle("is-expired", state.expired);
+  });
+}
+
+function formatRunTimeoutCountdown(timeout: AITimeoutEstimate): { text: string; expired: boolean } {
+  const deadlineMs = Date.parse(timeout.deadline_at);
+  const totalSeconds = Math.max(0, Math.round(timeout.timeout_seconds || 0));
+  const remainingSeconds = Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000));
+  if (remainingSeconds > 0) {
+    return {
+      text: `当前分块预计等待：剩余 ${formatDuration(remainingSeconds)} / 共 ${formatDuration(totalSeconds)}`,
+      expired: false,
+    };
+  }
+  return {
+    text: "当前分块已超过预计等待上限，后端可能仍在等待模型响应。",
+    expired: true,
+  };
+}
+
+function formatDuration(seconds: number): string {
+  const normalized = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(normalized / 60);
+  const remainingSeconds = normalized % 60;
+  if (minutes < 60) {
+    return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}:${String(remainingMinutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function summaryItem(label: string, value: string): string {

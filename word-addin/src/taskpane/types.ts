@@ -214,6 +214,18 @@ export interface V2ReviewPlan {
   steps: V2ReviewPlanStep[];
 }
 
+export interface AITimeoutEstimate {
+  timeout_seconds: number;
+  started_at: string;
+  deadline_at: string;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_total_tokens: number;
+  token_units: number;
+  proofread_mode: "fast" | "thinking";
+  reasoning_enabled: boolean;
+}
+
 export interface V2Run {
   project_id: string;
   run_id: string;
@@ -226,6 +238,7 @@ export interface V2Run {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+  current_timeout?: AITimeoutEstimate | null;
 }
 
 export interface V2CandidateIssue {

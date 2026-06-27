@@ -9,8 +9,10 @@ from typing import Literal
 from app.schemas import BookInfo, ProofreadIssue, ProofreadLocator
 from app.services.ai_client import (
     AIClientError,
+    AIRequestTimeoutEstimate,
     AIStreamEvent,
     DEFAULT_TEMPERATURE,
+    estimate_proofread_request_timeout,
     proofread_with_ai,
     stream_proofread_with_ai,
 )
@@ -111,6 +113,28 @@ async def proofread_text_with_context(
 
     logger.info("proofread service using mock issues")
     return locate_issues(text, build_mock_issues(text))
+
+
+def estimate_proofread_text_timeout(
+    text: str,
+    book: BookInfo,
+    ai_profile_id: str | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> AIRequestTimeoutEstimate:
+    settings = get_settings()
+    return estimate_proofread_request_timeout(
+        text,
+        book,
+        settings=settings,
+        ai_profile_id=ai_profile_id,
+        provider_api=provider_api,
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+        temperature=temperature,
+    )
 
 
 async def stream_proofread_text(

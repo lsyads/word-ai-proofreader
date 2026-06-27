@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -625,6 +626,7 @@ def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
     assert run["completed_chunks"] == 1
     assert run["failed_chunks"] == 1
     assert run["candidate_count"] == 1
+    assert run["current_timeout"] is None
 
     trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
     assert trace_response.status_code == 200
@@ -636,6 +638,14 @@ def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
     assert len(tool_completed) == 1
     assert errors
     assert tool_started[0]["data"]["total_chunks"] == 2
+    timeout = tool_started[0]["data"]["timeout"]
+    assert timeout["timeout_seconds"] >= 60
+    assert timeout["estimated_input_tokens"] > 0
+    assert timeout["estimated_output_tokens"] == 8192
+    assert timeout["estimated_total_tokens"] >= timeout["estimated_output_tokens"]
+    assert timeout["proofread_mode"] == "fast"
+    assert timeout["reasoning_enabled"] is False
+    assert datetime.fromisoformat(timeout["deadline_at"]) > datetime.fromisoformat(timeout["started_at"])
     assert tool_completed[0]["data"]["completed_chunks"] == 1
     assert tool_completed[0]["data"]["failed_chunks"] == 0
     assert tool_completed[0]["data"]["candidate_count"] == 1
@@ -647,6 +657,78 @@ def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
     assert "secret-token" not in serialized_trace
     assert "甲甲甲甲" not in serialized_trace
     assert "乙乙乙乙" not in serialized_trace
+
+
+def test_v2_run_exposes_current_timeout_for_unfinished_chunk_event():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这是一段需要等待模型响应的文字。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    run = workspace_agent.workspace_runner.start_project_run(
+        project_id,
+        V2RunCreateRequest(proofread_mode="thinking", reasoning_enabled=True),
+    )
+    project_store.update_run(project_id, run.run_id, status="running", stage="proofread_pass")
+    started_at = datetime.now(UTC)
+    deadline_at = started_at + timedelta(seconds=135)
+    timeout = {
+        "timeout_seconds": 135,
+        "started_at": started_at.isoformat(),
+        "deadline_at": deadline_at.isoformat(),
+        "estimated_input_tokens": 1000,
+        "estimated_output_tokens": 0,
+        "estimated_total_tokens": 1000,
+        "token_units": 1,
+        "proofread_mode": "thinking",
+        "reasoning_enabled": True,
+    }
+    project_store.add_run_event(
+        project_id,
+        run.run_id,
+        "tool_started",
+        {
+            "tool_name": "proofread_document_chunk",
+            "pass_name": "proofread_pass",
+            "chunk_index": 0,
+            "current_chunk": 1,
+            "total_chunks": 1,
+            "completed_chunks": 0,
+            "failed_chunks": 0,
+            "candidate_count": 0,
+            "timeout": timeout,
+        },
+    )
+
+    active = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert active["current_timeout"] == timeout
+
+    project_store.add_run_event(
+        project_id,
+        run.run_id,
+        "tool_completed",
+        {
+            "tool_name": "proofread_document_chunk",
+            "pass_name": "proofread_pass",
+            "chunk_index": 0,
+            "current_chunk": 1,
+            "total_chunks": 1,
+            "completed_chunks": 1,
+            "failed_chunks": 0,
+            "candidate_count": 0,
+        },
+    )
+    completed_chunk = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert completed_chunk["current_timeout"] is None
+
+    project_store.update_run(project_id, run.run_id, status="succeeded", stage="succeeded")
+    terminal = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert terminal["current_timeout"] is None
 
 
 def test_v2_retry_failed_chunks_merges_candidates_and_marks_written_output_stale(monkeypatch):

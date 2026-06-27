@@ -4,7 +4,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from app.agents import local_rules, memory, planner
+from app.agents import memory, planner
 from app.schemas import (
     BookInfo,
     ChunkedProofreadIssue,
@@ -129,7 +129,6 @@ class AgentWorkspaceRunner:
     async def _execute_project_run(self, project_id: str, run_id: str, request: V2RunCreateRequest) -> None:
         project = project_store.require_project(project_id)
         prepared = self._prepare_source(project)
-        plan = project_store.get_review_plan(project_id)
         candidates: list[V2CandidateIssue] = []
         completed_chunks = 0
         failed_chunks = 0
@@ -142,16 +141,6 @@ class AgentWorkspaceRunner:
                 request=request,
                 prepared=prepared,
             )
-            for step in plan.steps:
-                if not step.enabled or step.step_id in {"plan_review", "proofread_pass", "human_approval"}:
-                    continue
-                if step.step_id == "terminology_pass":
-                    candidates.extend(self._run_terminology_pass(project, run_id, prepared))
-                elif step.step_id == "style_rule_pass":
-                    candidates.extend(self._run_style_rule_pass(project, run_id, prepared))
-                elif step.step_id == "consistency_pass":
-                    candidates.extend(self._run_consistency_pass(project, run_id, prepared))
-
             project_store.update_run(project_id, run_id, status="running", stage="merge_candidates")
             project_store.add_run_event(project_id, run_id, "pass_started", {"pass_name": "merge_candidates"})
             before_merge = len(candidates)
@@ -326,78 +315,6 @@ class AgentWorkspaceRunner:
         )
         return candidates, completed_chunks, failed_chunks
 
-    def _run_terminology_pass(
-        self,
-        project: project_store.StoredProject,
-        run_id: str,
-        prepared: PreparedSource,
-    ) -> list[V2CandidateIssue]:
-        project_store.update_run(project.project_id, run_id, status="running", stage="terminology_pass")
-        project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "terminology_pass"})
-        candidates = [
-            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
-            for match in local_rules.run_terminology_rules(prepared.source_text)
-        ]
-        for candidate in candidates:
-            self._add_candidate_found_event(candidate)
-        project_store.add_run_event(
-            project.project_id,
-            run_id,
-            "pass_completed",
-            {"pass_name": "terminology_pass", "candidate_count": len(candidates)},
-        )
-        return candidates
-
-    def _run_style_rule_pass(
-        self,
-        project: project_store.StoredProject,
-        run_id: str,
-        prepared: PreparedSource,
-    ) -> list[V2CandidateIssue]:
-        project_store.update_run(project.project_id, run_id, status="running", stage="style_rule_pass")
-        project_store.add_run_event(project.project_id, run_id, "pass_started", {"pass_name": "style_rule_pass"})
-        candidates = [
-            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
-            for match in local_rules.run_style_rules(prepared.source_text)
-        ]
-        for candidate in candidates:
-            self._add_candidate_found_event(candidate)
-        project_store.add_run_event(
-            project.project_id,
-            run_id,
-            "pass_completed",
-            {"pass_name": "style_rule_pass", "candidate_count": len(candidates)},
-        )
-        return candidates
-
-    def _run_consistency_pass(
-        self,
-        project: project_store.StoredProject,
-        run_id: str,
-        prepared: PreparedSource,
-    ) -> list[V2CandidateIssue]:
-        project_store.update_run(project.project_id, run_id, status="running", stage="consistency_pass")
-        project_store.add_run_event(
-            project.project_id,
-            run_id,
-            "pass_started",
-            {"pass_name": "consistency_pass", "scope": project.source_type},
-        )
-        candidates = [
-            _candidate_from_local_rule(project.project_id, run_id, match, prepared.source_text)
-            for match in local_rules.run_consistency_rules(
-                prepared.source_text,
-                source_type=project.source_type,
-            )
-        ]
-        project_store.add_run_event(
-            project.project_id,
-            run_id,
-            "pass_completed",
-            {"pass_name": "consistency_pass", "candidate_count": len(candidates)},
-        )
-        return candidates
-
     def _prepare_source(self, project: project_store.StoredProject) -> PreparedSource:
         if project.source_type == "selection":
             source_text = project.source_bytes.decode("utf-8")
@@ -523,60 +440,6 @@ def _candidate_from_issue(
         evaluation_note=None,
         created_at=now,
         updated_at=now,
-    )
-
-
-def _candidate_from_local_rule(
-    project_id: str,
-    run_id: str,
-    match: local_rules.LocalRuleMatch,
-    document_text: str,
-) -> V2CandidateIssue:
-    issue = _rule_issue(
-        category=match.category,
-        severity=match.severity,
-        original=match.original,
-        replacement=match.replacement,
-        suggestion=match.suggestion,
-        start=match.start,
-        rule_id=match.rule_id,
-    )
-    issue.global_end = match.end
-    return _candidate_from_issue(
-        project_id,
-        run_id,
-        issue,
-        document_text,
-        pass_name=match.pass_name,
-        confidence=match.confidence,
-        evidence_kind=match.evidence_kind,
-        rule_id=match.rule_id,
-    )
-
-
-def _rule_issue(
-    *,
-    category: str,
-    severity: str,
-    original: str,
-    replacement: str | None,
-    suggestion: str,
-    start: int,
-    rule_id: str,
-) -> ChunkedProofreadIssue:
-    return ChunkedProofreadIssue(
-        id=rule_id,
-        category=category,
-        severity=severity,
-        original=original,
-        replacement=replacement,
-        suggestion=suggestion,
-        start=start,
-        end=start + len(original),
-        locator=None,
-        chunk_index=0,
-        global_start=start,
-        global_end=start + len(original),
     )
 
 

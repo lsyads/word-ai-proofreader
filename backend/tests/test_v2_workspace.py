@@ -141,8 +141,13 @@ def test_v2_project_run_approval_writeback_report_and_download():
     plan_response = client.get(f"/api/v2/projects/{project_id}/plan")
     assert plan_response.status_code == 200
     plan_steps = plan_response.json()["steps"]
-    assert any(step["step_id"] == "proofread_pass" for step in plan_steps)
-    assert any(step["step_id"] == "style_rule_pass" for step in plan_steps)
+    assert [step["step_id"] for step in plan_steps] == [
+        "plan_review",
+        "proofread_pass",
+        "merge_candidates",
+        "evaluate_candidates",
+        "human_approval",
+    ]
 
     trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
     assert trace_response.status_code == 200
@@ -206,8 +211,8 @@ def test_v2_candidates_endpoint_paginates_and_filters():
     ]
     candidates.extend(
         [
-            make_candidate(project_id, 26, status="approved", pass_name="style_rule_pass"),
-            make_candidate(project_id, 27, status="pending", pass_name="style_rule_pass"),
+            make_candidate(project_id, 26, status="approved", pass_name="custom_pass"),
+            make_candidate(project_id, 27, status="pending", pass_name="custom_pass"),
         ]
     )
     project_store.save_candidates(candidates)
@@ -235,7 +240,7 @@ def test_v2_candidates_endpoint_paginates_and_filters():
 
     filtered = client.get(
         f"/api/v2/projects/{project_id}/candidates",
-        params={"status": "pending", "pass_name": "style_rule_pass"},
+        params={"status": "pending", "pass_name": "custom_pass"},
     )
     assert filtered.status_code == 200
     filtered_payload = filtered.json()
@@ -413,7 +418,7 @@ def test_v2_docx_repeated_numbers_do_not_create_local_candidates(monkeypatch):
     assert client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"] == []
 
 
-def test_v2_local_style_rules_do_not_emit_candidates_when_ai_returns_empty(monkeypatch):
+def test_v2_local_non_ai_rules_do_not_emit_candidates_when_ai_returns_empty(monkeypatch):
     async def fake_proofread_text_with_context(*args, **kwargs):
         return []
 

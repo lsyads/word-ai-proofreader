@@ -2,7 +2,7 @@
 
 本文是当前 V2.2 Agent 工作台和兼容 V1 底层审校能力的 API 契约来源。其他文档只摘要接口或链接到本文，不重复维护完整 schema。
 
-V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、专项 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为开始审校、本次进度、审校建议、写回和下载审校后文件。
+V2 目标是出版审校 Agent 工作台，可以重新设计 project/session/run/history schema，不要求兼容 V1 本地历史、Agent trace、任务状态、DOCX 结果索引或旧任务快照。当前 V2.2 实现当前选区和 DOCX 审校项目、文档地图、后台 Agent run、审校目标入 prompt、基础语言审校 pass、候选问题确认、项目删除、本书规则/项目记忆、approved 写回、DOCX 下载、报告和脱敏 run event trace；插件 UI 默认收敛为开始审校、本次进度、审校建议、写回和下载审校后文件。
 
 ## 范围
 
@@ -96,9 +96,9 @@ Word 当前选区或 DOCX 文件
 
 ### 分块规则
 
-- 当前选区长度 `<= 7000`：单段审校。
-- 当前选区长度 `> 7000`：分块任务。
-- 全书 `.docx`：始终走 DOCX 文件任务。
+- V2 工作台主链路始终先创建项目：当前选区调用 `POST /api/v2/projects/selection`，全书 `.docx` 调用 `POST /api/v2/projects`，再启动 `/runs`。
+- V2 项目内部复用分块规则：当前选区或 DOCX 抽取文本都会生成文档地图和 chunks，后台 run 在项目范围内分块审校。
+- 兼容底层直接 API 中，`/api/proofread` 可处理短文本，`/api/proofread/tasks` 用于显式分块文本任务，`/api/proofread/docx/tasks` 用于旧 DOCX 文件任务。
 - 默认 `chunk_size=5000`，允许范围 `500..10000`。
 - 分块优先在目标长度前的段落换行和句末标点附近切分；找不到时向后延伸到下一个边界，不硬切自然句。
 - 极端情况下全文无任何边界时，保留剩余文本为一个 chunk。
@@ -110,8 +110,8 @@ Word 当前选区或 DOCX 文件
 - 后端抽取可见文本时同步建立“文本字符范围 -> OOXML 文本节点”映射。AI 仍只返回精简 issue；后端把 issue 绑定到来源 chunk，优先用 chunk 内定位结果，写回前可在该 chunk 内按 `original` 二次精确搜索，再映射回 DOCX 写回，不把 Word 写回 `locator` 交给前端。
 - 分块优先级：先按“章”拆分，再按“节”拆分；仍超过 7000 字时，如果可提取目录样式文本，再用目录小标题辅助拆分；仍超过 7000 字时复用当前选区的段落/句末规则。
 - 批注模式生成 Word 原生批注；修订+批注模式对有 `replacement` 的问题生成 `w:del/w:ins` 原生修订并在 `replacement` 插入文本上附原因批注，无 `replacement` 或无法安全定位时降级为批注或汇总批注。
-- 任务完成后后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口和保留期限。
-- 结果文件保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；后端通过 SQLite 索引恢复重启后的下载能力，过期或文件被外部清理时下载返回明确错误。
+- V2 项目写回完成后，后端按新文件名保存结果，例如 `书稿-AI审校-批注-20260502153000.docx`，插件显示下载入口。V2 写回结果保存在 `AGENT_WORKSPACE_DIR` 的项目输出目录，当前不返回保留期限或过期时间；文件被外部清理时下载返回明确错误。
+- 兼容的 `/api/proofread/docx/tasks` 文件任务结果保存在后端 `DOCX_OUTPUT_DIR`，默认至少保留 7 天；后端通过 SQLite 索引恢复重启后的下载能力，过期或文件被外部清理时下载返回明确错误。
 
 ## API 契约
 
@@ -141,7 +141,7 @@ Query：
 
 Request body：原始 `.docx` 二进制。
 
-Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count`。DOCX 项目的 `source_type` 为 `docx`。
+Response：`V2ProjectResponse`，包含 `project_id/source_type/status/source_filename/text_preview/book/review_goal/created_at/updated_at/run_count/latest_run_id/latest_run_status/latest_run_stage/candidate_count/pending_count/approved_count/output_filename/download_url`。DOCX 项目的 `source_type` 为 `docx`。
 
 ### `POST /api/v2/projects/selection`
 
@@ -187,15 +187,15 @@ Response:
 
 ### `GET /api/v2/projects/{project_id}/plan`
 
-返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示基础审校、术语一致性、审读约束、跨章节一致性、候选归并、evaluator 和人工确认阶段。术语、本书约定和跨章节一致性阶段入口保留，用于后续接入出版规则或项目记忆；默认不生成本地非 AI 候选。
+返回 V2.2 审校计划。`steps[]` 包含 `step_id/title/tool_name/status/description/enabled/reason`，用于展示生成审校计划、基础语言审校、候选归并、evaluator 复核和人工确认阶段。
 
 ### 本地 pass 规则
 
-V2 本地 pass 入口保留为可审计阶段，不调用模型、不写入完整正文记忆。默认不产出任何本地非 AI 规则候选。标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，即使 AI 返回也会被后端过滤，不进入责任编辑确认队列。候选字段仍保留 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，用于历史数据、AI 候选和未来扩展兼容。
+V2 当前审校计划不展示本地非 AI 规则 pass。默认不产出任何本地非 AI 规则候选。标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，即使 AI 返回也会被后端过滤，不进入责任编辑确认队列。候选字段仍保留 `pass_name/rule_id/confidence/evidence_kind/global_start/global_end/replacement`，用于历史数据、AI 候选和未来扩展兼容。
 
 ### `POST /api/v2/projects/{project_id}/runs`
 
-启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/terminology_pass/style_rule_pass/consistency_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
+启动一次 V2.2 Agent run。请求体包含 `session_id/ai_profile_id/provider_api/proofread_mode/reasoning_enabled/temperature`。接口快速返回 `queued` 的 `V2RunResponse`，后端后台执行 `plan_review/proofread_pass/merge_candidates/evaluate_candidates`。完成后如有候选问题，状态进入 `waiting_for_approval` 并进入编辑确认队列；如果候选数为 0，状态为 `succeeded`，表示审校完成且暂无需要确认的问题。
 
 ### `GET /api/v2/projects/{project_id}/runs/{run_id}`
 
@@ -211,7 +211,7 @@ V2 本地 pass 入口保留为可审计阶段，不调用模型、不写入完�
 
 ### `GET /api/v2/projects/{project_id}/candidates`
 
-分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤专项 pass。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分专项 pass、证据类型、可直接替换文本和 evaluator 复核意见。插件把候选显示为“审校建议”，把 `approved/rejected/written` 显示为“已接受/已忽略/已写入”；`needs_human_review=false` 表示 evaluator 未标记为人工重点判断，候选仍必须由编辑接受后才能写回。
+分页查询候选问题队列。Query `page` 默认 1，`page_size` 默认 20、最大 100；可选 `status` 过滤 `pending/approved/rejected/deferred/written`，可选 `pass_name` 过滤候选来源。响应包含 `project_id/candidates/page/page_size/total/total_pages/has_previous/has_next`。V2.2 候选包含 `pass_name/confidence/evidence_kind/rule_id/replacement/needs_human_review/evaluation_note`，用于区分候选来源、证据类型、可直接替换文本和 evaluator 复核意见。插件把候选显示为“审校建议”，把 `approved/rejected/written` 显示为“已接受/已忽略/已写入”；`needs_human_review=false` 表示 evaluator 未标记为人工重点判断，候选仍必须由编辑接受后才能写回。
 
 ### `POST /api/v2/projects/{project_id}/candidates/decisions`
 
@@ -259,7 +259,9 @@ Request:
 
 ### `POST /api/v2/projects/{project_id}/writeback`
 
-DOCX 项目只写回 `approved` 候选问题；没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后 approved 候选变为 `written`，项目状态变为 `written`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+DOCX 项目只写回 `approved` 候选问题；没有 approved 问题时返回 409。请求体包含 `application_mode` 和 `fallback_summary_truncate_enabled`。写回后 approved 候选变为 `written`，项目状态变为 `written`，项目摘要带上 `output_filename/download_url`。Selection 项目调用该接口返回 409，因为当前选区写回必须由 Word 插件通过 Office.js 完成。
+
+Response：`V2WritebackResponse`，包含 `project_id/output_filename/download_url/comment_count/revision_count/fallback_count/failed_count/written_count`。
 
 ### `POST /api/v2/projects/{project_id}/candidates/mark-written`
 
@@ -281,7 +283,7 @@ Response 包含 `project_id/updated_count/candidates`。
 
 ### `GET /api/v2/projects/{project_id}/download`
 
-下载 V2 写回后的 DOCX。尚未写回或文件丢失时返回 404。
+下载 V2 写回后的 DOCX。尚未写回或项目输出文件丢失时返回 404。当前 V2 项目下载不返回 `expires_at` 或 `retention_days`，可下载性以项目 `output_filename` 和输出文件是否存在为准。
 
 ### `POST /api/sessions`
 
@@ -629,9 +631,8 @@ Response:
 
 ```text
 AI_API_KEY=local-omlx-dev-key
-MIMO_API_KEY=...
+MIMO_API_KEY=
 AI_PROVIDER_API=responses
-AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -647,6 +648,8 @@ AGENT_TRACE_DIR=var/agent-traces
 AGENT_WORKSPACE_DIR=var/agent-workspace
 WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
+
+`.env.example` 默认包含 `local-omlx`、`openrouter-qwen`、`xiaomi-mimo` 三个 profile 的 `AI_PROFILES_JSON` 模板；删除或留空 `AI_PROFILES_JSON` 时，后端使用 `AI_API_KEY/OPENAI_API_BASE_URL/OPENAI_MODEL/AI_PROVIDER_API` 生成 `Default AI (.env)`。
 
 - `AI_API_KEY` 为空时走 mock fallback。
 - 不配置 `AI_PROFILES_JSON` 时，后端根据 `AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL` 生成 `default` profile。
@@ -673,20 +676,20 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - AI 输出不含 `start/end` 时，后端按 `original` 计算位置；重复 `original` 按 issue 顺序定位不同 occurrence；找不到时返回 `null`。
 - 有效 `replacement` 被保留；缺失或空字符串归一为 `null`；纯空白差异、纯符号差异和 `punctuation` 类 issue 被过滤。
 - 默认不产出本地非 AI 规则候选；标点符号、空格、全半角和中英文符号转换等机械校对项不会进入责任编辑确认队列。
-- `terminology_pass`、`style_rule_pass` 和 `consistency_pass` 阶段入口保留，候选主要来自 AI 审校、编辑记忆或未来扩展能力。
+- V2 当前审校计划只展示实际执行阶段；候选主要来自 AI 审校、编辑记忆或未来扩展能力。
 - Responses 流式接口返回阶段进度事件和最终 `result` 事件；Chat 模式不走 SSE。
-- 当前选区 `> 7000` 字时创建分块任务；全书正文上传 `.docx` 创建 DOCX 文件任务；默认 `chunk_size=5000`。
+- V2 插件主链路中，当前选区和全书 `.docx` 都先创建 V2 项目，再启动项目 run；兼容底层直接 API 仍保留 `/api/proofread/tasks` 分块任务和 `/api/proofread/docx/tasks` DOCX 文件任务，默认 `chunk_size=5000`。
 - 分块任务返回 `global_start/global_end`，并把 `locator.key_start/key_end` 平移到全文坐标。
 - 任务 SSE 返回分块进度、`heartbeat`、当前块耗时和失败原因；SSE 不可用时前端轮询任务状态。
-- 当前 chunk 超过前端等待阈值后可重试当前分块；终态任务存在失败 chunk 时可重试失败分块。
-- DOCX 文件任务支持同样的当前分块重试和失败分块重试；重试成功后重新生成结果文件。
+- 兼容底层分块任务当前 chunk 超过前端等待阈值后可重试当前分块；终态任务存在失败 chunk 时可重试失败分块。
+- 兼容底层 DOCX 文件任务支持同样的当前分块重试和失败分块重试；重试成功后重新生成结果文件。
 - 部分 chunk 失败但仍有可用结果时，任务状态为 `partial_succeeded`。
-- 点击停止审校会中断前端请求并取消后端异步任务；分块审校保留已收到 issues 供查看和应用。
+- 兼容底层任务支持 `DELETE` 标记取消；当前 V2 插件不提供“停止审校”按钮，长时间轮询超时后展示刷新进度和继续等待入口。
 - Word 中书名为空或空选区时显示错误，不调用审校接口。
 - 后端返回非空候选或兼容 `issues[]` 时，插件只展示审校建议；编辑接受建议并点击写回按钮后才写回 Word。
-- 全书 `.docx` 写回完成后插件显示后端保存的新文件名、保留期限和“下载审校后文件”按钮。
+- 全书 `.docx` V2 项目写回完成后插件显示后端保存的新文件名和“下载审校后文件”按钮；当前 V2 项目响应不显示保留期限。
 - 单条“定位”可选中对应原文；重复原文优先通过 `locator.key` 和 key 内 `original` 小范围搜索定位。
 - 批注模式不改正文；修订+批注模式生成可接受/拒绝的 Word 修订，并把原因批注锚定到插入后的 `replacement` 文本，完成后恢复原修订设置。
-- 后端返回空 `issues[]`、请求失败或用户停止时，不插入批注或修订+批注。
-- `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或用户停止时不生成新的可下载结果。
-- 插件工作台可从“打开最近审校”列表手动打开历史 V2 审校；本地工作区保存项目、run、候选、报告和结果索引，不把完整正文或原始 DOCX 写入长期记忆。兼容历史功能保留清空、导出 JSON、导入 JSON 能力。
+- 后端返回空 `issues[]`、请求失败或没有已接受候选时，不插入批注或修订+批注。
+- 兼容底层 `.docx` 全书任务即使未发现问题，也生成可下载的新文件；请求失败或任务取消时不生成新的可下载结果。V2 DOCX 项目写回要求存在已接受候选，没有 approved 候选时返回 409。
+- 插件工作台可从“打开最近审校”列表手动打开历史 V2 审校；本地工作区保存项目、run、候选、报告和结果索引，不把完整正文或原始 DOCX 写入长期记忆。当前 V2 插件不提供导出 JSON、导入 JSON 或清空历史入口，支持删除单个项目和清空排障日志。

@@ -203,6 +203,8 @@ export interface V2ReviewPlanStep {
   tool_name: string;
   status: "pending" | "running" | "succeeded" | "failed";
   description: string;
+  enabled: boolean;
+  reason?: string | null;
 }
 
 export interface V2ReviewPlan {

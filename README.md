@@ -2,7 +2,7 @@
 
 面向出版社责任编辑的 Word AI 审校助手。当前版本以 V2.2 出版审校工作台为主流程：编辑在 Word 中选择文本或上传 `.docx` 书稿，点击开始审校，查看建议，接受或忽略后再写回 Word。
 
-V2 目标是把项目升级为出版审校 Agent 工作台：Agent 不只是调用一次模型，而是围绕一本书建立审校项目，制定审校计划，调用文档处理工具，汇总风险和证据，并在编辑确认后写回 Word。术语、本书约定和跨章节一致性会作为项目记忆与后续扩展能力沉淀，不作为当前 V2.2 审校计划的独立步骤展示。
+V2.2 围绕一本书建立审校项目，保存文档地图、审校计划、运行状态、候选建议、编辑决策和报告。V2 项目数据、历史、trace、任务快照和结果索引不迁移旧版本；代码仍保留底层直接 API，用于复用已验证的文档处理能力和开发调试。
 
 ## 项目结构
 
@@ -12,6 +12,9 @@ V2 目标是把项目升级为出版审校 Agent 工作台：Agent 不只是调�
 ├── scripts/      # 本地开发辅助脚本
 ├── word-addin/   # Office.js + TypeScript + Webpack Word 插件
 ├── AGENTS.md     # 协作约定
+├── ARCHITECTURE.md # 代码入口、模块边界和 V2 数据流
+├── DEPLOYMENT.md # Windows 本地试点部署
+├── TESTING.md    # 测试命令和最小验证矩阵
 └── spec.md       # API 契约和验收标准
 ```
 
@@ -19,39 +22,27 @@ V2 目标是把项目升级为出版审校 Agent 工作台：Agent 不只是调�
 
 - 审校来源：支持当前选区和全书 DOCX。当前选区由插件读取并通过 Office.js 写回；全书 DOCX 上传到后端，后端处理目录可见文本、正文、表格和常见文本框文字。本版不支持 `.doc`，请先另存为 `.docx`。
 - 普通使用流程：插件主界面保留“审校来源、书名、开始审校、本次进度、审校建议、写回/下载”，最近审校和排障信息默认折叠。
-- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions。插件默认深度审校、Temperature `0.6`、修订+批注模式，并优先选择 `mimo-v2.5-pro` profile；这些配置放在“更多设置（试点支持）”中。后端 API schema 的默认 temperature 仍为 `0.2`，用于直接 API 调用。未配置 Key 时返回 mock 结果，方便本地联调。
+- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions。插件默认深度审校、Temperature `0.6`、修订+批注模式，并优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；这些配置放在“更多设置（试点支持）”中。后端 API schema 的默认 temperature 仍为 `0.2`，用于直接 API 调用。未配置 Key 时返回 mock 结果，方便本地联调。
 - 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息和审校目标作为 prompt 背景，但不把完整正文写入长期记忆。
 - 责任编辑边界：当前审校计划只展示 5 个实际执行阶段：生成计划、基础语言审校、候选归并、二次复核、等待编辑确认。术语、本书约定和一致性不再作为独立计划步骤展示；标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，AI 或本地规则默认都不会让这类建议进入责任编辑确认队列。
 - 建议处理：Agent 只生成审校建议、风险说明和证据；编辑逐条接受/忽略，也可批量处理所有待处理建议。无论置信度多高，都必须接受后才会写回。
 - Word 写回：当前选区写回已接受建议时由插件完成定位、批注或修订+批注；DOCX 审校只写回已接受建议，由后端生成审校后文件，插件提供下载入口。
 - 可观测性：V2 工作台保存本次审校、文档地图、审校计划、run event trace、建议、项目记忆和审校报告；这些技术信息默认收进“排障信息（技术支持）”。trace 不记录完整正文、API Key、Authorization 或 Bearer token。
-- 结果保留：V2 DOCX 写回结果保存在后端 `AGENT_WORKSPACE_DIR` 的项目输出目录，当前不返回保留期限或过期时间；下载入口在项目输出文件仍存在时可继续使用。兼容的旧 DOCX 任务结果索引仍由 `DOCX_OUTPUT_DIR` 和 `DOCX_RETENTION_DAYS` 控制。
+- 结果保留：V2 DOCX 写回结果保存在后端 `AGENT_WORKSPACE_DIR` 的项目输出目录，当前不返回保留期限或过期时间；下载入口在项目输出文件仍存在时可继续使用。底层 DOCX 任务结果索引仍由 `DOCX_OUTPUT_DIR` 和 `DOCX_RETENTION_DAYS` 控制。
 
-完整 API 契约见 [spec.md](spec.md)，V2 Agent 工作台工程约束见 [AGENTS.md](AGENTS.md)。
+文档导航：
 
-## V2 目标：出版审校 Agent 工作台
+- [AGENTS.md](AGENTS.md)：AI coding 协作约定、V2 目标和边界。
+- [ARCHITECTURE.md](ARCHITECTURE.md)：代码入口、模块边界、V2 工作台数据流和常见改动入口。
+- [spec.md](spec.md)：API 契约、状态语义、环境变量和验收标准。
+- [TESTING.md](TESTING.md)：后端、前端、manifest 和 Word 手工联调的测试矩阵。
+- [DEPLOYMENT.md](DEPLOYMENT.md)：Windows 编辑电脑本地试点部署手册。
 
-V2 可以不兼容 V1 存量数据，包括本地历史、Agent trace、任务状态、DOCX 结果索引和旧任务快照；升级时允许重建或清空这些数据。V2 仍应复用 V1 已验证的核心文档处理逻辑，包括 DOCX 解析、章节/分块、AI 审校、结果归一化、原文定位、批注/修订写回和下载文件生成。
+## V2 工作台说明
 
-V2 的产品目标：
+V2.2 已收敛为项目化审校闭环：选择当前选区或全书 DOCX、填写书名、开始审校、查看建议、接受/忽略、写回或下载审校后文件。当前选区写回和定位由 Office.js 完成，DOCX 写回由后端完成；插件 UI 不提供旧版独立入口。
 
-- 项目化审校：围绕一本书建立审校项目，保存审校目标、文档地图、章节进度、待处理建议、编辑决策和审校报告。
-- Agent 规划：先生成审校计划，再按阶段执行基础语言审校、候选归并、二次复核和人工确认，而不是把所有正文塞给一个 prompt。
-- 文档地图：抽取章节、目录可见文本、正文、表格和文本框文字，建立可追踪的文档结构和位置映射。
-- 出版规范记忆：沉淀本书术语、人名地名、机构名、本书约定、编辑确认过的偏好和一致性线索；这些记忆当前服务于上下文和后续扩展，不单列为审校计划步骤。
-- 多轮复核：对审校建议做归并、去重、自检、证据绑定和风险分级，降低重复建议和幻觉建议。
-- 人机协同写回：Agent 只生成审校建议和证据，编辑接受、忽略或暂缓后，系统再批量写回批注或修订。
-- 审校报告：输出本轮审校范围、问题分布、风险章节、未处理事项、编辑确认记录和可复查的运行摘要。
-
-V2 路线图：
-
-1. 项目与文档地图：建立 `project_id`、文档结构、章节状态和 V2 历史 schema。
-2. 审校计划与工具注册表：让 Agent planner 选择文档地图、分块审校、候选归并、evaluator 复核、DOCX 写回等当前实际工具；术语检查、审读约束检查和跨章节一致性检查作为后续能力保留，不进入当前 V2.2 审校计划。
-3. 记忆与规则库：支持本书级术语/本书约定记忆，默认不把完整正文写入长期记忆。
-4. 复核与确认队列：将审校建议归并、证据绑定、自检后进入编辑确认队列。
-5. 写回与报告：按编辑决策生成 Word 批注/修订，并输出可复查的审校报告。
-
-当前代码已升级到 V2.2 审校工作台闭环：插件主路径是选择当前选区或全书 DOCX、填写书名、开始审校、查看建议、接受/忽略、写回或下载审校后文件；默认使用深度审校、Temperature 0.6、修订+批注模式，并优先选择 `mimo-v2.5-pro` 配置。文档地图、审校计划、trace、本书规则和调试日志默认收进排障信息。插件 UI 不再提供 V1 独立入口；当前选区写回和定位由 Office.js 完成，DOCX 写回由后端完成。V2.2 不迁移 V1/V2 旧历史、trace、任务状态或 DOCX result index。
+产品目标和 AI coding 边界见 [AGENTS.md](AGENTS.md)，代码入口和端到端流程见 [ARCHITECTURE.md](ARCHITECTURE.md)，完整 API 契约和状态语义见 [spec.md](spec.md)。
 
 ## 环境变量
 
@@ -61,7 +52,7 @@ V2 路线图：
 cp .env.example .env
 ```
 
-常用配置：
+后端当前会读取的常用配置：
 
 ```text
 AI_API_KEY=local-omlx-dev-key
@@ -70,31 +61,28 @@ AI_PROVIDER_API=responses
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
+AI_REQUEST_TIMEOUT_MIN_SECONDS=60
+AI_REQUEST_TIMEOUT_MAX_SECONDS=900
+AI_REQUEST_TIMEOUT_BASE_SECONDS=60
+AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS=45
+AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS=75
 AI_FAST_MAX_TOKENS=8192
 AI_THINKING_MAX_TOKENS=16384
-BACKEND_HOST=127.0.0.1
-BACKEND_PORT=8000
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 DOCX_OUTPUT_DIR=var/docx-results
 DOCX_RETENTION_DAYS=7
 AGENT_TRACE_DIR=var/agent-traces
 AGENT_WORKSPACE_DIR=var/agent-workspace
-WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest.xml`、前端源码、Webpack 配置、构建产物或文档。
 
-`.env.example` 默认包含 `local-omlx`、`openrouter-qwen`、`xiaomi-mimo` 三个 profile 的 `AI_PROFILES_JSON` 模板，插件会优先选择 `mimo-v2.5-pro` profile；未配置对应 API Key 时后端返回 mock 结果，方便本地联调。如果删除或留空 `AI_PROFILES_JSON`，后端会用上面的旧变量生成 `Default AI (.env)`，插件里可直接选择。需要在插件中快速切换多个 OpenAI 兼容供应商时，可按下面形态配置：
+`.env.example` 中还保留 `BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 作为人工启动命令和历史兼容说明；当前代码不会读取这些变量。后端监听地址由 `uvicorn ... --host/--port` 决定，插件开发代理在 `word-addin/webpack.config.js` 中指向 `http://127.0.0.1:8000`。
 
-```text
-OPENROUTER_API_KEY=...
-LOCAL_OMLX_API_KEY=local-omlx-dev-key
-MIMO_API_KEY=
-AI_PROFILES_JSON=[{"id":"openrouter-qwen","label":"OpenRouter / Qwen","api_base_url":"https://openrouter.ai/api/v1","api_key_env":"OPENROUTER_API_KEY","model":"qwen/xxx","default_api":"chat","supported_apis":["chat"]},{"id":"local-omlx","label":"本地 oMLX","api_base_url":"http://127.0.0.1:8001/v1","api_key_env":"LOCAL_OMLX_API_KEY","model":"Qwen3.6-35B-A3B-4.4bit-msq","default_api":"responses","supported_apis":["responses","chat"]},{"id":"xiaomi-mimo","label":"Xiaomi MiMo","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}]
-```
+`.env.example` 默认包含 `local-omlx`、`openrouter-qwen`、`xiaomi-mimo` 三个 profile 的 `AI_PROFILES_JSON` 模板。插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；当前模板中 `xiaomi-mimo` profile 的 model 是 `mimo-v2.5-pro`，Key 来自 `MIMO_API_KEY`。如果删除或留空 `AI_PROFILES_JSON`，后端会用上面的旧变量生成 `Default AI (.env)`，插件里可直接选择。详细环境变量规则见 [spec.md](spec.md)，Windows 试点配置见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。Xiaomi MiMo 当前按官方 OpenAI-compatible Chat Completions 接入，profile 只声明 `supported_apis=["chat"]`，不启用 Responses。
+后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。
 
 默认 SQLite 文件位置：
 
@@ -182,6 +170,8 @@ npm run start
 
 ## 测试与验证
 
+常用检查如下，详细测试矩阵见 [TESTING.md](TESTING.md)。
+
 后端测试：
 
 ```bash
@@ -210,7 +200,9 @@ npm run validate
 ## 文档维护约定
 
 - 改接口契约时，更新 [spec.md](spec.md)。
+- 改代码入口、模块边界或 V2 数据流时，更新 [ARCHITECTURE.md](ARCHITECTURE.md)。
+- 改测试命令、验证矩阵或手工联调要求时，更新 [TESTING.md](TESTING.md)。
 - 改启动方式、端口、环境变量或联调流程时，更新本文件。
-- 改 V2 Agent 工作台目标、架构边界或协作约束时，更新 [AGENTS.md](AGENTS.md) 和本文件中的 V2 路线图。
+- 改 V2 Agent 工作台目标、架构边界或协作约束时，更新 [AGENTS.md](AGENTS.md)。
 - 改 Windows 试点部署流程时，更新 [DEPLOYMENT.md](DEPLOYMENT.md)。
 - 临时排障记录不要写进长期文档；需要留存时放到 Git 忽略的临时目录。

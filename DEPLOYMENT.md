@@ -2,6 +2,8 @@
 
 本文面向技术支持人员，用于在 5 位编辑的 Windows 电脑上从零部署本地试点版。每台编辑电脑都会启动本项目的 FastAPI 后端和 Word 插件开发服务，Word 通过旁加载插件清单打开 DocPilot V2 出版审校工作台；AI 能力由远程 OpenAI 兼容 API 提供。
 
+相关文档：项目入口见 [README.md](README.md)，代码结构见 [ARCHITECTURE.md](ARCHITECTURE.md)，测试矩阵见 [TESTING.md](TESTING.md)，API 契约见 [spec.md](spec.md)。本文只维护 Windows 本地试点部署流程。
+
 ## 1. 适用范围
 
 - 操作系统：Windows 10 或 Windows 11。
@@ -9,7 +11,7 @@
 - 部署方式：每台编辑电脑本地运行 `backend` 和 `word-addin`。
 - 插件地址：`https://localhost:3000/taskpane.html`。
 - 后端地址：`http://127.0.0.1:8000`。
-- AI 服务：远程 OpenAI 兼容接口，由 `.env` 中的 `OPENAI_API_BASE_URL`、`OPENAI_MODEL` 和 `AI_API_KEY` 配置。
+- AI 服务：远程 OpenAI 兼容接口。试点默认建议置空 `AI_PROFILES_JSON`，由 `.env` 中的 `OPENAI_API_BASE_URL`、`OPENAI_MODEL` 和 `AI_API_KEY` 生成 `Default AI (.env)` profile。
 
 本试点默认不要求每台电脑安装 oMLX 或本地大模型。如果后续改为本地模型试点，需要另行补充模型安装、硬件要求和模型服务启动步骤。
 
@@ -95,21 +97,21 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-把 `.env` 调整为试点配置。以下示例中的 `AI_API_KEY`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 必须替换为试点实际值：
+把 `.env` 调整为试点配置。当前 `.env.example` 默认包含 `AI_PROFILES_JSON` 多 profile 模板；后端会优先按 profile 的 `api_key_env` 读取 Key，插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile。当前模板中对应的是 id 为 `xiaomi-mimo`、model 为 `mimo-v2.5-pro` 的 profile，Key 来自 `MIMO_API_KEY`。Windows 远程试点如果只使用一个远程 OpenAI 兼容服务，建议把 `AI_PROFILES_JSON='[...]'` 整段改为 `AI_PROFILES_JSON=`，再使用下面的 legacy `.env` profile。
+
+以下示例中的 `AI_API_KEY`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 必须替换为试点实际值：
 
 ```text
 AI_API_KEY=请替换为试点专用Key
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON=
 OPENAI_API_BASE_URL=https://请替换为远程兼容API地址/v1
 OPENAI_MODEL=请替换为试点模型ID
 AI_REQUEST_TIMEOUT_SECONDS=180
 AI_FAST_MAX_TOKENS=16384
 AI_THINKING_MAX_TOKENS=32768
-BACKEND_HOST=127.0.0.1
-BACKEND_PORT=8000
 BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
-WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 ```
 
 配置要求：
@@ -117,7 +119,10 @@ WORD_ADDIN_API_BASE_URL=http://127.0.0.1:8000
 - `AI_API_KEY` 使用试点专用 Key，不使用个人生产 Key。
 - `OPENAI_API_BASE_URL` 应指向远程 OpenAI 兼容服务的 `/v1` 根路径。
 - `OPENAI_MODEL` 必须与远程服务提供的模型 ID 一致。
+- `AI_PROFILES_JSON` 为空时，后端使用 `AI_API_KEY/AI_PROVIDER_API/OPENAI_API_BASE_URL/OPENAI_MODEL` 生成 `Default AI (.env)` profile。
+- 如果试点要保留多 profile，必须为插件实际选中的 profile 配置对应的 `api_key_env`。当前模板中 `xiaomi-mimo` profile 的 model 是 `mimo-v2.5-pro`，Key 来自 `MIMO_API_KEY`。
 - `BACKEND_CORS_ORIGINS` 保持 `https://localhost:3000,http://localhost:3000`。
+- `BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 当前不被代码读取；后端地址由第 6 节 uvicorn 命令决定，插件代理地址由 `word-addin\webpack.config.js` 决定。
 - 不要提交、转发或截图包含真实 Key 的 `.env`。
 
 ## 6. 启动后端
@@ -343,6 +348,7 @@ curl.exe -k -I https://localhost:3000/taskpane.html
 - `AI_API_KEY` 未替换或无权限。
 - `OPENAI_API_BASE_URL` 写错。
 - `OPENAI_MODEL` 与远程服务模型 ID 不一致。
+- 未置空 `AI_PROFILES_JSON`，插件优先匹配到 model 为 `mimo-v2.5-pro` 的 `xiaomi-mimo` profile，但对应的 `MIMO_API_KEY` 或其他 `api_key_env` 为空。
 - 当前网络无法访问远程 AI API。
 - 远程 AI 服务返回非 JSON 或响应超时。
 

@@ -149,7 +149,6 @@ export interface V2Project {
   source_filename: string;
   text_preview?: string | null;
   book: BookInfo;
-  review_goal: string;
   created_at: string;
   updated_at: string;
   run_count: number;
@@ -161,6 +160,7 @@ export interface V2Project {
   approved_count: number;
   output_filename?: string | null;
   download_url?: string | null;
+  output_stale: boolean;
 }
 
 export interface V2ProjectList {
@@ -204,12 +204,26 @@ export interface V2ReviewPlanStep {
   tool_name: string;
   status: "pending" | "running" | "succeeded" | "failed";
   description: string;
+  enabled: boolean;
+  reason?: string | null;
 }
 
 export interface V2ReviewPlan {
   project_id: string;
   run_id?: string | null;
   steps: V2ReviewPlanStep[];
+}
+
+export interface AITimeoutEstimate {
+  timeout_seconds: number;
+  started_at: string;
+  deadline_at: string;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_total_tokens: number;
+  token_units: number;
+  proofread_mode: "fast" | "thinking";
+  reasoning_enabled: boolean;
 }
 
 export interface V2Run {
@@ -224,6 +238,7 @@ export interface V2Run {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+  current_timeout?: AITimeoutEstimate | null;
 }
 
 export interface V2CandidateIssue {
@@ -254,6 +269,7 @@ export interface V2CandidateIssue {
 
 export interface V2CandidateList {
   project_id: string;
+  run_id: string | null;
   candidates: V2CandidateIssue[];
   page: number;
   page_size: number;
@@ -289,6 +305,7 @@ export interface V2WritebackResponse {
   fallback_count: number;
   failed_count: number;
   written_count: number;
+  included_count: number;
 }
 
 export interface V2RunEvent {
@@ -326,7 +343,6 @@ export interface V2ReviewReport {
   status: V2ProjectStatus;
   source_filename: string;
   book: BookInfo;
-  review_goal: string;
   issue_count: number;
   pending_count: number;
   approved_count: number;
@@ -420,6 +436,10 @@ export interface IssueApplicationSummary {
   fallbackCommentCount: number;
   failedCount: number;
   truncatedFallbackCount: number;
+  writtenIssueIds: string[];
+  fallbackIssueIds: string[];
+  failedIssueIds: string[];
+  truncatedIssueIds: string[];
 }
 
 export interface IssueApplicationProgress {

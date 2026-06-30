@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 
 from app.agents import planner
 from app.schemas import BookInfo, ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue, ProofreadScope, V2CandidateIssue
-from app.services import chunk_service, docx_service, document_map_service, locator_service, report_service
+from app.services import chunk_service, document_map_service, locator_service, report_service
+from app.services import docx as docx_service
 from app.services.ai_client import DEFAULT_TEMPERATURE
 from app.services.ai_provider_service import proofread_text_with_provider
 from app.services.proofread import ProofreadMode, ProviderAPI
@@ -51,6 +52,7 @@ class WriteDocxInput(BaseModel):
     application_mode: Literal["comment", "revision"] = "comment"
     output_path: Path
     fallback_summary_truncate_enabled: bool = True
+    author: str = Field(default=docx_service.DEFAULT_WRITEBACK_AUTHOR, max_length=80)
 
 
 class BuildDocumentMapInput(BaseModel):
@@ -117,14 +119,16 @@ def write_docx_output(
     output_path: Path,
     application_mode: Literal["comment", "revision"] = "comment",
     fallback_summary_truncate_enabled: bool = True,
+    author: str = docx_service.DEFAULT_WRITEBACK_AUTHOR,
 ) -> dict[str, int]:
-    """Write proofread issues into a DOCX result file. Input is source bytes, issues, output path, mode, and fallback policy; output is writeback counts."""
+    """Write proofread issues into a DOCX result file. Input is source bytes, issues, output path, mode, fallback policy, and author; output is writeback counts."""
     summary = docx_service.write_docx_result(
         source_bytes,
         issues,
         application_mode,
         output_path,
         fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+        author=author,
     )
     return {
         "comment_count": summary.comment_count,

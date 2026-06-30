@@ -6,7 +6,13 @@ import httpx
 import pytest
 
 from app.schemas import BookInfo, ProofreadIssue
-from app.services.ai_client import AIClientError, V2PromptContext, proofread_with_ai, stream_proofread_with_ai
+from app.services.ai_client import (
+    AIClientError,
+    _dynamic_timeout,
+    estimate_proofread_request_timeout,
+    proofread_with_ai,
+    stream_proofread_with_ai,
+)
 from app.settings import Settings
 
 
@@ -153,7 +159,7 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["url"] == "https://example.test/v1/responses"
     assert call["headers"] == {"Authorization": "Bearer test-key"}
-    assert call["timeout"] == 12
+    assert call["timeout"] >= 60 + 9 * 45
     assert call["json"]["model"] == "test-model"
     assert call["json"]["temperature"] == 0.2
     assert call["json"]["max_output_tokens"] == 8192
@@ -164,7 +170,100 @@ def test_proofread_with_ai_sends_responses_payload(monkeypatch):
     assert '"title":"测试书名"' in call["json"]["input"]
     assert '"introduction":"这是一部测试图书。"' in call["json"]["input"]
     assert "replacement" in call["json"]["input"]
-    assert "comment" not in call["json"]["input"]
+    assert "待审文本片段" in call["json"]["input"]
+    assert "模型已有知识" in call["json"]["input"]
+    assert "可输出语言、事实、知识、数据、公式、逻辑、前后一致性、术语和出版风险问题" in call["json"]["input"]
+    assert "当前模式：快速审校。" in call["json"]["input"]
+    assert "兼容字段，模型不要主动使用" in call["json"]["input"]
+    assert "- other：其他" in call["json"]["input"]
+    assert "Word 选区文本" not in call["json"]["input"]
+    assert "<v2_agent_context>" not in call["json"]["input"]
+    assert "review_goal" not in call["json"]["input"]
+
+
+def test_dynamic_timeout_has_configurable_minimum():
+    timeout, metadata = _dynamic_timeout(
+        Settings(
+            AI_REQUEST_TIMEOUT_MIN_SECONDS=60,
+            AI_REQUEST_TIMEOUT_MAX_SECONDS=900,
+            AI_REQUEST_TIMEOUT_BASE_SECONDS=0,
+            AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS=0,
+        ),
+        input_tokens=1,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+        output_token_limit=0,
+    )
+
+    assert timeout == 60
+    assert metadata == {
+        "estimated_input_tokens": 1,
+        "estimated_output_tokens": 0,
+        "estimated_total_tokens": 1,
+        "token_units": 1,
+    }
+
+
+def test_dynamic_timeout_uses_longer_thinking_rate():
+    fast_timeout, _ = _dynamic_timeout(Settings(), 1000, "fast", False, output_token_limit=0)
+    thinking_timeout, _ = _dynamic_timeout(Settings(), 1000, "thinking", False, output_token_limit=0)
+    reasoning_timeout, _ = _dynamic_timeout(Settings(), 1000, "fast", True, output_token_limit=0)
+
+    assert fast_timeout == 105
+    assert thinking_timeout == 135
+    assert reasoning_timeout == 135
+
+
+def test_dynamic_timeout_includes_output_token_limit():
+    timeout, metadata = _dynamic_timeout(
+        Settings(),
+        input_tokens=1000,
+        proofread_mode="fast",
+        reasoning_enabled=False,
+        output_token_limit=8192,
+    )
+
+    assert timeout == 510
+    assert metadata["estimated_input_tokens"] == 1000
+    assert metadata["estimated_output_tokens"] == 8192
+    assert metadata["estimated_total_tokens"] == 9192
+    assert metadata["token_units"] == 10
+
+
+def test_proofread_timeout_estimate_exposes_safe_metadata():
+    estimate = estimate_proofread_request_timeout(
+        "这是一段文本。",
+        book(),
+        settings=settings(),
+        proofread_mode="thinking",
+        reasoning_enabled=True,
+        temperature=0.6,
+    )
+
+    payload = estimate.model_dump()
+    assert payload["timeout_seconds"] >= 60
+    assert payload["estimated_input_tokens"] > 0
+    assert payload["estimated_output_tokens"] == 16384
+    assert payload["estimated_total_tokens"] >= payload["estimated_output_tokens"]
+    assert payload["token_units"] >= 17
+    assert payload["proofread_mode"] == "thinking"
+    assert payload["reasoning_enabled"] is True
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "这是一段文本" not in serialized
+    assert "test-key" not in serialized
+
+
+def test_dynamic_timeout_caps_at_configured_maximum():
+    timeout, metadata = _dynamic_timeout(
+        Settings(AI_REQUEST_TIMEOUT_MAX_SECONDS=900),
+        input_tokens=100_000,
+        proofread_mode="thinking",
+        reasoning_enabled=True,
+        output_token_limit=16_384,
+    )
+
+    assert timeout == 900
+    assert metadata["token_units"] == 117
 
 
 def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
@@ -176,7 +275,14 @@ def test_proofread_with_ai_uses_thinking_token_limit_for_responses(monkeypatch):
 
     assert result.response_id == "resp-1"
     assert FakeAsyncClient.calls[0]["json"]["max_output_tokens"] == 16384
-    assert "深度审校" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "当前模式：深度审校。" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "文字与语句：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "出版风险：影响读者理解、知识准确性、体例一致性或出版判断的问题" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "其他审校问题：不限于上述类型；应充分结合模型已有知识、通用常识和专业知识" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "论述可信度或出版判断的问题" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "模型已有知识" in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "当前模式：快速审校。" not in FakeAsyncClient.calls[0]["json"]["input"]
+    assert "在快速审校基础上" not in FakeAsyncClient.calls[0]["json"]["input"]
 
 
 def test_proofread_with_ai_uses_custom_temperature_for_responses(monkeypatch):
@@ -187,30 +293,6 @@ def test_proofread_with_ai_uses_custom_temperature_for_responses(monkeypatch):
     asyncio.run(proofread_with_ai("文本", book(), settings=settings(), temperature=0.7))
 
     assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.7
-
-
-def test_proofread_with_ai_includes_v2_prompt_context(monkeypatch):
-    FakeAsyncClient.calls = []
-    FakeAsyncClient.response = FakeResponse(payload=response_payload())
-    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
-
-    context = V2PromptContext(
-        review_goal="重点检查术语一致性。",
-        source_type="docx",
-        pass_name="terminology_pass",
-        document_map_summary="text_len=100; blocks=2; chunks=1",
-        memory_items=[{"kind": "preference", "key": "approved_issue_categories", "value": "style"}],
-        style_rules=["统一术语。"],
-    )
-
-    asyncio.run(proofread_with_ai("文本", book(), settings=settings(), v2_context=context))
-
-    payload_input = FakeAsyncClient.calls[0]["json"]["input"]
-    assert "V2.1 Agent 工作台要求" in payload_input
-    assert "重点检查术语一致性。" in payload_input
-    assert "terminology_pass" in payload_input
-    assert "text_len=100; blocks=2; chunks=1" in payload_input
-    assert "approved_issue_categories" in payload_input
 
 
 def test_proofread_with_ai_sends_chat_payload(monkeypatch):
@@ -238,6 +320,30 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert call["json"]["max_tokens"] == 8192
     assert call["json"]["messages"][0]["role"] == "system"
     assert "replacement" in call["json"]["messages"][0]["content"]
+    assert "待审文本片段" in call["json"]["messages"][0]["content"]
+    assert "模型已有知识" in call["json"]["messages"][0]["content"]
+    assert "可输出语言、事实、知识、数据、公式、逻辑、前后一致性、术语和出版风险问题" in call["json"]["messages"][0]["content"]
+    assert "当前模式：快速审校。" in call["json"]["messages"][0]["content"]
+    assert "兼容字段，模型不要主动使用" in call["json"]["messages"][0]["content"]
+    assert "- other：其他" in call["json"]["messages"][0]["content"]
+    assert "Word 选区文本" not in call["json"]["messages"][0]["content"]
+    assert "<v2_agent_context>" not in call["json"]["messages"][0]["content"]
+    assert "review_goal" not in call["json"]["messages"][0]["content"]
+    assert "document_map_summary" not in call["json"]["messages"][0]["content"]
+    assert "memory_items" not in call["json"]["messages"][0]["content"]
+    assert "style_rules" not in call["json"]["messages"][0]["content"]
+    assert "review_goal 是硬约束" not in call["json"]["messages"][0]["content"]
+    assert "不要泛泛审校" not in call["json"]["messages"][0]["content"]
+    assert call["json"]["messages"][0]["content"].count("original 必须") == 1
+    assert "不依赖外部资料" not in call["json"]["messages"][0]["content"]
+    assert "需要外部资料确认" not in call["json"]["messages"][0]["content"]
+    assert "审校范围外的问题" not in call["json"]["messages"][0]["content"]
+    assert "项目记忆原文" not in call["json"]["messages"][0]["content"]
+    assert "不属于第 5 条机械校对项" not in call["json"]["messages"][0]["content"]
+    assert "标点误用" not in call["json"]["messages"][0]["content"]
+    assert "英文逗号" not in call["json"]["messages"][0]["content"]
+    assert "半角符号" not in call["json"]["messages"][0]["content"]
+    assert "连续标点" not in call["json"]["messages"][0]["content"]
     assert "comment" not in call["json"]["messages"][0]["content"]
     assert call["json"]["reasoning"] == {"enabled": False}
     assert "max_completion_tokens" not in call["json"]
@@ -245,6 +351,7 @@ def test_proofread_with_ai_sends_chat_payload(monkeypatch):
     assert "response_format" not in call["json"]
     assert call["json"]["messages"][1]["content"].endswith("<text>\n这是一段文本。\n</text>")
     assert '"title":"测试书名"' in call["json"]["messages"][1]["content"]
+    assert "\n要求：" not in call["json"]["messages"][1]["content"]
 
 
 def test_proofread_with_ai_uses_selected_profile(monkeypatch):

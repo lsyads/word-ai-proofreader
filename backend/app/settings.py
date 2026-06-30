@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     openai_api_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_API_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     ai_request_timeout_seconds: float = Field(default=30, alias="AI_REQUEST_TIMEOUT_SECONDS")
+    ai_request_timeout_min_seconds: float = Field(default=60, alias="AI_REQUEST_TIMEOUT_MIN_SECONDS")
+    ai_request_timeout_max_seconds: float = Field(default=900, alias="AI_REQUEST_TIMEOUT_MAX_SECONDS")
+    ai_request_timeout_base_seconds: float = Field(default=60, alias="AI_REQUEST_TIMEOUT_BASE_SECONDS")
+    ai_fast_timeout_seconds_per_1k_tokens: float = Field(
+        default=45,
+        alias="AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS",
+    )
+    ai_thinking_timeout_seconds_per_1k_tokens: float = Field(
+        default=75,
+        alias="AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS",
+    )
     ai_fast_max_tokens: int = Field(default=8192, alias="AI_FAST_MAX_TOKENS")
     ai_thinking_max_tokens: int = Field(default=16384, alias="AI_THINKING_MAX_TOKENS")
     backend_cors_origins: str = Field(
@@ -53,9 +64,23 @@ class Settings(BaseSettings):
     def docx_retention_days_must_be_at_least_seven(cls, value: int) -> int:
         return max(7, value)
 
+    @field_validator("ai_request_timeout_min_seconds")
+    @classmethod
+    def ai_request_timeout_minimum_floor(cls, value: float) -> float:
+        return max(1, value)
+
+    @field_validator("ai_request_timeout_max_seconds")
+    @classmethod
+    def ai_request_timeout_maximum_floor(cls, value: float) -> float:
+        return max(1, value)
+
     @property
     def backend_cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
+
+    @property
+    def resolved_ai_request_timeout_max_seconds(self) -> float:
+        return max(self.ai_request_timeout_min_seconds, self.ai_request_timeout_max_seconds)
 
 
 def get_settings() -> Settings:

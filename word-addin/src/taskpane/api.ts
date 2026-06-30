@@ -52,13 +52,11 @@ export async function getAIProfiles(): Promise<AIProfile[]> {
 export async function createV2Project(
   file: File,
   book: BookInfo,
-  reviewGoal: string,
   signal: AbortSignal
 ): Promise<V2Project> {
   const params = new URLSearchParams({
     filename: file.name,
     book: JSON.stringify(book),
-    review_goal: reviewGoal,
   });
   const response = await fetch(`${API_BASE_URL}/api/v2/projects?${params.toString()}`, {
     method: "POST",
@@ -79,7 +77,6 @@ export async function createV2Project(
 export async function createV2SelectionProject(
   text: string,
   book: BookInfo,
-  reviewGoal: string,
   sessionId: string | null,
   signal: AbortSignal
 ): Promise<V2Project> {
@@ -92,7 +89,6 @@ export async function createV2SelectionProject(
     body: JSON.stringify({
       text,
       book,
-      review_goal: reviewGoal,
       session_id: sessionId,
     }),
   });
@@ -220,6 +216,43 @@ export async function runV2Project(
   return (await response.json()) as V2Run;
 }
 
+export async function retryFailedV2Run(
+  projectId: string,
+  runId: string,
+  sessionId: string,
+  aiProfileId: string,
+  providerApi: ProviderAPI,
+  proofreadMode: ProofreadMode,
+  reasoningEnabled: boolean,
+  temperature: number,
+  signal: AbortSignal
+): Promise<V2Run> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/retry-failed`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        ai_profile_id: aiProfileId,
+        provider_api: providerApi,
+        proofread_mode: proofreadMode,
+        reasoning_enabled: reasoningEnabled,
+        temperature,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(await getResponseErrorMessage(response));
+  }
+
+  return (await response.json()) as V2Run;
+}
+
 export async function getV2Run(
   projectId: string,
   runId: string,
@@ -304,6 +337,7 @@ export async function getV2Candidates(
     pageSize?: number;
     status?: string;
     passName?: string;
+    runId?: string | null;
   } = {}
 ): Promise<V2CandidateList> {
   const params = new URLSearchParams({
@@ -315,6 +349,9 @@ export async function getV2Candidates(
   }
   if (options.passName && options.passName !== "all") {
     params.set("pass_name", options.passName);
+  }
+  if (options.runId) {
+    params.set("run_id", options.runId);
   }
   const response = await fetch(
     `${API_BASE_URL}/api/v2/projects/${encodeURIComponent(projectId)}/candidates?${params.toString()}`,
@@ -407,6 +444,7 @@ export async function writebackV2Project(
   projectId: string,
   applicationMode: ApplicationMode,
   fallbackSummaryTruncateEnabled: boolean,
+  author: string,
   signal: AbortSignal
 ): Promise<V2WritebackResponse> {
   const response = await fetch(
@@ -420,6 +458,7 @@ export async function writebackV2Project(
       body: JSON.stringify({
         application_mode: applicationMode,
         fallback_summary_truncate_enabled: fallbackSummaryTruncateEnabled,
+        author,
       }),
     }
   );

@@ -269,7 +269,10 @@ async def create_v2_project(
     request: Request,
     filename: str = Query(..., min_length=1),
     book: str = Query(..., min_length=1),
-    review_goal: str = Query(default="完成全书出版审校，输出候选问题、证据、写回结果和审校报告。", min_length=1),
+    review_goal: str = Query(
+        default="完成全书出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。",
+        min_length=1,
+    ),
 ) -> V2ProjectResponse:
     if Path(filename).suffix.lower() == ".doc":
         raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
@@ -353,6 +356,8 @@ async def create_v2_run(
         return run
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except V2WorkspaceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AIProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except docx_service.DocxError as exc:
@@ -365,6 +370,31 @@ async def get_v2_run(project_id: str, run_id: str) -> V2RunResponse:
         return project_store.require_run(project_id, run_id)
     except project_store.V2RunNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 run not found") from exc
+
+
+@app.post("/api/v2/projects/{project_id}/runs/{run_id}/retry-failed", response_model=V2RunResponse)
+async def retry_failed_v2_run_chunks(
+    project_id: str,
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    request: V2RunCreateRequest | None = None,
+) -> V2RunResponse:
+    try:
+        retry_request = request or V2RunCreateRequest()
+        stored_settings = project_store.get_run_settings(project_id, run_id)
+        resolved_request = V2RunCreateRequest.model_validate(stored_settings or retry_request.model_dump())
+        proofread_service.resolve_provider_api(resolved_request.provider_api, resolved_request.ai_profile_id)
+        run = workspace_runner.start_failed_chunk_retry(project_id, run_id, retry_request)
+        background_tasks.add_task(workspace_runner.retry_failed_chunks_job, project_id, run_id, retry_request)
+        return run
+    except project_store.V2ProjectNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
+    except V2WorkspaceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AIProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/v2/projects/{project_id}/runs/{run_id}/trace", response_model=V2RunTraceResponse)
@@ -405,14 +435,33 @@ async def get_v2_candidates(
     page_size: int = Query(default=20, ge=1, le=100),
     status: V2CandidateStatus | None = Query(default=None),
     pass_name: str | None = Query(default=None, min_length=1),
+    run_id: str | None = Query(default=None, min_length=1),
 ) -> V2CandidateListResponse:
     try:
-        project_store.require_project(project_id)
-        total = project_store.count_candidates(project_id, status=status, pass_name=pass_name)
+        resolved_run_id = _resolve_v2_candidate_run_id(project_id, run_id)
+        if not resolved_run_id:
+            return V2CandidateListResponse(
+                project_id=project_id,
+                run_id=None,
+                candidates=[],
+                page=page,
+                page_size=page_size,
+                total=0,
+                total_pages=0,
+                has_previous=False,
+                has_next=False,
+            )
+        total = project_store.count_candidates(
+            project_id,
+            run_id=resolved_run_id,
+            status=status,
+            pass_name=pass_name,
+        )
         total_pages = (total + page_size - 1) // page_size if total else 0
         offset = (page - 1) * page_size
         candidates = project_store.list_candidates(
             project_id,
+            run_id=resolved_run_id,
             status=status,
             pass_name=pass_name,
             limit=page_size,
@@ -420,6 +469,7 @@ async def get_v2_candidates(
         )
         return V2CandidateListResponse(
             project_id=project_id,
+            run_id=resolved_run_id,
             candidates=candidates,
             page=page,
             page_size=page_size,
@@ -430,25 +480,31 @@ async def get_v2_candidates(
         )
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
 
 
 @app.post("/api/v2/projects/{project_id}/candidates/decisions", response_model=V2ApprovalDecisionResponse)
 async def decide_v2_candidates(project_id: str, request: V2ApprovalDecisionRequest) -> V2ApprovalDecisionResponse:
     try:
+        run_id = _require_latest_v2_run_id(project_id)
         updated_count = project_store.update_candidate_statuses(
             project_id,
             {decision.candidate_id: decision.status for decision in request.decisions},
+            run_id=run_id,
         )
-        _refresh_v2_memory_from_decisions(project_id)
+        _refresh_v2_memory_from_decisions(project_id, run_id)
         return V2ApprovalDecisionResponse(
             project_id=project_id,
             updated_count=updated_count,
-            candidates=project_store.list_candidates(project_id),
+            candidates=project_store.list_candidates(project_id, run_id=run_id),
         )
     except project_store.V2CandidateNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
 
 
 @app.post("/api/v2/projects/{project_id}/candidates/bulk-decisions", response_model=V2ApprovalDecisionResponse)
@@ -457,16 +513,19 @@ async def decide_all_pending_v2_candidates(
     request: V2BulkApprovalDecisionRequest,
 ) -> V2ApprovalDecisionResponse:
     try:
-        updated_count = project_store.update_all_pending_candidates(project_id, request.status)
+        run_id = _require_latest_v2_run_id(project_id)
+        updated_count = project_store.update_all_pending_candidates(project_id, request.status, run_id=run_id)
         if updated_count > 0:
-            _refresh_v2_memory_from_decisions(project_id)
+            _refresh_v2_memory_from_decisions(project_id, run_id)
         return V2ApprovalDecisionResponse(
             project_id=project_id,
             updated_count=updated_count,
-            candidates=project_store.list_candidates(project_id),
+            candidates=project_store.list_candidates(project_id, run_id=run_id),
         )
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
 
 
 @app.get("/api/v2/projects/{project_id}/memory", response_model=V2MemoryListResponse)
@@ -515,49 +574,40 @@ async def delete_v2_project_memory(project_id: str, memory_id: str) -> V2MemoryL
 @app.post("/api/v2/projects/{project_id}/candidates/mark-written", response_model=V2MarkWrittenResponse)
 async def mark_v2_candidates_written(project_id: str, request: V2MarkWrittenRequest) -> V2MarkWrittenResponse:
     try:
-        updated_count = project_store.mark_candidates_written(project_id, request.candidate_ids)
+        run_id = _require_latest_v2_run_id(project_id)
+        updated_count = project_store.mark_candidates_written(project_id, request.candidate_ids, run_id=run_id)
         project_store.update_project_status(project_id, "written")
-        project = project_store.require_project(project_id)
-        report = report_service.build_review_report(
-            project_id=project_id,
-            status=project.status,
-            source_filename=project.source_filename,
-            book=project.book,
-            review_goal=project.review_goal,
-            candidates=project_store.list_candidates(project_id),
-        )
+        report = _build_latest_v2_report(project_id)
         project_store.save_report(report)
         return V2MarkWrittenResponse(
             project_id=project_id,
             updated_count=updated_count,
-            candidates=project_store.list_candidates(project_id),
+            candidates=project_store.list_candidates(project_id, run_id=run_id),
         )
     except project_store.V2CandidateNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 candidate not found") from exc
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
+    except project_store.V2RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="V2 run not found") from exc
 
 
 @app.post("/api/v2/projects/{project_id}/writeback", response_model=V2WritebackResponse)
 async def writeback_v2_project(project_id: str, request: V2WritebackRequest) -> V2WritebackResponse:
     try:
         response = workspace_runner.write_approved(project_id, request)
-        project = project_store.require_project(project_id)
-        project_store.add_run_event(
-            project_id,
-            "writeback",
-            "writeback_completed",
-            {"output_filename": response.output_filename, "written_count": response.written_count},
-        )
-        report = report_service.build_review_report(
-            project_id=project_id,
-            status=project.status,
-            source_filename=project.source_filename,
-            book=project.book,
-            review_goal=project.review_goal,
-            candidates=project_store.list_candidates(project_id),
-        )
-        project_store.save_report(report)
+        latest = project_store.latest_run(project_id)
+        if latest:
+            project_store.add_run_event(
+                project_id,
+                latest.run_id,
+                "writeback_completed",
+                {
+                    "output_filename": response.output_filename,
+                    "written_count": response.written_count,
+                    "included_count": response.included_count,
+                },
+            )
         return response
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
@@ -568,18 +618,7 @@ async def writeback_v2_project(project_id: str, request: V2WritebackRequest) -> 
 @app.get("/api/v2/projects/{project_id}/report", response_model=V2ReviewReportResponse)
 async def get_v2_report(project_id: str) -> V2ReviewReportResponse:
     try:
-        project = project_store.require_project(project_id)
-        report = project_store.get_report(project_id)
-        if report:
-            return report
-        return report_service.build_review_report(
-            project_id=project_id,
-            status=project.status,
-            source_filename=project.source_filename,
-            book=project.book,
-            review_goal=project.review_goal,
-            candidates=project_store.list_candidates(project_id),
-        )
+        return _build_latest_v2_report(project_id)
     except project_store.V2ProjectNotFound as exc:
         raise HTTPException(status_code=404, detail="V2 project not found") from exc
 
@@ -686,6 +725,7 @@ async def create_docx_proofread_task(
     temperature: float = Query(default=0.2, ge=0, le=1.5),
     application_mode: ApplicationMode = Query(default="comment"),
     fallback_summary_truncate_enabled: bool = Query(default=True),
+    author: str = Query(default=docx_service.DEFAULT_WRITEBACK_AUTHOR, max_length=80),
 ) -> DocxProofreadResult:
     if Path(filename).suffix.lower() == ".doc":
         raise HTTPException(status_code=400, detail=".doc 是旧二进制格式，请先另存为 .docx 后再上传。")
@@ -702,7 +742,7 @@ async def create_docx_proofread_task(
         raise HTTPException(status_code=400, detail="上传的 .docx 文件为空。")
 
     logger.info(
-        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s application_mode=%s fallback_summary_truncate_enabled=%s",
+        "docx proofread task create requested filename=%s bytes=%s session_id=%s ai_profile_id=%s provider_api=%s proofread_mode=%s reasoning_enabled=%s temperature=%s application_mode=%s fallback_summary_truncate_enabled=%s author_len=%s",
         filename,
         len(content),
         _mask_session_id(session_id),
@@ -713,6 +753,7 @@ async def create_docx_proofread_task(
         temperature,
         application_mode,
         fallback_summary_truncate_enabled,
+        len(author.strip()),
     )
 
     try:
@@ -730,6 +771,7 @@ async def create_docx_proofread_task(
                 temperature=temperature,
                 application_mode=application_mode,
                 fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+                author=author,
             )
         )
     except docx_service.DocxError as exc:
@@ -888,8 +930,38 @@ async def _v2_event_stream(events: list[Any]) -> AsyncIterator[str]:
         yield _format_sse(event.event, event.data)
 
 
-def _refresh_v2_memory_from_decisions(project_id: str) -> None:
-    candidates = project_store.list_candidates(project_id)
+def _resolve_v2_candidate_run_id(project_id: str, run_id: str | None) -> str | None:
+    project_store.require_project_summary(project_id)
+    if run_id:
+        project_store.require_run(project_id, run_id)
+        return run_id
+    latest = project_store.latest_run(project_id)
+    return latest.run_id if latest else None
+
+
+def _require_latest_v2_run_id(project_id: str) -> str:
+    resolved = _resolve_v2_candidate_run_id(project_id, None)
+    if not resolved:
+        raise project_store.V2RunNotFound("latest")
+    return resolved
+
+
+def _build_latest_v2_report(project_id: str) -> V2ReviewReportResponse:
+    project = project_store.require_project_summary(project_id)
+    latest = project_store.latest_run(project_id)
+    candidates = project_store.list_candidates(project_id, run_id=latest.run_id) if latest else []
+    return report_service.build_review_report(
+        project_id=project_id,
+        status=project.status,
+        source_filename=project.source_filename,
+        book=project.book,
+        review_goal=project.review_goal,
+        candidates=candidates,
+    )
+
+
+def _refresh_v2_memory_from_decisions(project_id: str, run_id: str) -> None:
+    candidates = project_store.list_candidates(project_id, run_id=run_id)
     saved_count = 0
     for item in agent_memory.derive_memory_items(candidates):
         if item.source != "editor_decision":
@@ -905,14 +977,12 @@ def _refresh_v2_memory_from_decisions(project_id: str) -> None:
         saved_count += 1
     if saved_count == 0:
         return
-    latest = project_store.latest_run(project_id)
-    if latest:
-        project_store.add_run_event(
-            project_id,
-            latest.run_id,
-            "memory_updated",
-            {"source": "editor_decision", "updated_count": saved_count},
-        )
+    project_store.add_run_event(
+        project_id,
+        run_id,
+        "memory_updated",
+        {"source": "editor_decision", "updated_count": saved_count},
+    )
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:

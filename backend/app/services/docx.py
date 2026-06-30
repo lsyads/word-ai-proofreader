@@ -15,6 +15,7 @@ from app.schemas import ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue
 from app.services import chunking
 
 ApplicationMode = Literal["comment", "revision"]
+DEFAULT_WRITEBACK_AUTHOR = "Word Proofreader"
 
 WORD_DOCUMENT_PATH = "word/document.xml"
 WORD_RELS_PATH = "word/_rels/document.xml.rels"
@@ -142,11 +143,12 @@ def write_docx_result(
     application_mode: ApplicationMode,
     output_path: Path,
     fallback_summary_truncate_enabled: bool = True,
+    author: str = DEFAULT_WRITEBACK_AUTHOR,
 ) -> WritebackSummary:
     document = parse_docx(source_bytes)
     source_text = document.text
     source_chunks = {chunk.index: chunk for chunk in split_docx_into_chunks(document)}
-    package = _DocxPackage(document.entries, document.document_root)
+    package = _DocxPackage(document.entries, document.document_root, _normalize_writeback_author(author))
     summary = WritebackSummary()
     fallback_issues: list[ChunkedProofreadIssue] = []
 
@@ -164,6 +166,12 @@ def write_docx_result(
 
         if application_mode == "revision" and issue.replacement:
             if _try_insert_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
+                summary.comment_count += 1
+                summary.revision_count += 1
+                _refresh_document_text_model(document)
+                continue
+
+            if _try_insert_multi_run_revision_with_comment(document, issue.global_start, issue.global_end, issue, package):
                 summary.comment_count += 1
                 summary.revision_count += 1
                 _refresh_document_text_model(document)
@@ -578,6 +586,74 @@ def _try_insert_revision_with_comment(
     return True
 
 
+def _try_insert_multi_run_revision_with_comment(
+    document: DocxDocument,
+    start: int,
+    end: int,
+    issue: ProofreadIssue,
+    package: "_DocxPackage",
+) -> bool:
+    if not issue.replacement:
+        return False
+
+    spans = _spans_for_range(document, start, end)
+    if not spans or len(spans) < 2:
+        return False
+
+    parent_map = _build_parent_map(document.document_root)
+    run_entries: list[tuple[TextSpan, ET.Element, ET.Element, ET.Element | None, str, str, str]] = []
+    seen_runs: set[ET.Element] = set()
+    run_parent: ET.Element | None = None
+    target_parts: list[str] = []
+
+    for span in spans:
+        run = _ancestor(span.node, parent_map, _w("r"))
+        if run is None or run in seen_runs:
+            return False
+        parent = parent_map.get(run)
+        if parent is None:
+            return False
+        if run_parent is None:
+            run_parent = parent
+        elif parent is not run_parent:
+            return False
+
+        original_text = span.node.text or ""
+        relative_start = max(start, span.start) - span.start
+        relative_end = min(end, span.end) - span.start
+        before = original_text[:relative_start]
+        target = original_text[relative_start:relative_end]
+        after = original_text[relative_end:]
+        if not target:
+            return False
+
+        target_parts.append(target)
+        run_entries.append((span, run, parent, run.find(_w("rPr")), before, target, after))
+        seen_runs.add(run)
+
+    if "".join(target_parts) != issue.original:
+        return False
+
+    comment_id = package.add_comment(_format_issue_comment(issue, prefix="文本框" if spans[0].in_textbox else None))
+    start_marker, end_marker, reference_run = package.comment_markers(comment_id)
+    replacements: list[tuple[ET.Element, ET.Element, list[ET.Element]]] = []
+
+    for index, (_span, run, parent, rpr, before, target, after) in enumerate(run_entries):
+        nodes: list[ET.Element] = []
+        if before:
+            nodes.append(_make_run(before, rpr))
+        nodes.append(package.revision_delete(target, rpr))
+        if index == 0:
+            nodes.extend([start_marker, package.revision_insert(issue.replacement, rpr), end_marker, reference_run])
+        if after:
+            nodes.append(_make_run(after, rpr))
+        replacements.append((parent, run, nodes))
+
+    for parent, run, nodes in reversed(replacements):
+        _replace_child(parent, run, nodes)
+    return True
+
+
 def _insert_summary_comments(
     document: DocxDocument,
     issues: list[ChunkedProofreadIssue],
@@ -954,10 +1030,16 @@ def _restore_root_namespace_declarations(xml_bytes: bytes, namespaces: list[tupl
     return f"{xml[:root_end]}{''.join(declarations)}{xml[root_end:]}".encode("utf-8")
 
 
+def _normalize_writeback_author(author: str | None) -> str:
+    normalized = (author or "").strip()
+    return normalized or DEFAULT_WRITEBACK_AUTHOR
+
+
 class _DocxPackage:
-    def __init__(self, entries: dict[str, bytes], document_root: ET.Element) -> None:
+    def __init__(self, entries: dict[str, bytes], document_root: ET.Element, author: str) -> None:
         self.entries = dict(entries)
         self.document_root = document_root
+        self.author = author
         self.document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
         _register_namespaces(self.document_namespaces)
         self.comments_root = self._ensure_comments_root()
@@ -975,7 +1057,7 @@ class _DocxPackage:
             _w("comment"),
             {
                 _w("id"): str(comment_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )
@@ -998,7 +1080,7 @@ class _DocxPackage:
             _w("del"),
             {
                 _w("id"): str(revision_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )
@@ -1012,7 +1094,7 @@ class _DocxPackage:
             _w("ins"),
             {
                 _w("id"): str(revision_id),
-                _w("author"): "Word AI Proofreader",
+                _w("author"): self.author,
                 _w("date"): datetime.now(UTC).isoformat(),
             },
         )

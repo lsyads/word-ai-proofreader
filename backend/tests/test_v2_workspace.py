@@ -1,13 +1,15 @@
 import io
 import json
 import zipfile
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.agents import workspace as workspace_agent
 from app.agents import local_rules
 from app.main import app
-from app.schemas import V2CandidateIssue
+from app.schemas import ProofreadIssue, V2CandidateIssue, V2RunCreateRequest
+from app.services.ai_client import AIClientError, AIProofreadResult
 from app.services import project_store
 
 
@@ -74,6 +76,7 @@ def make_candidate(
     project_id: str,
     index: int,
     *,
+    run_id: str = "v2_run_test",
     status: str = "pending",
     pass_name: str = "proofread_pass",
 ) -> V2CandidateIssue:
@@ -81,7 +84,7 @@ def make_candidate(
     return V2CandidateIssue(
         candidate_id=f"candidate_test_{index:02d}",
         project_id=project_id,
-        run_id="v2_run_test",
+        run_id=run_id,
         status=status,
         category="typo",
         severity="medium",
@@ -140,12 +143,19 @@ def test_v2_project_run_approval_writeback_report_and_download():
     plan_response = client.get(f"/api/v2/projects/{project_id}/plan")
     assert plan_response.status_code == 200
     plan_steps = plan_response.json()["steps"]
-    assert any(step["step_id"] == "proofread_pass" for step in plan_steps)
-    assert any(step["step_id"] == "style_rule_pass" for step in plan_steps)
+    assert [step["step_id"] for step in plan_steps] == [
+        "plan_review",
+        "proofread_pass",
+        "merge_candidates",
+        "evaluate_candidates",
+        "human_approval",
+    ]
 
     trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
     assert trace_response.status_code == 200
     assert "第一章 开始" not in trace_response.text
+    assert "review_goal_bound" not in trace_response.text
+    assert "审校目标已进入 Agent 上下文" not in trace_response.text
     assert any(event["event"] == "candidate_found" for event in trace_response.json()["events"])
     assert any(event["event"] == "pass_started" for event in trace_response.json()["events"])
     assert any(event["event"] == "candidate_evaluated" for event in trace_response.json()["events"])
@@ -197,14 +207,15 @@ def test_v2_candidates_endpoint_paginates_and_filters():
     )
     assert create_response.status_code == 200
     project_id = create_response.json()["project_id"]
+    run = project_store.create_run(project_id, total_chunks=1)
     candidates = [
-        make_candidate(project_id, index, status="pending", pass_name="proofread_pass")
+        make_candidate(project_id, index, run_id=run.run_id, status="pending", pass_name="proofread_pass")
         for index in range(1, 26)
     ]
     candidates.extend(
         [
-            make_candidate(project_id, 26, status="approved", pass_name="style_rule_pass"),
-            make_candidate(project_id, 27, status="pending", pass_name="style_rule_pass"),
+            make_candidate(project_id, 26, run_id=run.run_id, status="approved", pass_name="custom_pass"),
+            make_candidate(project_id, 27, run_id=run.run_id, status="pending", pass_name="custom_pass"),
         ]
     )
     project_store.save_candidates(candidates)
@@ -212,6 +223,7 @@ def test_v2_candidates_endpoint_paginates_and_filters():
     first_page = client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10})
     assert first_page.status_code == 200
     payload = first_page.json()
+    assert payload["run_id"] == run.run_id
     assert payload["page"] == 1
     assert payload["page_size"] == 10
     assert payload["total"] == 27
@@ -232,7 +244,7 @@ def test_v2_candidates_endpoint_paginates_and_filters():
 
     filtered = client.get(
         f"/api/v2/projects/{project_id}/candidates",
-        params={"status": "pending", "pass_name": "style_rule_pass"},
+        params={"status": "pending", "pass_name": "custom_pass"},
     )
     assert filtered.status_code == 200
     filtered_payload = filtered.json()
@@ -251,11 +263,12 @@ def test_v2_bulk_decision_updates_all_pending_candidates():
     )
     assert create_response.status_code == 200
     project_id = create_response.json()["project_id"]
+    run = project_store.create_run(project_id, total_chunks=1)
     project_store.save_candidates(
         [
-            make_candidate(project_id, 1, status="pending"),
-            make_candidate(project_id, 2, status="pending"),
-            make_candidate(project_id, 3, status="approved"),
+            make_candidate(project_id, 1, run_id=run.run_id, status="pending"),
+            make_candidate(project_id, 2, run_id=run.run_id, status="pending"),
+            make_candidate(project_id, 3, run_id=run.run_id, status="approved"),
         ]
     )
 
@@ -278,37 +291,205 @@ def test_v2_bulk_decision_updates_all_pending_candidates():
     }
 
 
-def test_local_rule_table_finds_all_matches_with_rule_metadata():
-    text = "AI 与人工智能并用。人工智能再次出现。这里有中文,逗号。还有中文,逗号！！中文(括号)。"
-    terminology = local_rules.run_terminology_rules(text)
-    style = local_rules.run_style_rules(text)
+def test_v2_defaults_scope_candidates_summary_and_report_to_latest_run():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
 
-    assert [match.original for match in terminology] == ["人工智能", "人工智能"]
-    assert all(match.rule_id == "terminology_variant_pair" for match in terminology)
-    assert all(match.pass_name == "terminology_pass" for match in terminology)
-    assert all(match.confidence == 0.68 for match in terminology)
-    assert all(match.evidence_kind == "rule" for match in terminology)
-    assert all(match.start < match.end for match in terminology)
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 31, run_id=old_run.run_id, status="pending"),
+            make_candidate(project_id, 32, run_id=old_run.run_id, status="approved"),
+        ]
+    )
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 41, run_id=new_run.run_id, status="pending"),
+            make_candidate(project_id, 42, run_id=new_run.run_id, status="approved"),
+            make_candidate(project_id, 43, run_id=new_run.run_id, status="rejected"),
+        ]
+    )
 
-    style_rule_ids = [match.rule_id for match in style]
-    assert style_rule_ids.count("style_ascii_comma") == 2
-    assert "style_consecutive_punctuation" in style_rule_ids
-    assert "style_halfwidth_parenthesis" in style_rule_ids
-    assert all(match.pass_name == "style_rule_pass" for match in style)
+    project_payload = client.get(f"/api/v2/projects/{project_id}").json()
+    assert project_payload["latest_run_id"] == new_run.run_id
+    assert project_payload["candidate_count"] == 3
+    assert project_payload["pending_count"] == 1
+    assert project_payload["approved_count"] == 1
+
+    default_candidates = client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10})
+    assert default_candidates.status_code == 200
+    default_payload = default_candidates.json()
+    assert default_payload["run_id"] == new_run.run_id
+    assert default_payload["total"] == 3
+    assert {item["candidate_id"] for item in default_payload["candidates"]} == {
+        "candidate_test_41",
+        "candidate_test_42",
+        "candidate_test_43",
+    }
+
+    old_candidates = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id, "page_size": 10},
+    )
+    assert old_candidates.status_code == 200
+    old_payload = old_candidates.json()
+    assert old_payload["run_id"] == old_run.run_id
+    assert old_payload["total"] == 2
+    assert {item["candidate_id"] for item in old_payload["candidates"]} == {
+        "candidate_test_31",
+        "candidate_test_32",
+    }
+
+    report = client.get(f"/api/v2/projects/{project_id}/report").json()
+    assert report["issue_count"] == 3
+    assert report["pending_count"] == 1
+    assert report["approved_count"] == 1
+    assert report["rejected_count"] == 1
 
 
-def test_local_consistency_rule_is_docx_scoped():
-    text = "第1章统计10页。第2章仍为10页。第3章记录20页。"
-    selection_matches = local_rules.run_consistency_rules(text, source_type="selection")
-    docx_matches = local_rules.run_consistency_rules(text, source_type="docx")
+def test_v2_rejects_new_run_when_project_has_active_run():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    project_store.create_run(project_id, total_chunks=1)
 
-    assert selection_matches == []
-    assert docx_matches
-    assert docx_matches[0].rule_id == "cross_chapter_numeric_consistency"
-    assert docx_matches[0].pass_name == "consistency_pass"
-    assert docx_matches[0].evidence_kind == "document_map"
-    assert docx_matches[0].start >= 0
-    assert docx_matches[0].start < docx_matches[0].end
+    response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+
+    assert response.status_code == 409
+
+
+def test_v2_bulk_decision_only_updates_latest_run_pending_candidates():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有错字，需要审校。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 51, run_id=old_run.run_id, status="pending"),
+            make_candidate(project_id, 52, run_id=new_run.run_id, status="pending"),
+            make_candidate(project_id, 53, run_id=new_run.run_id, status="approved"),
+        ]
+    )
+
+    response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/bulk-decisions",
+        json={"status": "rejected"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["updated_count"] == 1
+    old_candidate = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id},
+    ).json()["candidates"][0]
+    latest_statuses = {
+        item["candidate_id"]: item["status"]
+        for item in client.get(f"/api/v2/projects/{project_id}/candidates", params={"page_size": 10}).json()[
+            "candidates"
+        ]
+    }
+    assert old_candidate["status"] == "pending"
+    assert latest_statuses == {
+        "candidate_test_52": "rejected",
+        "candidate_test_53": "approved",
+    }
+
+
+def test_v2_docx_writeback_only_marks_latest_run_approved_candidates():
+    source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查明显出版审校问题。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    old_run = project_store.create_run(project_id, total_chunks=1)
+    new_run = project_store.create_run(project_id, total_chunks=1)
+    project_store.save_candidates(
+        [
+            make_candidate(project_id, 61, run_id=old_run.run_id, status="approved"),
+            make_candidate(project_id, 62, run_id=new_run.run_id, status="approved"),
+        ]
+    )
+
+    response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "comment"})
+
+    assert response.status_code == 200
+    assert response.json()["written_count"] == 1
+    old_status = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"run_id": old_run.run_id},
+    ).json()["candidates"][0]["status"]
+    latest_status = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]["status"]
+    assert old_status == "approved"
+    assert latest_status == "written"
+
+
+def test_v2_start_project_run_uses_document_map_chunk_count_without_docx_parse(monkeypatch):
+    source = make_docx(["第一章 开始", "这里有错字，需要审校。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查明显出版审校问题。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    expected_chunk_count = client.get(f"/api/v2/projects/{project_id}/document-map").json()["chunk_count"]
+
+    def fail_parse_docx(*args, **kwargs):
+        raise AssertionError("start_project_run should not parse DOCX")
+
+    monkeypatch.setattr(workspace_agent.docx_service, "parse_docx", fail_parse_docx)
+
+    run = workspace_agent.workspace_runner.start_project_run(project_id, V2RunCreateRequest())
+
+    assert run.status == "queued"
+    assert run.total_chunks == expected_chunk_count
+
+
+def test_local_non_ai_rules_do_not_emit_default_candidates():
+    text = "AI 与人工智能并用。人工智能再次出现。这里有中文,逗号。还有中文,逗号！！中文(括号)。不要处理？！"
+    repeated_numbers = "第1章统计10页。第2章仍为10页。第3章记录20页。"
+
+    assert local_rules.run_terminology_rules(text) == []
+    assert local_rules.run_style_rules(text) == []
+    assert local_rules.run_consistency_rules(repeated_numbers, source_type="selection") == []
+    assert local_rules.run_consistency_rules(repeated_numbers, source_type="docx") == []
 
 
 def test_v2_selection_project_run_writeback_conflict_and_mark_written():
@@ -400,6 +581,372 @@ def test_v2_selection_project_with_no_candidates_completes_successfully(monkeypa
     trace = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace").json()
     assert any(event["event"] == "review_completed" for event in trace["events"])
     assert not any(event["event"] == "waiting_for_approval" for event in trace["events"])
+
+
+def test_v2_run_exposes_chunk_progress_and_safe_trace_events(monkeypatch):
+    async def fake_proofread_text_with_context(text, *args, **kwargs):
+        if "乙" in text:
+            raise AIClientError("chunk failed with Authorization: Bearer secret-token")
+        return [
+            ProofreadIssue(
+                id="issue-1",
+                category="typo",
+                severity="medium",
+                original="甲甲",
+                replacement="甲乙",
+                suggestion="修正明显错字。",
+                start=0,
+                end=2,
+            )
+        ]
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    text = ("甲" * 4999 + "。") + ("乙" * 4999 + "。")
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": text,
+            "book": BOOK,
+            "review_goal": "检查长选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}").json()
+
+    assert run["status"] == "waiting_for_approval"
+    assert run["total_chunks"] == 2
+    assert run["completed_chunks"] == 1
+    assert run["failed_chunks"] == 1
+    assert run["candidate_count"] == 1
+    assert run["current_timeout"] is None
+
+    trace_response = client.get(f"/api/v2/projects/{project_id}/runs/{run['run_id']}/trace")
+    assert trace_response.status_code == 200
+    trace = trace_response.json()
+    tool_started = [event for event in trace["events"] if event["event"] == "tool_started"]
+    tool_completed = [event for event in trace["events"] if event["event"] == "tool_completed"]
+    errors = [event for event in trace["events"] if event["event"] == "error"]
+    assert len(tool_started) == 2
+    assert len(tool_completed) == 1
+    assert errors
+    assert tool_started[0]["data"]["total_chunks"] == 2
+    timeout = tool_started[0]["data"]["timeout"]
+    assert timeout["timeout_seconds"] >= 60
+    assert timeout["estimated_input_tokens"] > 0
+    assert timeout["estimated_output_tokens"] == 8192
+    assert timeout["estimated_total_tokens"] >= timeout["estimated_output_tokens"]
+    assert timeout["proofread_mode"] == "fast"
+    assert timeout["reasoning_enabled"] is False
+    assert datetime.fromisoformat(timeout["deadline_at"]) > datetime.fromisoformat(timeout["started_at"])
+    assert tool_completed[0]["data"]["completed_chunks"] == 1
+    assert tool_completed[0]["data"]["failed_chunks"] == 0
+    assert tool_completed[0]["data"]["candidate_count"] == 1
+    chunk_error = next(event for event in errors if event["data"].get("tool_name") == "proofread_document_chunk")
+    assert chunk_error["data"]["completed_chunks"] == 1
+    assert chunk_error["data"]["failed_chunks"] == 1
+    assert chunk_error["data"]["message"] == "chunk failed with Authorization: Bearer [REDACTED]"
+    serialized_trace = json.dumps(trace, ensure_ascii=False)
+    assert "secret-token" not in serialized_trace
+    assert "甲甲甲甲" not in serialized_trace
+    assert "乙乙乙乙" not in serialized_trace
+
+
+def test_v2_run_exposes_current_timeout_for_unfinished_chunk_event():
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这是一段需要等待模型响应的文字。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+    run = workspace_agent.workspace_runner.start_project_run(
+        project_id,
+        V2RunCreateRequest(proofread_mode="thinking", reasoning_enabled=True),
+    )
+    project_store.update_run(project_id, run.run_id, status="running", stage="proofread_pass")
+    started_at = datetime.now(UTC)
+    deadline_at = started_at + timedelta(seconds=135)
+    timeout = {
+        "timeout_seconds": 135,
+        "started_at": started_at.isoformat(),
+        "deadline_at": deadline_at.isoformat(),
+        "estimated_input_tokens": 1000,
+        "estimated_output_tokens": 0,
+        "estimated_total_tokens": 1000,
+        "token_units": 1,
+        "proofread_mode": "thinking",
+        "reasoning_enabled": True,
+    }
+    project_store.add_run_event(
+        project_id,
+        run.run_id,
+        "tool_started",
+        {
+            "tool_name": "proofread_document_chunk",
+            "pass_name": "proofread_pass",
+            "chunk_index": 0,
+            "current_chunk": 1,
+            "total_chunks": 1,
+            "completed_chunks": 0,
+            "failed_chunks": 0,
+            "candidate_count": 0,
+            "timeout": timeout,
+        },
+    )
+
+    active = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert active["current_timeout"] == timeout
+
+    project_store.add_run_event(
+        project_id,
+        run.run_id,
+        "tool_completed",
+        {
+            "tool_name": "proofread_document_chunk",
+            "pass_name": "proofread_pass",
+            "chunk_index": 0,
+            "current_chunk": 1,
+            "total_chunks": 1,
+            "completed_chunks": 1,
+            "failed_chunks": 0,
+            "candidate_count": 0,
+        },
+    )
+    completed_chunk = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert completed_chunk["current_timeout"] is None
+
+    project_store.update_run(project_id, run.run_id, status="succeeded", stage="succeeded")
+    terminal = client.get(f"/api/v2/projects/{project_id}/runs/{run.run_id}").json()
+    assert terminal["current_timeout"] is None
+
+
+def test_v2_retry_failed_chunks_merges_candidates_and_marks_written_output_stale(monkeypatch):
+    attempts = {"乙": 0}
+
+    async def fake_proofread_text_with_context(text, *args, **kwargs):
+        if "乙" in text:
+            attempts["乙"] += 1
+            if attempts["乙"] == 1:
+                raise AIClientError("chunk failed with Authorization: Bearer secret-token")
+        return [
+            ProofreadIssue(
+                id=f"issue-{text[:1]}",
+                category="typo",
+                severity="medium",
+                original=text[:2],
+                replacement=f"{text[:1]}修",
+                suggestion="修正明显错字。",
+                start=0,
+                end=2,
+            )
+        ]
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    source = make_docx([("甲" * 4999 + "。") + ("乙" * 4999 + "。")])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "书稿.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查长文。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={"proofread_mode": "thinking"})
+    assert run_response.status_code == 200
+    run_id = run_response.json()["run_id"]
+    run = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}").json()
+    assert run["completed_chunks"] == 1
+    assert run["failed_chunks"] == 1
+    assert run["candidate_count"] == 1
+
+    first_candidate = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"][0]
+    approve_response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": first_candidate["candidate_id"], "status": "approved"}]},
+    )
+    assert approve_response.status_code == 200
+    writeback_response = client.post(
+        f"/api/v2/projects/{project_id}/writeback",
+        json={"application_mode": "revision", "author": "出版社责任编辑"},
+    )
+    assert writeback_response.status_code == 200
+    assert writeback_response.json()["written_count"] == 1
+    assert writeback_response.json()["included_count"] == 1
+    assert client.get(f"/api/v2/projects/{project_id}").json()["output_stale"] is False
+    download = client.get(f"/api/v2/projects/{project_id}/download")
+    assert download.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert 'w:author="出版社责任编辑"' in comments_xml
+    assert 'w:author="出版社责任编辑"' in document_xml
+    assert "Word AI Proofreader" not in comments_xml
+    assert "Word AI Proofreader" not in document_xml
+
+    retry_response = client.post(f"/api/v2/projects/{project_id}/runs/{run_id}/retry-failed", json={})
+    assert retry_response.status_code == 200
+    retried_run = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}").json()
+    assert retried_run["completed_chunks"] == 2
+    assert retried_run["failed_chunks"] == 0
+    assert retried_run["candidate_count"] == 2
+    project = client.get(f"/api/v2/projects/{project_id}").json()
+    assert project["status"] == "waiting_for_approval"
+    assert project["output_stale"] is True
+    assert project["pending_count"] == 1
+
+    trace = client.get(f"/api/v2/projects/{project_id}/runs/{run_id}/trace").json()
+    event_names = [event["event"] for event in trace["events"]]
+    assert "retry_queued" in event_names
+    assert "chunk_retrying" in event_names
+    serialized_trace = json.dumps(trace, ensure_ascii=False)
+    assert "secret-token" not in serialized_trace
+
+    pending_candidate = client.get(
+        f"/api/v2/projects/{project_id}/candidates",
+        params={"status": "pending"},
+    ).json()["candidates"][0]
+    approve_retry_response = client.post(
+        f"/api/v2/projects/{project_id}/candidates/decisions",
+        json={"decisions": [{"candidate_id": pending_candidate["candidate_id"], "status": "approved"}]},
+    )
+    assert approve_retry_response.status_code == 200
+    regenerate_response = client.post(f"/api/v2/projects/{project_id}/writeback", json={"application_mode": "revision"})
+    assert regenerate_response.status_code == 200
+    assert regenerate_response.json()["written_count"] == 1
+    assert regenerate_response.json()["included_count"] == 2
+    refreshed = client.get(f"/api/v2/projects/{project_id}").json()
+    assert refreshed["status"] == "written"
+    assert refreshed["output_stale"] is False
+    assert refreshed["pending_count"] == 0
+
+
+def test_v2_docx_repeated_numbers_do_not_create_local_candidates(monkeypatch):
+    async def fake_proofread_text_with_context(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    source = make_docx(["第1章统计10页。第2章仍为10页。第3章记录20页。"])
+    create_response = client.post(
+        "/api/v2/projects",
+        params={
+            "filename": "数字重复.docx",
+            "book": json.dumps(BOOK, ensure_ascii=False),
+            "review_goal": "检查全书一致性。",
+        },
+        content=source,
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}").json()
+
+    assert run["status"] == "succeeded"
+    assert run["candidate_count"] == 0
+    assert client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"] == []
+
+
+def test_v2_local_non_ai_rules_do_not_emit_candidates_when_ai_returns_empty(monkeypatch):
+    async def fake_proofread_text_with_context(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(
+        workspace_agent.proofread_service,
+        "proofread_text_with_context",
+        fake_proofread_text_with_context,
+    )
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有中文,逗号！！中文(括号)。",
+            "book": BOOK,
+            "review_goal": "检查当前选区体例。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run_status_response = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}")
+    assert run_status_response.status_code == 200
+    run = run_status_response.json()
+    assert run["status"] == "succeeded"
+    assert run["candidate_count"] == 0
+
+    candidates = client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"]
+    assert candidates == []
+
+
+def test_v2_filters_ai_mechanical_copyediting_candidates(monkeypatch):
+    async def fake_proofread_with_ai(*args, **kwargs):
+        return AIProofreadResult(
+            response_id="resp-1",
+            issues=[
+                ProofreadIssue(
+                    id="ai-issue-punctuation",
+                    category="punctuation",
+                    severity="low",
+                    original="中文,逗号",
+                    replacement="中文，逗号",
+                    suggestion="替换符号。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-space",
+                    category="style",
+                    severity="low",
+                    original="A B",
+                    replacement="AB",
+                    suggestion="删除空格。",
+                ),
+            ],
+        )
+
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+    monkeypatch.setattr(workspace_agent.proofread_service, "proofread_with_ai", fake_proofread_with_ai)
+    create_response = client.post(
+        "/api/v2/projects/selection",
+        json={
+            "text": "这里有中文,逗号，也有 A B。",
+            "book": BOOK,
+            "review_goal": "检查当前选区。",
+        },
+    )
+    assert create_response.status_code == 200
+    project_id = create_response.json()["project_id"]
+
+    run_response = client.post(f"/api/v2/projects/{project_id}/runs", json={})
+    assert run_response.status_code == 200
+    run_status_response = client.get(f"/api/v2/projects/{project_id}/runs/{run_response.json()['run_id']}")
+    assert run_status_response.status_code == 200
+    run = run_status_response.json()
+    assert run["status"] == "succeeded"
+    assert run["candidate_count"] == 0
+    assert client.get(f"/api/v2/projects/{project_id}/candidates").json()["candidates"] == []
 
 
 def test_v2_delete_selection_project_removes_related_workspace_data():

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -177,10 +179,18 @@ def clear_store_for_tests(settings: Settings | None = None) -> None:
         shutil.rmtree(root)
 
 
-def _connect(settings: Settings | None = None) -> sqlite3.Connection:
+@contextmanager
+def _connect(settings: Settings | None = None) -> Iterator[sqlite3.Connection]:
     root = output_dir(settings)
     root.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(root / "results.sqlite3")
+    connection = sqlite3.connect(root / "results.sqlite3")
+    try:
+        yield connection
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _ensure_schema(settings: Settings | None = None) -> None:

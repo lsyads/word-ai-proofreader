@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import AsyncIterator
 from typing import Literal
 
 from app.schemas import BookInfo, ProofreadIssue, ProofreadLocator
 from app.services.ai_client import (
     AIClientError,
+    AIRequestTimeoutEstimate,
     AIStreamEvent,
     DEFAULT_TEMPERATURE,
-    V2PromptContext,
+    estimate_proofread_request_timeout,
     proofread_with_ai,
     stream_proofread_with_ai,
 )
@@ -24,6 +26,19 @@ logger = logging.getLogger(__name__)
 MIN_ORIGINAL_LOCATOR_LENGTH = 6
 MAX_LOCATOR_OCCURRENCES = 3
 CONTEXT_LOCATOR_WINDOWS = (16, 32, 64)
+MECHANICAL_ISSUE_KEYWORDS = (
+    "标点",
+    "空格",
+    "空白字符",
+    "制表",
+    "换行",
+    "全角",
+    "半角",
+    "中英文符号",
+    "中文符号",
+    "英文符号",
+    "重复符号",
+)
 
 
 async def proofread_text(
@@ -45,7 +60,6 @@ async def proofread_text(
         proofread_mode=proofread_mode,
         reasoning_enabled=reasoning_enabled,
         temperature=temperature,
-        v2_context=None,
     )
 
 
@@ -58,7 +72,6 @@ async def proofread_text_with_context(
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
-    v2_context: V2PromptContext | None = None,
 ) -> list[ProofreadIssue]:
     settings = get_settings()
     profile = resolve_ai_profile(settings, ai_profile_id)
@@ -95,13 +108,33 @@ async def proofread_text_with_context(
         if temperature != DEFAULT_TEMPERATURE:
             ai_kwargs["temperature"] = temperature
 
-        if v2_context is not None:
-            ai_kwargs["v2_context"] = v2_context
         result = await proofread_with_ai(text, book, **ai_kwargs)
         return locate_issues(text, result.issues)
 
     logger.info("proofread service using mock issues")
-    return locate_issues(text, build_mock_issues(text, v2_context))
+    return locate_issues(text, build_mock_issues(text))
+
+
+def estimate_proofread_text_timeout(
+    text: str,
+    book: BookInfo,
+    ai_profile_id: str | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> AIRequestTimeoutEstimate:
+    settings = get_settings()
+    return estimate_proofread_request_timeout(
+        text,
+        book,
+        settings=settings,
+        ai_profile_id=ai_profile_id,
+        provider_api=provider_api,
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+        temperature=temperature,
+    )
 
 
 async def stream_proofread_text(
@@ -165,9 +198,8 @@ async def stream_proofread_text(
         yield event
 
 
-def build_mock_issues(text: str, v2_context: V2PromptContext | None = None) -> list[ProofreadIssue]:
+def build_mock_issues(text: str) -> list[ProofreadIssue]:
     sample = text[: min(len(text), 12)]
-    prefix = f"[{v2_context.pass_name}] " if v2_context else ""
 
     return [
         ProofreadIssue(
@@ -176,7 +208,7 @@ def build_mock_issues(text: str, v2_context: V2PromptContext | None = None) -> l
             severity="medium",
             original=sample,
             replacement=f"{sample}（建议核对）" if sample else None,
-            suggestion=f"{prefix}请结合审校目标检查该表述是否准确、简洁，并确认是否符合出版物体例。",
+            suggestion="请检查该表述是否准确、简洁，并确认是否符合出版物体例。",
         )
     ]
 
@@ -196,9 +228,9 @@ def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssu
     filtered_count = 0
 
     for issue in issues:
-        if _is_whitespace_only_change(issue):
+        if _is_mechanical_copyediting_issue(issue):
             filtered_count += 1
-            logger.debug("issue filtered as whitespace-only change issue_id=%s", issue.id)
+            logger.debug("issue filtered as mechanical copyediting issue issue_id=%s", issue.id)
             continue
 
         original = issue.original.strip()
@@ -229,7 +261,7 @@ def locate_issues(text: str, issues: list[ProofreadIssue]) -> list[ProofreadIssu
         )
 
     logger.info(
-        "issue location completed issue_count=%s filtered_whitespace_issue_count=%s located_issue_count=%s unlocated_issue_count=%s",
+        "issue location completed issue_count=%s filtered_mechanical_issue_count=%s located_issue_count=%s unlocated_issue_count=%s",
         len(issues),
         filtered_count,
         sum(1 for issue in located if issue.start is not None and issue.end is not None),
@@ -328,8 +360,44 @@ def _is_whitespace_only_change(issue: ProofreadIssue) -> bool:
     return _remove_all_whitespace(issue.original) == _remove_all_whitespace(issue.replacement)
 
 
+def _is_mechanical_copyediting_issue(issue: ProofreadIssue) -> bool:
+    if _is_punctuation_category(issue.category):
+        return True
+    if _is_whitespace_only_change(issue):
+        return True
+    if _is_mechanical_suggestion(issue):
+        return True
+    return _is_punctuation_or_spacing_only_change(issue)
+
+
+def _is_punctuation_category(category: str) -> bool:
+    normalized = category.strip().lower()
+    return normalized == "punctuation" or "标点" in category
+
+
+def _is_mechanical_suggestion(issue: ProofreadIssue) -> bool:
+    text = f"{issue.category} {issue.suggestion}".lower()
+    return any(keyword in text for keyword in MECHANICAL_ISSUE_KEYWORDS)
+
+
+def _is_punctuation_or_spacing_only_change(issue: ProofreadIssue) -> bool:
+    if issue.replacement is None:
+        return False
+
+    return _editorial_semantic_text(issue.original) == _editorial_semantic_text(issue.replacement)
+
+
 def _remove_all_whitespace(value: str) -> str:
     return re.sub(r"\s+", "", value)
+
+
+def _editorial_semantic_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return "".join(
+        char
+        for char in normalized
+        if not char.isspace() and not unicodedata.category(char).startswith("P")
+    )
 
 
 def _mask_session_id(session_id: str | None) -> str:

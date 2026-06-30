@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
+import tiktoken
 from pydantic import ValidationError
 
 from app.schemas import BookInfo, ProofreadIssue
@@ -25,6 +27,7 @@ ProofreadMode = Literal["fast", "thinking"]
 ChatDialect = Literal["default", "xiaomimimo"]
 DEFAULT_TEMPERATURE = 0.2
 logger = logging.getLogger(__name__)
+_TOKENIZER_UNAVAILABLE_MODELS: set[str] = set()
 
 
 class AIClientError(RuntimeError):
@@ -44,54 +47,50 @@ class AIStreamEvent:
 
 
 @dataclass(frozen=True)
-class V2PromptContext:
-    review_goal: str
-    source_type: str
-    pass_name: str
-    document_map_summary: str
-    memory_items: list[dict[str, Any]]
-    style_rules: list[str]
+class AIRequestTimeoutEstimate:
+    timeout_seconds: float
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_total_tokens: int
+    token_units: int
+    proofread_mode: ProofreadMode
+    reasoning_enabled: bool
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "timeout_seconds": self.timeout_seconds,
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "estimated_output_tokens": self.estimated_output_tokens,
+            "estimated_total_tokens": self.estimated_total_tokens,
+            "token_units": self.token_units,
+            "proofread_mode": self.proofread_mode,
+            "reasoning_enabled": self.reasoning_enabled,
+        }
 
 
 BASE_SYSTEM_PROMPT = """
-你是出版社责任编辑的中文审校助手。请审校用户提供的 Word 选区文本，并返回结构化JSON结果。
+你是出版社责任编辑的中文审校助手。审校 <text> 中的待审文本片段，并返回紧凑 JSON。
 
-返回格式：
-{
-  "issues": [
-    {
-      "id": "issue-1",
-      "category": "typo",
-      "severity": "low",
-      "original": "原文片段",
-      "replacement": "可直接替换原文的新文本，不能直接替换时用 null",
-      "suggestion": "给责任编辑看的修改建议"
-    }
-  ]
-}
+输出 JSON：
+{"issues":[{"id":"issue-1","category":"typo","severity":"low","original":"原文片段","replacement":"可直接替换文本或 null","suggestion":"给责任编辑看的建议"}]}
 
-基本要求：
-1. 只审校 <text> 标签内文本，不审校 <book> 信息或标签本身。
-2. 只输出能在原文中定位的明确问题，不为凑数量输出低置信度问题。
-3. 忽略可改可不改、纯风格偏好、主观润色、扩写、标题美化建议，忽略化学表达式小标问题。
-4. 忽略空格、制表符等空白字符问题。
-
-输出要求：
-1. 只返回紧凑 JSON，不要 Markdown、解释、代码块或多余文本。
-2. 顶层只包含 issues 字段；没有明确问题时返回 {"issues": []}。
-3. original 必须逐字摘录自 <text> 内的连续原文片段，不得改写、概括、补全或跨不连续位置。
-4. replacement 只能填写可直接替换 original 的正文文本；不能直接替换、涉及较大重写、事实待核、逻辑疑问、体例疑问时，必须为 null。
-5. suggestion 写给责任编辑看，简短说明问题原因和处理建议，不超过 100 个汉字。
+硬性规则：
+1. 只判断 <text> 内文本；<book> 和标签本身只作背景；original 必须是 <text> 内连续原文，不能改写、概括、补全或跨不连续位置。
+2. 可结合模型已有知识、通用常识、专业知识和 <book> 背景判断问题；可输出语言、事实、知识、数据、公式、逻辑、前后一致性、术语和出版风险问题。
+3. replacement 在有确定替换文本时填写；没有唯一替换、需实时查证、需编辑取舍或需大段改写时填 null，并在 suggestion 说明。
+4. 不输出纯风格偏好、主观润色、扩写、标题美化、化学表达式小标，以及标点、空格、制表符、换行、全半角和中英文符号替换等机械校对项。
+5. 没有问题返回 {"issues":[]}；只返回 JSON；顶层只包含 issues；不要 Markdown、解释、代码块或多余文本。
+6. suggestion 写给责任编辑看，说明问题原因和处理建议，不超过 100 个汉字；不复述完整正文、密钥或认证头。
 
 严重程度：
 - high：事实、知识点、数据、公式错误，严重逻辑矛盾，影响出版准确性的硬伤。
 - medium：明显病句、搭配不当、语义不清、指代不明、段落逻辑不顺、体例明显不一致。
-- low：错别字、漏字、多字、标点误用、轻微明确问题。
+- low：错别字、漏字、多字、轻微但明确的问题。
 
 category 只能使用：
 - typo：错别字、漏字、多字
 - grammar：语法、病句、搭配不当、语义不清、指代不明、整段不通顺
-- punctuation：标点误用
+- punctuation：兼容字段，模型不要主动使用
 - consistency：前后不一致、称谓/数字/时间/单位/数据不一致
 - fact：事实疑问、知识点错误、概念混淆、数据错误、公式错误、明显事实冲突
 - style：出版物体例硬伤
@@ -104,31 +103,24 @@ MODE_PROMPTS: dict[ProofreadMode, str] = {
 当前模式：快速审校。
 
 审校范围：
-1. 错别字、漏字、多字。
-2. 明显病句、搭配不当、语义不清、指代不明。
-3. 明显前后矛盾、称谓不一致、数字/时间/单位前后不一致。
-4. 标点误用。
-5. 明显出版物体例硬伤。
-
-取舍标准：
-1. 只处理高置信度、文本内即可判断、通常不需要外部资料的问题。
-2. 不把正常表达改成个人偏好的表达。
+1. 局部文字问题：错别字、漏字、多字。
+2. 局部表达问题：病句、搭配不当、语义不清、指代不明。
+3. 局部一致性问题：同一片段内称谓、数字、时间、单位、术语前后不一致。
+4. 常识性事实、知识、数据或逻辑问题。
+5. 直接影响理解或出版准确性的风险。
 """.strip(),
 
     "thinking": """
 当前模式：深度审校。
 
 审校范围：
-1. 基础语言问题：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明、标点误用。
-2. 表达与逻辑问题：整段是否通顺，句间逻辑是否连贯，主谓宾关系是否清楚，表述是否符合正式出版物规范。
-3. 知识点问题：概念、术语、定义、分类、原理、因果关系、适用条件、实验方法、专业表述是否准确严谨。
-4. 数据与公式问题：数字、单位、比例、公式、范围、阈值、时间、数量级、统计口径是否错误、矛盾或疑似缺少依据。
-5. 事实与体例问题：明显事实冲突、前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、出版物体例硬伤。
-
-取舍标准：
-1. 能根据文本本身或通用知识明确判断的问题，可以给出 replacement。
-2. 需要外部资料、全书上下文或专业人工确认的问题，replacement 必须为 null，并在 suggestion 中写明“需人工核查”。
-3. 不把正常表达改成个人偏好的表达。
+1. 文字与语句：错别字、漏字、多字、病句、搭配不当、语义不清、指代不明。
+2. 段落与表达：段落是否通顺，句间关系是否连贯，主谓宾关系是否清楚，表述是否符合正式出版物规范。
+3. 事实与知识：事实冲突、概念混淆、定义错误、分类错误、原理错误、适用条件错误、专业表述不当。
+4. 数据与公式：数字、单位、比例、公式、范围、阈值、时间、数量级、统计口径错误或前后矛盾。
+5. 逻辑与结论：前后矛盾、因果倒置、结论与依据不匹配、表述过度绝对、推理链条断裂。
+6. 出版风险：影响读者理解、知识准确性、体例一致性或出版判断的问题。
+7. 其他审校问题：不限于上述类型；应充分结合模型已有知识、通用常识和专业知识，发现各类影响出版质量、知识准确性、读者理解、论述可信度或出版判断的问题。
 """.strip(),
 }
 
@@ -142,7 +134,6 @@ async def proofread_with_ai(
     proofread_mode: ProofreadMode = "fast",
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
-    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     settings = settings or get_settings()
     try:
@@ -160,7 +151,6 @@ async def proofread_with_ai(
             proofread_mode=proofread_mode,
             reasoning_enabled=reasoning_enabled,
             temperature=temperature,
-            v2_context=v2_context,
         )
 
     _ensure_responses_api(profile)
@@ -172,7 +162,6 @@ async def proofread_with_ai(
         profile,
         proofread_mode=proofread_mode,
         temperature=temperature,
-        v2_context=v2_context,
     )
     logger.info(
         "AI responses request started profile_id=%s model=%s proofread_mode=%s temperature=%s text_len=%s max_output_tokens=%s",
@@ -186,8 +175,21 @@ async def proofread_with_ai(
 
     _debug_log_json("AI responses request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI responses request timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.post(
             _responses_url(profile),
             headers=headers,
@@ -257,8 +259,21 @@ async def stream_proofread_with_ai(
 
     _debug_log_json("AI responses stream request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI responses stream timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         async with client.stream(
             "POST",
             _responses_url(profile),
@@ -322,6 +337,56 @@ async def stream_proofread_with_ai(
                     raise AIClientError(f"AI provider Responses API returned {event_name}")
 
 
+def estimate_proofread_request_timeout(
+    text: str,
+    book: BookInfo,
+    settings: Settings | None = None,
+    ai_profile_id: str | None = None,
+    provider_api: ProviderAPI | None = None,
+    proofread_mode: ProofreadMode = "fast",
+    reasoning_enabled: bool = False,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> AIRequestTimeoutEstimate:
+    settings = settings or get_settings()
+    try:
+        profile = resolve_ai_profile(settings, ai_profile_id)
+        provider_api = resolve_provider_api(profile, provider_api)
+    except AIProfileError as exc:
+        raise AIClientError(str(exc)) from exc
+
+    if provider_api == "chat":
+        payload = _build_chat_payload(
+            text,
+            book,
+            settings,
+            profile,
+            proofread_mode=proofread_mode,
+            reasoning_enabled=reasoning_enabled,
+            temperature=temperature,
+        )
+        timeout_seconds, timeout_meta = _chat_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    else:
+        payload = _build_responses_payload(
+            text,
+            book,
+            settings,
+            profile,
+            proofread_mode=proofread_mode,
+            temperature=temperature,
+        )
+        timeout_seconds, timeout_meta = _responses_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+
+    return AIRequestTimeoutEstimate(
+        timeout_seconds=timeout_seconds,
+        estimated_input_tokens=timeout_meta["estimated_input_tokens"],
+        estimated_output_tokens=timeout_meta["estimated_output_tokens"],
+        estimated_total_tokens=timeout_meta["estimated_total_tokens"],
+        token_units=timeout_meta["token_units"],
+        proofread_mode=proofread_mode,
+        reasoning_enabled=reasoning_enabled,
+    )
+
+
 def _ensure_responses_api(profile: AIProfile) -> None:
     _ensure_api_key(profile)
 
@@ -334,7 +399,6 @@ async def _proofread_with_chat(
     proofread_mode: ProofreadMode,
     reasoning_enabled: bool,
     temperature: float,
-    v2_context: V2PromptContext | None = None,
 ) -> AIProofreadResult:
     _ensure_api_key(profile)
     dialect = _chat_dialect(profile)
@@ -347,7 +411,6 @@ async def _proofread_with_chat(
         reasoning_enabled=reasoning_enabled,
         temperature=temperature,
         dialect=dialect,
-        v2_context=v2_context,
     )
     logger.info(
         "AI chat request started profile_id=%s model=%s dialect=%s proofread_mode=%s reasoning_enabled=%s temperature=%s text_len=%s output_token_limit=%s",
@@ -363,8 +426,21 @@ async def _proofread_with_chat(
 
     _debug_log_json("AI chat request payload", payload)
     headers = _auth_headers(profile)
+    timeout_seconds, timeout_meta = _chat_timeout(settings, profile, payload, proofread_mode, reasoning_enabled)
+    logger.info(
+        "AI chat request timeout estimated profile_id=%s model=%s estimated_input_tokens=%s estimated_output_tokens=%s estimated_total_tokens=%s token_units=%s timeout_seconds=%s proofread_mode=%s reasoning_enabled=%s",
+        profile.id,
+        profile.model,
+        timeout_meta["estimated_input_tokens"],
+        timeout_meta["estimated_output_tokens"],
+        timeout_meta["estimated_total_tokens"],
+        timeout_meta["token_units"],
+        timeout_seconds,
+        proofread_mode,
+        reasoning_enabled,
+    )
 
-    async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         response = await client.post(
             _chat_url(profile),
             headers=headers,
@@ -398,11 +474,10 @@ def _build_responses_payload(
     proofread_mode: ProofreadMode = "fast",
     stream: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
-    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": profile.model,
-        "input": f"{_build_system_prompt(proofread_mode, v2_context)}\n\n{_build_user_prompt(text, book, v2_context)}",
+        "input": f"{_build_system_prompt(proofread_mode)}\n\n{_build_user_prompt(text, book)}",
         "temperature": temperature,
         "max_output_tokens": _max_tokens_for_mode(settings, proofread_mode),
         "text": {"format": {"type": "json_object"}},
@@ -423,14 +498,13 @@ def _build_chat_payload(
     reasoning_enabled: bool = False,
     temperature: float = DEFAULT_TEMPERATURE,
     dialect: ChatDialect | None = None,
-    v2_context: V2PromptContext | None = None,
 ) -> dict[str, Any]:
     resolved_dialect = dialect or _chat_dialect(profile)
     payload: dict[str, Any] = {
         "model": profile.model,
         "messages": [
-            {"role": "system", "content": _build_system_prompt(proofread_mode, v2_context)},
-            {"role": "user", "content": _build_user_prompt(text, book, v2_context)},
+            {"role": "system", "content": _build_system_prompt(proofread_mode)},
+            {"role": "user", "content": _build_user_prompt(text, book)},
         ],
         "temperature": temperature,
     }
@@ -459,64 +533,160 @@ def _chat_output_token_limit(payload: dict[str, Any]) -> Any:
     return payload.get("max_tokens", payload.get("max_completion_tokens"))
 
 
-def _build_system_prompt(proofread_mode: ProofreadMode, v2_context: V2PromptContext | None = None) -> str:
-    if v2_context is None:
-        return f"{BASE_SYSTEM_PROMPT}\n{MODE_PROMPTS[proofread_mode]}"
-
-    return f"""
-{BASE_SYSTEM_PROMPT}
-{MODE_PROMPTS[proofread_mode]}
-
-V2.1 Agent 工作台要求：
-1. 你当前处在 {v2_context.pass_name} 阶段，必须优先完成该阶段职责，不要泛泛审校。
-2. 审校目标是硬约束，不是备注；候选问题必须服务审校目标。
-3. 结合项目记忆、出版体例规则和文档地图摘要判断问题，但 original 仍必须逐字来自 <text>。
-4. 对证据不足、可能误改、需要全书核验的问题，replacement 必须为 null，并在 suggestion 中标明需人工核查。
-5. 不要把完整正文、密钥、Authorization 或项目记忆原样复述到输出中。
-""".strip()
+def _responses_timeout(
+    settings: Settings,
+    profile: AIProfile,
+    payload: dict[str, Any],
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+) -> tuple[float, dict[str, int]]:
+    input_tokens = _count_text_tokens(profile.model, _coerce_string(payload.get("input")))
+    output_token_limit = _coerce_int(payload.get("max_output_tokens"))
+    return _dynamic_timeout(settings, input_tokens, proofread_mode, reasoning_enabled, output_token_limit)
 
 
-def _build_user_prompt(text: str, book: BookInfo, v2_context: V2PromptContext | None = None) -> str:
+def _chat_timeout(
+    settings: Settings,
+    profile: AIProfile,
+    payload: dict[str, Any],
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+) -> tuple[float, dict[str, int]]:
+    messages = payload.get("messages")
+    input_tokens = _count_chat_tokens(profile.model, messages if isinstance(messages, list) else [])
+    output_token_limit = _coerce_int(_chat_output_token_limit(payload))
+    return _dynamic_timeout(settings, input_tokens, proofread_mode, reasoning_enabled, output_token_limit)
+
+
+def _dynamic_timeout(
+    settings: Settings,
+    input_tokens: int,
+    proofread_mode: ProofreadMode,
+    reasoning_enabled: bool,
+    output_token_limit: int = 0,
+) -> tuple[float, dict[str, int]]:
+    estimated_input_tokens = max(input_tokens, 0)
+    estimated_output_tokens = max(output_token_limit, 0)
+    estimated_total_tokens = estimated_input_tokens + estimated_output_tokens
+    token_units = max(1, math.ceil(max(estimated_total_tokens, 1) / 1000))
+    seconds_per_1k = (
+        settings.ai_thinking_timeout_seconds_per_1k_tokens
+        if proofread_mode == "thinking" or reasoning_enabled
+        else settings.ai_fast_timeout_seconds_per_1k_tokens
+    )
+    raw_timeout = settings.ai_request_timeout_base_seconds + token_units * seconds_per_1k
+    timeout = min(
+        settings.resolved_ai_request_timeout_max_seconds,
+        max(settings.ai_request_timeout_min_seconds, raw_timeout),
+    )
+    return timeout, {
+        "estimated_input_tokens": estimated_input_tokens,
+        "estimated_output_tokens": estimated_output_tokens,
+        "estimated_total_tokens": estimated_total_tokens,
+        "token_units": token_units,
+    }
+
+
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _count_text_tokens(model: str, text: str) -> int:
+    if model in _TOKENIZER_UNAVAILABLE_MODELS:
+        return _approximate_token_count(text)
+    try:
+        return len(_token_encoding(model).encode(text))
+    except Exception as exc:
+        _TOKENIZER_UNAVAILABLE_MODELS.add(model)
+        logger.warning(
+            "tiktoken encoding unavailable, using approximate token count model=%s error_type=%s",
+            model,
+            type(exc).__name__,
+        )
+        return _approximate_token_count(text)
+
+
+def _count_chat_tokens(model: str, messages: list[Any]) -> int:
+    if model in _TOKENIZER_UNAVAILABLE_MODELS:
+        content = "\n".join(
+            _coerce_string(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict)
+        )
+        return _approximate_token_count(content) + 4 * len(messages) + 2
+    try:
+        encoding = _token_encoding(model)
+        content_tokens = 0
+        message_count = 0
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_count += 1
+            content_tokens += len(encoding.encode(_coerce_string(message.get("content", ""))))
+        return content_tokens + 4 * message_count + 2
+    except Exception as exc:
+        _TOKENIZER_UNAVAILABLE_MODELS.add(model)
+        logger.warning(
+            "tiktoken chat encoding unavailable, using approximate token count model=%s error_type=%s",
+            model,
+            type(exc).__name__,
+        )
+        content = "\n".join(
+            _coerce_string(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict)
+        )
+        return _approximate_token_count(content) + 4 * len(messages) + 2
+
+
+def _token_encoding(model: str) -> tiktoken.Encoding:
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def _approximate_token_count(text: str) -> int:
+    return max(1, math.ceil(len(text) / 2))
+
+
+def _build_system_prompt(proofread_mode: ProofreadMode) -> str:
+    return "\n\n".join([BASE_SYSTEM_PROMPT, MODE_PROMPTS[proofread_mode]])
+
+
+def _build_user_prompt(text: str, book: BookInfo) -> str:
     book_context = json.dumps(
         book.model_dump(),
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    v2_context_block = ""
-    if v2_context is not None:
-        context_payload = {
-            "review_goal": v2_context.review_goal,
-            "source_type": v2_context.source_type,
-            "pass_name": v2_context.pass_name,
-            "document_map_summary": v2_context.document_map_summary,
-            "memory_items": v2_context.memory_items,
-            "style_rules": v2_context.style_rules,
-        }
-        v2_context_block = f"""
-<v2_agent_context>
-{json.dumps(context_payload, ensure_ascii=False, separators=(",", ":"))}
-</v2_agent_context>
-""".strip()
-
-    return f"""
-请审校 <text> 标签内的 Word 选区文本。
-
-<book> 为书籍背景信息，仅用于理解语境，不属于待审正文：
+    prompt_parts = [
+        f"""
 <book>
 {book_context}
 </book>
+""".strip()
+    ]
 
-{v2_context_block}
-
-要求：
-1. 只审校 <text> 内文本。
-2. original 必须来自 <text> 内的原文片段。
-3. 不要对 <book>、标签或标签外内容输出问题。
-
+    prompt_parts.append(
+        f"""
 <text>
 {text}
 </text>
 """.strip()
+    )
+    return "\n\n".join(prompt_parts)
 
 
 def _debug_log_json(message: str, payload: Any) -> None:

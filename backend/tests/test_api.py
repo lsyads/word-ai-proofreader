@@ -276,6 +276,70 @@ def test_proofread_filters_whitespace_only_changes(monkeypatch):
     assert issues[0]["end"] == 12
 
 
+def test_proofread_filters_mechanical_punctuation_and_spacing_changes(monkeypatch):
+    async def fake_proofread_with_ai(
+        text,
+        book,
+        provider_api=None,
+        proofread_mode="fast",
+    ):
+        return AIProofreadResult(
+            response_id="resp-1",
+            issues=[
+                ProofreadIssue(
+                    id="ai-issue-punctuation-category",
+                    category="punctuation",
+                    severity="low",
+                    original="错字",
+                    replacement="错字。",
+                    suggestion="补充句末符号。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-comma",
+                    category="style",
+                    severity="low",
+                    original="中文,逗号",
+                    replacement="中文，逗号",
+                    suggestion="替换中英文符号。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-parenthesis",
+                    category="style",
+                    severity="low",
+                    original="中文(括号)",
+                    replacement="中文（括号）",
+                    suggestion="调整全半角。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-tab",
+                    category="style",
+                    severity="low",
+                    original="A\tB",
+                    replacement="AB",
+                    suggestion="删除制表符。",
+                ),
+                ProofreadIssue(
+                    id="ai-issue-typo",
+                    category="typo",
+                    severity="low",
+                    original="别字",
+                    replacement="错字",
+                    suggestion="修正错别字。",
+                ),
+            ],
+        )
+
+    monkeypatch.setenv("AI_API_KEY", "test-key")
+    monkeypatch.setattr(proofread_service, "proofread_with_ai", fake_proofread_with_ai)
+
+    response = client.post("/api/proofread", json=proofread_payload("中文,逗号！！中文(括号)。A\tB 还有别字。"))
+
+    assert response.status_code == 200
+    issues = response.json()["issues"]
+    assert [issue["id"] for issue in issues] == ["ai-issue-typo"]
+    assert issues[0]["replacement"] == "错字"
+
+
 def test_proofread_calculates_offsets_for_repeated_originals(monkeypatch):
     async def fake_proofread_with_ai(
         text,

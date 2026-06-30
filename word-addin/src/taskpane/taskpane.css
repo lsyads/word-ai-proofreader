@@ -205,6 +205,7 @@ body {
 .workspace-empty,
 .workspace-list,
 .workspace-summary,
+.project-summary,
 .compact-status,
 .debug-log {
   background: #fafafa;
@@ -234,6 +235,10 @@ body {
   padding: 0;
 }
 
+.project-action-row {
+  margin: 10px;
+}
+
 .compact-status {
   align-items: center;
   display: flex;
@@ -242,13 +247,79 @@ body {
   min-height: auto;
 }
 
-.compact-status span {
+.project-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: auto;
+}
+
+.project-summary-chips {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.compact-status span,
+.project-summary-chips span {
   background: #ffffff;
   border: 1px solid #edebe9;
   border-radius: 999px;
   color: #323130;
   font-size: 12px;
   padding: 3px 8px;
+}
+
+.run-progress {
+  color: #323130;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+}
+
+.run-progress-header {
+  align-items: center;
+  color: #605e5c;
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.run-progress-bar {
+  background: #edebe9;
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.run-progress-value {
+  background: #0078d4;
+  height: 100%;
+  transition: width 0.2s ease;
+}
+
+.run-progress-meta {
+  color: #605e5c;
+  font-size: 12px;
+}
+
+.run-progress-timeout {
+  color: #605e5c;
+  font-size: 12px;
+}
+
+.run-progress-timeout.is-expired {
+  color: #8a5a00;
+}
+
+.run-progress-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .summary-grid {
@@ -329,6 +400,14 @@ body {
   margin-top: 12px;
 }
 
+.nested-heading {
+  margin-top: 10px;
+}
+
+.nested-heading h3 {
+  margin: 0;
+}
+
 .details-panel summary,
 .candidate-detail summary {
   color: #605e5c;
@@ -355,6 +434,10 @@ body {
 .item-body {
   color: #605e5c;
   font-size: 12px;
+}
+
+.item-body strong {
+  color: #323130;
 }
 
 .candidate-item {
@@ -395,6 +478,11 @@ body {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.candidate-actions .ms-Button {
+  padding-left: 4px;
+  padding-right: 4px;
 }
 
 .candidate-detail {

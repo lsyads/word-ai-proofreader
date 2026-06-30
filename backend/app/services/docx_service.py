@@ -26,6 +26,7 @@ def write_docx_result(
     output_path: Path,
     *,
     fallback_summary_truncate_enabled: bool = True,
+    author: str = docx.DEFAULT_WRITEBACK_AUTHOR,
 ) -> docx.WritebackSummary:
     """Write proofreading issues back into a new DOCX result file."""
     return docx.write_docx_result(
@@ -34,5 +35,5 @@ def write_docx_result(
         application_mode,
         output_path,
         fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+        author=author,
     )
-

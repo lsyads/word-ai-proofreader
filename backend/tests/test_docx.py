@@ -4,6 +4,7 @@ import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeAlias
+from xml.etree import ElementTree as ET
 
 from fastapi.testclient import TestClient
 from app.agents import trace as agent_trace
@@ -215,6 +216,8 @@ def test_write_docx_result_inserts_comment(tmp_path: Path):
         document_xml = archive.read("word/document.xml").decode()
         comments_xml = archive.read("word/comments.xml").decode()
     assert "commentRangeStart" in document_xml
+    assert 'w:author="Word Proofreader"' in comments_xml
+    assert "Word AI Proofreader" not in comments_xml
     assert "修正错字" in comments_xml
 
 
@@ -330,7 +333,13 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     )
     output = tmp_path / "out.docx"
 
-    summary = docx_service.write_docx_result(source, [chunked_issue], "revision", output)
+    summary = docx_service.write_docx_result(
+        source,
+        [chunked_issue],
+        "revision",
+        output,
+        author="责任编辑",
+    )
 
     assert summary.comment_count == 1
     assert summary.revision_count == 1
@@ -340,11 +349,89 @@ def test_write_docx_result_inserts_revision(tmp_path: Path):
     assert "commentRangeStart" in document_xml
     assert "<w:del" in document_xml
     assert "<w:ins" in document_xml
+    assert 'w:author="责任编辑"' in comments_xml
+    assert 'w:author="责任编辑"' in document_xml
+    assert "Word AI Proofreader" not in comments_xml
+    assert "Word AI Proofreader" not in document_xml
     assert "正字" in document_xml
     assert "修正错字" in comments_xml
     assert document_xml.index("<w:del") < document_xml.index("commentRangeStart")
     assert document_xml.index("commentRangeStart") < document_xml.index("<w:ins")
     assert document_xml.index("<w:ins") < document_xml.index("commentRangeEnd")
+
+
+def test_write_docx_result_inserts_revision_across_split_runs(tmp_path: Path):
+    source = make_docx(["这里有错字。"])
+    with zipfile.ZipFile(io.BytesIO(source)) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+    document_xml = document_xml.replace(
+        "<w:r><w:t>这里有错字。</w:t></w:r>",
+        "<w:r><w:t>这里有错</w:t></w:r><w:r><w:t>字。</w:t></w:r>",
+    )
+    source = replace_docx_entry(source, "word/document.xml", document_xml.encode())
+    document = docx_service.parse_docx(source)
+    start = document.text.index("错字")
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="错字",
+        replacement="正字",
+        suggestion="修正错字。",
+        chunk_index=0,
+        global_start=start,
+        global_end=start + 2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(source, [issue], "revision", output)
+
+    assert summary.comment_count == 1
+    assert summary.revision_count == 1
+    assert summary.fallback_count == 0
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    root = ET.fromstring(document_xml)
+    namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.findall(".//w:del", namespaces)) == 2
+    assert len(root.findall(".//w:ins", namespaces)) == 1
+    assert "正字" in document_xml
+    assert "修正错字" in comments_xml
+
+
+def test_write_docx_result_does_not_insert_revision_across_paragraphs(tmp_path: Path):
+    source = make_docx(["甲", "乙"])
+    issue = docx_service.ChunkedProofreadIssue(
+        id="issue-1",
+        category="typo",
+        severity="high",
+        original="甲乙",
+        replacement="甲丙",
+        suggestion="跨段落不应直接修订。",
+        chunk_index=0,
+        global_start=0,
+        global_end=2,
+    )
+    output = tmp_path / "out.docx"
+
+    summary = docx_service.write_docx_result(
+        source,
+        [issue],
+        "revision",
+        output,
+        fallback_summary_truncate_enabled=False,
+    )
+
+    assert summary.comment_count == 0
+    assert summary.revision_count == 0
+    assert summary.fallback_count == 1
+    with zipfile.ZipFile(output) as archive:
+        document_xml = archive.read("word/document.xml").decode()
+        comments_xml = archive.read("word/comments.xml").decode()
+    assert "<w:del" not in document_xml
+    assert "<w:ins" not in document_xml
+    assert "跨段落不应直接修订" in comments_xml
 
 
 def test_write_docx_result_comment_mode_does_not_insert_revision(tmp_path: Path):
@@ -576,7 +663,7 @@ def test_docx_task_api_uploads_generates_and_downloads(monkeypatch, tmp_path: Pa
         assert "word/document.xml" in archive.namelist()
 
 
-def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Path):
+def test_docx_task_api_passes_summary_truncate_setting_and_author(monkeypatch, tmp_path: Path):
     async def fake_proofread_text(
         text,
         book,
@@ -588,7 +675,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
     ):
         return []
 
-    captured: dict[str, bool] = {}
+    captured: dict[str, object] = {}
     original_write_docx_result = docx_service.write_docx_result
 
     def spy_write_docx_result(
@@ -597,14 +684,17 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
         application_mode,
         output_path,
         fallback_summary_truncate_enabled=True,
+        author=docx_service.DEFAULT_WRITEBACK_AUTHOR,
     ):
         captured["fallback_summary_truncate_enabled"] = fallback_summary_truncate_enabled
+        captured["author"] = author
         return original_write_docx_result(
             source_bytes,
             issues,
             application_mode,
             output_path,
             fallback_summary_truncate_enabled=fallback_summary_truncate_enabled,
+            author=author,
         )
 
     monkeypatch.setattr(docx_task_service, "proofread_text", fake_proofread_text)
@@ -617,6 +707,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
             "book": json.dumps(BOOK, ensure_ascii=False),
             "application_mode": "comment",
             "fallback_summary_truncate_enabled": "false",
+            "author": "责任编辑",
         },
         content=make_docx(["第一章 开始", "没有问题。"]),
         headers={"content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
@@ -626,7 +717,7 @@ def test_docx_task_api_passes_summary_truncate_setting(monkeypatch, tmp_path: Pa
     task_id = response.json()["task_id"]
     with client.stream("GET", f"/api/proofread/docx/tasks/{task_id}/events") as stream:
         assert "completed" in stream.read().decode()
-    assert captured == {"fallback_summary_truncate_enabled": False}
+    assert captured == {"fallback_summary_truncate_enabled": False, "author": "责任编辑"}
 
 
 def test_docx_download_survives_in_memory_task_restart(monkeypatch, tmp_path: Path):

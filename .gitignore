@@ -16,6 +16,7 @@ pnpm-debug.log*
 
 # Editor / IDE local files
 .idea/
+.kilo/
 *.swp
 *.swo
 *~

@@ -137,6 +137,7 @@ class DocxProofreadResult(BaseModel):
     application_mode: ApplicationMode
     output_filename: str | None = None
     download_url: str | None = None
+    output_stale: bool = False
     expires_at: str | None = None
     retention_days: int | None = None
     error_message: str | None = None
@@ -196,6 +197,18 @@ class AgentRunTraceResponse(BaseModel):
     chunks: list[AgentChunkTraceResponse]
 
 
+class AITimeoutEstimate(BaseModel):
+    timeout_seconds: float = Field(..., ge=0)
+    started_at: str
+    deadline_at: str
+    estimated_input_tokens: int = Field(..., ge=0)
+    estimated_output_tokens: int = Field(..., ge=0)
+    estimated_total_tokens: int = Field(..., ge=0)
+    token_units: int = Field(..., ge=1)
+    proofread_mode: Literal["fast", "thinking"]
+    reasoning_enabled: bool
+
+
 V2ProjectStatus = Literal["created", "running", "waiting_for_approval", "succeeded", "written", "failed", "cancelled"]
 V2RunStatus = Literal["queued", "running", "waiting_for_approval", "succeeded", "partial_succeeded", "failed", "cancelled"]
 V2CandidateStatus = Literal["pending", "approved", "rejected", "deferred", "written"]
@@ -208,6 +221,8 @@ V2RunEventName = Literal[
     "pass_completed",
     "tool_started",
     "tool_completed",
+    "retry_queued",
+    "chunk_retrying",
     "candidate_found",
     "candidate_merged",
     "candidate_evaluated",
@@ -222,7 +237,10 @@ V2RunEventName = Literal[
 
 class V2ProjectCreateRequest(BaseModel):
     book: BookInfo
-    review_goal: str = Field(default="完成全书出版审校，输出候选问题、证据、写回结果和审校报告。", min_length=1)
+    review_goal: str = Field(
+        default="完成全书出版审校，找出明显错别字、漏字、多字、语病、事实或逻辑风险、术语和前后一致性风险。",
+        min_length=1,
+    )
 
 
 class V2SelectionProjectCreateRequest(V2ProjectCreateRequest):
@@ -257,6 +275,7 @@ class V2ProjectResponse(BaseModel):
     approved_count: int = 0
     output_filename: str | None = None
     download_url: str | None = None
+    output_stale: bool = False
 
 
 class V2ProjectListResponse(BaseModel):
@@ -331,6 +350,7 @@ class V2RunResponse(BaseModel):
     error_message: str | None = None
     created_at: str
     updated_at: str
+    current_timeout: AITimeoutEstimate | None = None
 
 
 class V2CandidateIssue(BaseModel):
@@ -361,6 +381,7 @@ class V2CandidateIssue(BaseModel):
 
 class V2CandidateListResponse(BaseModel):
     project_id: str
+    run_id: str | None = None
     candidates: list[V2CandidateIssue]
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1)
@@ -402,6 +423,7 @@ class V2MarkWrittenResponse(BaseModel):
 class V2WritebackRequest(BaseModel):
     application_mode: ApplicationMode = "comment"
     fallback_summary_truncate_enabled: bool = True
+    author: str = Field(default="Word Proofreader", max_length=80)
 
 
 class V2WritebackResponse(BaseModel):
@@ -413,6 +435,7 @@ class V2WritebackResponse(BaseModel):
     fallback_count: int
     failed_count: int
     written_count: int
+    included_count: int
 
 
 class V2RunEventResponse(BaseModel):

@@ -55,6 +55,7 @@ interface ResolvedIssueTargets {
 interface WriteBatchResult {
   successCount: number;
   failedIssues: ProofreadIssue[];
+  writtenIssueIds: string[];
   contextFailed?: boolean;
 }
 
@@ -70,6 +71,10 @@ interface CommentBatchResult {
   truncatedFallbackCount: number;
   retryIssues: ProofreadIssue[];
   fallbackIssues: ProofreadIssue[];
+  writtenIssueIds: string[];
+  fallbackIssueIds: string[];
+  failedIssueIds: string[];
+  truncatedIssueIds: string[];
 }
 
 interface FallbackWriteResult {
@@ -77,6 +82,9 @@ interface FallbackWriteResult {
   fallbackCommentCount: number;
   failedCount: number;
   truncatedFallbackCount: number;
+  fallbackIssueIds: string[];
+  failedIssueIds: string[];
+  truncatedIssueIds: string[];
 }
 
 interface FallbackCommentChunk {
@@ -89,6 +97,7 @@ interface RevisionBatchResult {
   revisionCount: number;
   retryIssues: ProofreadIssue[];
   fallbackIssues: ProofreadIssue[];
+  writtenIssueIds: string[];
 }
 
 interface BestEffortCommentResult {
@@ -318,6 +327,10 @@ async function insertCommentsForIssues(
         truncatedFallbackCount: 0,
         retryIssues: batch,
         fallbackIssues: [],
+        writtenIssueIds: [],
+        fallbackIssueIds: [],
+        failedIssueIds: [],
+        truncatedIssueIds: [],
       };
     }
 
@@ -359,6 +372,9 @@ async function insertCommentsForIssues(
     summary.fallbackCommentCount += fallbackResult.fallbackCommentCount;
     summary.failedCount += fallbackResult.failedCount;
     summary.truncatedFallbackCount += fallbackResult.truncatedFallbackCount;
+    summary.fallbackIssueIds.push(...fallbackResult.fallbackIssueIds);
+    summary.failedIssueIds.push(...fallbackResult.failedIssueIds);
+    summary.truncatedIssueIds.push(...fallbackResult.truncatedIssueIds);
   }
 
   return summary;
@@ -383,6 +399,10 @@ async function insertCommentIssueBatch(
         truncatedFallbackCount: 0,
         retryIssues: issues,
         fallbackIssues: [],
+        writtenIssueIds: [],
+        fallbackIssueIds: [],
+        failedIssueIds: [],
+        truncatedIssueIds: [],
       };
     }
 
@@ -397,6 +417,10 @@ async function insertCommentIssueBatch(
         truncatedFallbackCount: 0,
         retryIssues: commentResult.failedIssues,
         fallbackIssues: resolved.summaryIssues,
+        writtenIssueIds: commentResult.writtenIssueIds,
+        fallbackIssueIds: [],
+        failedIssueIds: [],
+        truncatedIssueIds: [],
       };
     }
 
@@ -408,6 +432,10 @@ async function insertCommentIssueBatch(
       truncatedFallbackCount: 0,
       retryIssues: [],
       fallbackIssues: resolved.summaryIssues,
+      writtenIssueIds: commentResult.writtenIssueIds,
+      fallbackIssueIds: [],
+      failedIssueIds: [],
+      truncatedIssueIds: [],
     };
   });
 }
@@ -426,6 +454,10 @@ async function retryCommentIssuesInFreshContexts(
     truncatedFallbackCount: 0,
     retryIssues: [],
     fallbackIssues: [],
+    writtenIssueIds: [],
+    fallbackIssueIds: [],
+    failedIssueIds: [],
+    truncatedIssueIds: [],
   };
 
   for (const issue of issues) {
@@ -437,6 +469,10 @@ async function retryCommentIssuesInFreshContexts(
       result.failedCount += retryResult.failedCount;
       result.truncatedFallbackCount += retryResult.truncatedFallbackCount;
       result.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
+      result.writtenIssueIds.push(...retryResult.writtenIssueIds);
+      result.fallbackIssueIds.push(...retryResult.fallbackIssueIds);
+      result.failedIssueIds.push(...retryResult.failedIssueIds);
+      result.truncatedIssueIds.push(...retryResult.truncatedIssueIds);
     } catch (error) {
       logWordOperationFailure("comment", error, {
         category: issue.category,
@@ -471,6 +507,9 @@ async function insertFallbackCommentInFreshContext(
       fallbackCommentCount: 0,
       failedCount: 0,
       truncatedFallbackCount: 0,
+      fallbackIssueIds: [],
+      failedIssueIds: [],
+      truncatedIssueIds: [],
     };
   }
 
@@ -489,6 +528,9 @@ async function insertFallbackCommentInFreshContext(
       fallbackCommentCount: 0,
       failedCount: issues.length,
       truncatedFallbackCount: 0,
+      fallbackIssueIds: [],
+      failedIssueIds: issues.map((issue) => issue.id),
+      truncatedIssueIds: [],
     };
   }
 }
@@ -499,7 +541,10 @@ async function insertFallbackCommentChunksInFreshContexts(
   issues: ProofreadIssue[],
   options: ApplyIssuesOptions
 ): Promise<FallbackWriteResult> {
-  const { chunks, truncatedFallbackCount } = buildFallbackCommentChunks(issues, options);
+  const { chunks, truncatedFallbackCount, truncatedIssueIds } = buildFallbackCommentChunks(
+    issues,
+    options
+  );
   const writableIssueIds = new Set(
     chunks.flatMap((chunk) => chunk.issues.map((issue) => issue.id))
   );
@@ -515,6 +560,9 @@ async function insertFallbackCommentChunksInFreshContexts(
       fallbackCommentCount: 0,
       failedCount: 0,
       truncatedFallbackCount,
+      fallbackIssueIds: [],
+      failedIssueIds: [],
+      truncatedIssueIds,
     };
   }
 
@@ -566,12 +614,12 @@ async function insertFallbackCommentChunksInFreshContexts(
       }
     });
   } catch (error) {
-    const remainingIssueCount = [...writableIssueIds].filter(
+    const failedIssueIds = [...writableIssueIds].filter(
       (issueId) => !completedIssueIds.has(issueId)
-    ).length;
-    failedCount += remainingIssueCount;
+    );
+    failedCount += failedIssueIds.length;
     logWordOperationFailure("fallback", error, {
-      issueCount: remainingIssueCount,
+      issueCount: failedIssueIds.length,
       totalBatches: chunks.length,
     });
     appendDebugLog("error", "汇总批注写入上下文失败", {
@@ -583,7 +631,17 @@ async function insertFallbackCommentChunksInFreshContexts(
     });
   }
 
-  return { fallbackCount, fallbackCommentCount, failedCount, truncatedFallbackCount };
+  const fallbackIssueIds = [...completedIssueIds];
+  const failedIssueIds = [...writableIssueIds].filter((issueId) => !completedIssueIds.has(issueId));
+  return {
+    fallbackCount,
+    fallbackCommentCount,
+    failedCount,
+    truncatedFallbackCount,
+    fallbackIssueIds,
+    failedIssueIds,
+    truncatedIssueIds,
+  };
 }
 
 function addCommentBatchResult(summary: IssueApplicationSummary, result: CommentBatchResult) {
@@ -592,6 +650,10 @@ function addCommentBatchResult(summary: IssueApplicationSummary, result: Comment
   summary.fallbackCommentCount += result.fallbackCommentCount;
   summary.failedCount += result.failedCount;
   summary.truncatedFallbackCount += result.truncatedFallbackCount;
+  summary.writtenIssueIds.push(...result.writtenIssueIds);
+  summary.fallbackIssueIds.push(...result.fallbackIssueIds);
+  summary.failedIssueIds.push(...result.failedIssueIds);
+  summary.truncatedIssueIds.push(...result.truncatedIssueIds);
 }
 
 function createEmptyApplicationSummary(): IssueApplicationSummary {
@@ -602,6 +664,10 @@ function createEmptyApplicationSummary(): IssueApplicationSummary {
     fallbackCommentCount: 0,
     failedCount: 0,
     truncatedFallbackCount: 0,
+    writtenIssueIds: [],
+    fallbackIssueIds: [],
+    failedIssueIds: [],
+    truncatedIssueIds: [],
   };
 }
 
@@ -638,11 +704,13 @@ async function applyRevisionsForIssues(
         revisionCount: 0,
         retryIssues: [],
         fallbackIssues: batch,
+        writtenIssueIds: [],
       };
     }
 
     summary.commentCount += batchResult.commentCount;
     summary.revisionCount += batchResult.revisionCount;
+    summary.writtenIssueIds.push(...batchResult.writtenIssueIds);
 
     if (batchResult.retryIssues.length > 0) {
       const retryResult = await retryRevisionIssuesInFreshContexts(
@@ -651,7 +719,9 @@ async function applyRevisionsForIssues(
         scope,
         options
       );
+      summary.commentCount += retryResult.commentCount;
       summary.revisionCount += retryResult.revisionCount;
+      summary.writtenIssueIds.push(...retryResult.writtenIssueIds);
       batchResult.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
     }
 
@@ -680,6 +750,9 @@ async function applyRevisionsForIssues(
     summary.fallbackCommentCount += fallbackResult.fallbackCommentCount;
     summary.failedCount += fallbackResult.failedCount;
     summary.truncatedFallbackCount += fallbackResult.truncatedFallbackCount;
+    summary.fallbackIssueIds.push(...fallbackResult.fallbackIssueIds);
+    summary.failedIssueIds.push(...fallbackResult.failedIssueIds);
+    summary.truncatedIssueIds.push(...fallbackResult.truncatedIssueIds);
   }
 
   return summary;
@@ -703,6 +776,7 @@ function applyRevisionIssueBatch(
         revisionCount: 0,
         retryIssues: [],
         fallbackIssues: issues,
+        writtenIssueIds: [],
       };
     }
 
@@ -723,6 +797,7 @@ function applyRevisionIssueBatch(
     let revisionResult: RevisionWriteBatchResult = {
       successCount: 0,
       failedIssues: [],
+      writtenIssueIds: [],
       commentCount: 0,
     };
     let originalTrackingMode:
@@ -751,6 +826,7 @@ function applyRevisionIssueBatch(
         revisionResult = {
           successCount: 0,
           failedIssues: revisionApplications.map(({ issue }) => issue),
+          writtenIssueIds: [],
           commentCount: 0,
           contextFailed: true,
         };
@@ -780,6 +856,7 @@ function applyRevisionIssueBatch(
       revisionCount: revisionResult.successCount,
       retryIssues: revisionResult.contextFailed ? revisionResult.failedIssues : [],
       fallbackIssues,
+      writtenIssueIds: [...commentResult.writtenIssueIds, ...revisionResult.writtenIssueIds],
     };
   });
 }
@@ -816,6 +893,7 @@ async function retryRevisionIssuesInFreshContexts(
     revisionCount: 0,
     retryIssues: [],
     fallbackIssues: [],
+    writtenIssueIds: [],
   };
 
   for (const issue of issues) {
@@ -824,6 +902,7 @@ async function retryRevisionIssuesInFreshContexts(
       result.commentCount += retryResult.commentCount;
       result.revisionCount += retryResult.revisionCount;
       result.fallbackIssues.push(...retryResult.fallbackIssues, ...retryResult.retryIssues);
+      result.writtenIssueIds.push(...retryResult.writtenIssueIds);
     } catch (error) {
       logWordOperationFailure("revision", error, {
         category: issue.category,
@@ -844,6 +923,7 @@ async function insertCommentsInBatches(
   options: ApplyIssuesOptions
 ): Promise<WriteBatchResult> {
   const failedIssues: ProofreadIssue[] = [];
+  const writtenIssueIds: string[] = [];
   let successCount = 0;
   const totalBatches = Math.ceil(targets.length / COMMENT_INSERT_BATCH_SIZE);
 
@@ -869,6 +949,7 @@ async function insertCommentsInBatches(
       // eslint-disable-next-line office-addins/no-context-sync-in-loop -- Intentional write batch boundary so earlier comments stay committed.
       await context.sync();
       successCount += batch.length;
+      writtenIssueIds.push(...batch.map(({ issue }) => issue.id));
       appendDebugLog("info", "批量批注写入成功", {
         batchIndex,
         batchSize: batch.length,
@@ -885,8 +966,8 @@ async function insertCommentsInBatches(
         batchSize: batch.length,
         error: getWordErrorDetails(error),
       });
-      failedIssues.push(...batch.map(({ issue }) => issue));
-      return { successCount, failedIssues, contextFailed: true };
+      failedIssues.push(...targets.slice(batchStart).map(({ issue }) => issue));
+      return { successCount, failedIssues, writtenIssueIds, contextFailed: true };
     }
 
     options.onProgress?.({
@@ -898,7 +979,7 @@ async function insertCommentsInBatches(
     });
   }
 
-  return { successCount, failedIssues };
+  return { successCount, failedIssues, writtenIssueIds };
 }
 
 async function insertRevisionsInBatches(
@@ -912,6 +993,7 @@ async function insertRevisionsInBatches(
     return rightStart - leftStart;
   });
   const failedIssues: ProofreadIssue[] = [];
+  const writtenIssueIds: string[] = [];
   const insertedTargets: ResolvedIssueTarget[] = [];
   let successCount = 0;
   const totalBatches = Math.ceil(orderedTargets.length / REVISION_INSERT_BATCH_SIZE);
@@ -948,6 +1030,7 @@ async function insertRevisionsInBatches(
       await context.sync();
       successCount += batch.length;
       insertedTargets.push(...insertedBatchTargets);
+      writtenIssueIds.push(...batch.map(({ issue }) => issue.id));
       appendDebugLog("info", "批量修订写入成功", {
         batchIndex,
         batchSize: batch.length,
@@ -964,7 +1047,7 @@ async function insertRevisionsInBatches(
         batchSize: batch.length,
         error: getWordErrorDetails(error),
       });
-      failedIssues.push(...batch.map(({ issue }) => issue));
+      failedIssues.push(...orderedTargets.slice(batchStart).map(({ issue }) => issue));
       const commentResult = await insertRevisionReasonCommentsBestEffort(
         context,
         insertedTargets,
@@ -973,6 +1056,7 @@ async function insertRevisionsInBatches(
       return {
         successCount,
         failedIssues,
+        writtenIssueIds,
         commentCount: commentResult.commentCount,
         contextFailed: true,
       };
@@ -992,7 +1076,7 @@ async function insertRevisionsInBatches(
     insertedTargets,
     options
   );
-  return { successCount, failedIssues, commentCount: commentResult.commentCount };
+  return { successCount, failedIssues, writtenIssueIds, commentCount: commentResult.commentCount };
 }
 
 function getWordErrorDetails(error: unknown): object {
@@ -1592,7 +1676,7 @@ function formatIssueComment(issue: ProofreadIssue): string {
 function buildFallbackCommentChunks(
   issues: ProofreadIssue[],
   options: ApplyIssuesOptions
-): { chunks: FallbackCommentChunk[]; truncatedFallbackCount: number } {
+): { chunks: FallbackCommentChunk[]; truncatedFallbackCount: number; truncatedIssueIds: string[] } {
   const budget = FALLBACK_COMMENT_MAX_LENGTH - FALLBACK_COMMENT_HEADER_RESERVE;
   const entries = issues.flatMap((issue, index) =>
     buildFallbackIssueEntries(issue, index + 1, budget)
@@ -1621,13 +1705,16 @@ function buildFallbackCommentChunks(
 
   const truncateEnabled = options.fallbackSummaryTruncateEnabled !== false;
   const visibleGroups = truncateEnabled ? groups.slice(0, FALLBACK_COMMENT_MAX_CHUNKS) : groups;
-  const truncatedFallbackCount = truncateEnabled
-    ? new Set(
-        groups
-          .slice(FALLBACK_COMMENT_MAX_CHUNKS)
-          .flatMap((group) => group.map(({ issue }) => issue.id))
-      ).size
-    : 0;
+  const truncatedIssueIds = truncateEnabled
+    ? [
+        ...new Set(
+          groups
+            .slice(FALLBACK_COMMENT_MAX_CHUNKS)
+            .flatMap((group) => group.map(({ issue }) => issue.id))
+        ),
+      ]
+    : [];
+  const truncatedFallbackCount = truncatedIssueIds.length;
 
   const chunks = visibleGroups.map((group, index) => {
     const title = `AI 审校汇总批注 ${index + 1}/${visibleGroups.length}`;
@@ -1652,7 +1739,7 @@ function buildFallbackCommentChunks(
     };
   });
 
-  return { chunks, truncatedFallbackCount };
+  return { chunks, truncatedFallbackCount, truncatedIssueIds };
 }
 
 function buildFallbackIssueEntries(

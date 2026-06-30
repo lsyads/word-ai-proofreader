@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 
 from app.agents import planner
 from app.schemas import BookInfo, ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue, ProofreadScope, V2CandidateIssue
-from app.services import chunk_service, docx_service, document_map_service, locator_service, report_service
+from app.services import chunk_service, document_map_service, locator_service, report_service
+from app.services import docx as docx_service
 from app.services.ai_client import DEFAULT_TEMPERATURE
 from app.services.ai_provider_service import proofread_text_with_provider
 from app.services.proofread import ProofreadMode, ProviderAPI

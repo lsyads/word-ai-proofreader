@@ -1,0 +1,18 @@
+title = "Word AI Proofreader Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "curl-auth-header"
+
+[[rules.allowlists]]
+description = "Allow the historical DEPLOYMENT.md placeholder Authorization header used before public-release cleanup."
+condition = "AND"
+regexTarget = "line"
+regexes = [
+  '''curl\.exe https://replace-with-remote-compatible-api/v1/models -H "Authorization: Bearer replace-with-pilot-key"''',
+]
+paths = [
+  '''DEPLOYMENT\.md''',
+]

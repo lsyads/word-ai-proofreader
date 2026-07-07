@@ -40,7 +40,7 @@ Install on each editor machine:
 - Microsoft Word desktop.
 - Git for Windows.
 - Python 3.11 or Python 3.12, with "Add python.exe to PATH" checked.
-- Node.js LTS, with PATH enabled.
+- Node.js 22.15.0 or newer, with PATH enabled.
 - PowerShell, which is built into Windows.
 - Network access to the remote AI API endpoint.
 
@@ -190,7 +190,7 @@ cd C:\Pilot\word-ai-proofreader\word-addin
 npm run start
 ```
 
-The command sideloads `word-addin\manifest.xml` and opens Word. Confirm that the Word ribbon shows the "AI Review" button.
+The command sideloads `word-addin\manifest.xml` and opens Word. Confirm that the Word ribbon shows the Chinese `AI 审校` button.
 
 If Word is open but the button does not appear:
 
@@ -209,24 +209,24 @@ If Word is open but the button does not appear:
 Prepare a copy of a Word document and validate:
 
 1. Open the Word document and select 500 to 3000 characters of body text.
-2. Click the ribbon "AI Review" button to open the task pane.
-3. Choose "Current selection" and fill in "Book title". Book background and review focus can be filled in under "Additional information".
-4. For a conservative pilot, expand "More settings (pilot support)" and change writeback mode to "Comment mode".
-5. Click "Start review".
-6. After review, confirm the task pane shows review suggestions. If there are no suggestions, it should clearly say no suggestions need handling.
-7. Click "Locate original" for one suggestion and confirm Word selects the corresponding text.
-8. Accept or reject suggestions one by one, or use "Accept all pending" / "Reject all pending" and confirm the dialog explains its scope.
-9. Click "Write back accepted suggestions" and confirm Word writes only accepted suggestions.
-10. Switch to "Whole-book DOCX", choose a `.docx` file, repeat review, accept suggestions, write back, and download the reviewed file.
+2. Click the ribbon `AI 审校` button to open the task pane.
+3. Choose `当前选区` and fill in `书名`. Book background and review focus can be filled in under `补充信息（可选）`.
+4. For a conservative pilot, expand `更多设置（试点支持）` and change `写回模式` to `批注模式`.
+5. Click `开始审校`.
+6. After review, confirm the task pane shows review suggestions. If there are no suggestions, it should show `审校完成，未发现需要处理的建议。` or an equivalent no-suggestions message.
+7. Click `定位原文` for one suggestion and confirm Word selects the corresponding text.
+8. Accept or reject suggestions one by one, or use `接受全部待处理` / `忽略全部待处理` and confirm the dialog explains its scope.
+9. Click `写回 N 条已接受建议` and confirm Word writes only accepted suggestions.
+10. Switch to `全书 DOCX`, choose a `.docx` file, repeat review, accept suggestions, write back, and click `下载审校后文件`.
 
 Acceptance checks:
 
 - The task pane opens.
 - Backend `/health` returns `{"status":"ok"}`.
 - Current-selection or DOCX review returns suggestions, or clearly reports no suggestions.
-- "Locate original" selects the original text for locatable suggestions.
-- Comment mode does not directly change body text.
-- "Write back accepted suggestions" writes only accepted suggestions.
+- `定位原文` selects the original text for locatable suggestions.
+- `批注模式` does not directly change body text.
+- `写回 N 条已接受建议` writes only accepted suggestions.
 
 ## 10. Daily Start and Stop
 
@@ -314,7 +314,7 @@ npx office-addin-dev-certs install
 
 Restart `npm run dev-server`, close Word, and reopen it.
 
-### 11.5 Word Does Not Show the "AI Review" Button
+### 11.5 Word Does Not Show the `AI 审校` Button
 
 Run:
 

@@ -54,6 +54,7 @@ npm run start
 | AI profile、Responses/Chat、mock fallback、timeout | `backend/tests/test_ai_profiles.py`、`backend/tests/test_ai_client.py`、`backend/tests/test_api.py` |
 | trace 脱敏、run events、当前分块 timeout | `backend/tests/test_agents.py`、`backend/tests/test_v2_workspace.py`；前端进度展示改动再跑前端检查 |
 | 前端 UI、按钮状态、刷新、定位、写回 | `cd word-addin && npm run lint && npm run build`；关键 Office.js 行为需要 Word 手工联调 |
+| 前端依赖或 lockfile 变更 | `cd word-addin && npm ci && npm audit --registry=https://registry.npmjs.org && npm run lint && npm run build`；audit 需要官方 npm registry，因为部分镜像不实现 audit endpoint |
 | 环境变量、启动方式、部署文档 | `backend/tests/test_settings.py`、`backend/tests/test_env_example.py`；检查 `.env.example`、[README_cn.md](README_cn.md)、[DEPLOYMENT_cn.md](DEPLOYMENT_cn.md) 是否同步 |
 | Markdown 文档 | 检查英文/中文成对文件、语言切换、内部链接和模板/个人路径残留 |
 
@@ -69,6 +70,7 @@ python -m pytest -q tests/test_v2_workspace.py
 
 - 离线可跑：后端 pytest、前端 lint、前端 build。
 - 需要网络：`npm run validate`，以及真实远程 AI API 连通性检查。
+- 需要 npm security API：`cd word-addin && npm audit --registry=https://registry.npmjs.org`。
 - 需要 Word 桌面版：旁加载插件、定位原文、当前选区写回、批注/修订模式人工确认。
 - 需要真实 AI key：真实 Responses/Chat 调用、远程模型 timeout 和 provider 兼容性验证。
 - 不需要真实 AI key：mock fallback、schema 校验、候选状态、项目存储、DOCX 写回单元测试。

@@ -54,6 +54,7 @@ npm run start
 | AI profiles, Responses/Chat, mock fallback, timeout | `backend/tests/test_ai_profiles.py`, `backend/tests/test_ai_client.py`, `backend/tests/test_api.py` |
 | Trace redaction, run events, current-chunk timeout | `backend/tests/test_agents.py`, `backend/tests/test_v2_workspace.py`; frontend progress-display changes also require frontend checks |
 | Frontend UI, button states, refresh, location, writeback | `cd word-addin && npm run lint && npm run build`; key Office.js behavior requires Word manual integration |
+| Frontend dependency or lockfile changes | `cd word-addin && npm ci && npm audit --registry=https://registry.npmjs.org && npm run lint && npm run build`; audit needs the official npm registry because some mirrors do not implement the audit endpoint |
 | Environment variables, startup, deployment docs | `backend/tests/test_settings.py`, `backend/tests/test_env_example.py`; check `.env.example`, [README.md](README.md), and [DEPLOYMENT.md](DEPLOYMENT.md) |
 | Markdown documentation | Check English/cn pairing, language switches, matching internal links, and stale template or personal strings |
 
@@ -69,6 +70,7 @@ python -m pytest -q tests/test_v2_workspace.py
 
 - Offline: backend pytest, frontend lint, frontend build.
 - Requires network: `npm run validate`, real remote AI API connectivity checks, GitHub Actions dependency downloads, and full-history secret-scan actions.
+- Requires npm security API: `cd word-addin && npm audit --registry=https://registry.npmjs.org`.
 - Requires Word desktop: add-in sideloading, original-text location, current-selection writeback, and manual confirmation of comments/revisions.
 - Requires a real AI key: real Responses/Chat calls, remote model timeout behavior, and provider compatibility checks.
 - Does not require a real AI key: mock fallback, schema validation, candidate state, project storage, and DOCX writeback unit tests.
@@ -77,9 +79,9 @@ python -m pytest -q tests/test_v2_workspace.py
 
 1. Start the backend and confirm `/health` returns `{"status":"ok"}`.
 2. Start the `word-addin` dev server and sideload the add-in into Word.
-3. Current-selection review: select text, fill in the book title, start review, then confirm candidate display, location, accept/reject, and writeback.
-4. DOCX review: choose a `.docx` file, start review, accept candidates, run backend writeback, and download the reviewed file.
-5. Long-task scenario: confirm chunk progress, current-chunk timeout countdown, refresh-current-project, and continue-waiting controls do not report waiting as failure.
+3. Current-selection review: select text, fill in `书名`, click `开始审校`, then confirm candidate display, `定位原文`, accept/reject, and writeback.
+4. DOCX review: choose a `.docx` file, click `开始审校`, accept candidates, run backend writeback, and click `下载审校后文件`.
+5. Long-task scenario: confirm chunk progress, current-chunk timeout countdown, `刷新进度`, and `继续等待` controls do not report waiting as failure.
 6. Failed-chunk scenario: confirm `retry-failed` only retries failed chunks, new candidates enter the same run, and previously written output is marked `output_stale=true` when necessary.
 
 ## Documentation Checks

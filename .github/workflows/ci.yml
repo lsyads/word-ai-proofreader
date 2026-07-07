@@ -43,12 +43,15 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: word-addin/package-lock.json
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=moderate --registry=https://registry.npmjs.org
 
       - name: Lint
         run: npm run lint

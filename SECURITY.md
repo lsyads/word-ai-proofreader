@@ -34,6 +34,6 @@ Project memory should store structured publishing facts such as terminology, boo
 ## Safe Defaults
 
 - Human confirmation is required before current-selection or whole-book writeback.
-- Comment mode is the conservative writeback mode for pilots.
+- `批注模式` is the conservative writeback mode for pilots.
 - Backend `INFO` logs should not print full request text. Use `DEBUG` only for local debugging with non-sensitive documents.
 - Do not attach real `.docx` manuscripts, SQLite workspaces, `.env` files, or provider responses to public issues.

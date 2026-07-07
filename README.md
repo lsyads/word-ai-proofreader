@@ -25,12 +25,12 @@ V2.2 is project-based. A project is built around one book and stores the documen
 
 - Review sources: current Word selection and whole-book DOCX. The add-in reads the current selection and writes it back through Office.js. Whole-book DOCX files are uploaded to the backend, which processes visible table-of-contents text, body text, tables, and common text-box content. `.doc` is not supported; save it as `.docx` first.
 - Primary workflow: the task pane keeps the normal path focused on review source, book title, start review, current progress, review suggestions, writeback, and download. Recent reviews and troubleshooting details are folded by default.
-- AI API: OpenAI-compatible Responses API and Chat Completions are supported. The add-in defaults to deep review, temperature `0.6`, revision-plus-comment writeback, and prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. These settings live under "More settings (pilot support)". The backend direct API schema still defaults temperature to `0.2`. If no key is configured, the backend returns mock results for local integration.
+- AI API: OpenAI-compatible Responses API and Chat Completions are supported. The add-in defaults to deep review, temperature `0.6`, revision-plus-comment writeback, and prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. These settings live under the Chinese UI section `更多设置（试点支持）`. The backend direct API schema still defaults temperature to `0.2`. If no key is configured, the backend returns mock results for local integration.
 - Book information: the add-in requires a book title and accepts an optional introduction. The backend uses book information and the review goal as prompt context, but it does not store the full manuscript in long-term memory.
 - Publishing-editor boundary: the implemented plan shows five real execution stages: plan review, basic language review, candidate merge, evaluator recheck, and editor confirmation. Terminology, book conventions, and cross-chapter consistency are not separate V2.2 plan steps. Mechanical copyediting items such as punctuation, whitespace, full-width/half-width conversion, and Chinese/English symbol conversion belong to the copyediting vendor by default, so AI and local rules do not let those items enter the publishing-editor confirmation queue.
 - Suggestions: the agent only generates candidate issues, risk notes, evidence, and recommendations. Editors accept, reject, or bulk-process pending suggestions. No suggestion is written back until an editor accepts it.
 - Word writeback: accepted current-selection suggestions are located and written back by the add-in as comments or revisions plus comments. DOCX projects write back only accepted suggestions through the backend and expose a download link for the reviewed file.
-- Observability: the V2 workbench stores the current review, document map, review plan, run-event trace, suggestions, project memory, and report. These technical details are folded into "Troubleshooting information (support)". Traces do not record full text, API keys, Authorization headers, or Bearer tokens.
+- Observability: the V2 workbench stores the current review, document map, review plan, run-event trace, suggestions, project memory, and report. These technical details are folded into the Chinese UI section `排障信息（技术支持）`. Traces do not record full text, API keys, Authorization headers, or Bearer tokens.
 - Result retention: V2 DOCX writeback results are stored in the project output directory under `AGENT_WORKSPACE_DIR`. The current V2 project API does not return retention days or expiration time; a download is available while the output file still exists. Lower-level DOCX task result indexes are still controlled by `DOCX_OUTPUT_DIR` and `DOCX_RETENTION_DAYS`.
 
 Documentation:
@@ -46,6 +46,8 @@ Documentation:
 ## V2 Workbench
 
 V2.2 has converged on a project-based review loop: choose the current selection or whole-book DOCX, fill in the book title, start review, inspect suggestions, accept or reject them, and write back or download the reviewed file. Current-selection location and writeback are handled by Office.js. DOCX writeback is handled by the backend. The add-in UI no longer exposes the old standalone entry points.
+
+The add-in UI is currently Chinese-only. This English documentation keeps literal UI labels in Chinese and adds English explanations around them.
 
 Product goals and AI-coding boundaries are in [AGENTS.md](AGENTS.md). Code entry points and the end-to-end flow are in [ARCHITECTURE.md](ARCHITECTURE.md). The full API contract and status semantics are in [spec.md](spec.md).
 
@@ -174,12 +176,12 @@ npm run start
 3. Start the `word-addin` dev server.
 4. Run `npm run start` to sideload the add-in into Word.
 5. Current-selection review: select body text in Word. Whole-book review: prepare a `.docx` file.
-6. Open the task pane, choose "Current selection" or "Whole-book DOCX", and fill in the book title. Whole-book mode requires selecting a `.docx` file.
-7. Expand "Additional information" or "More settings (pilot support)" as needed to adjust review goal, model profile, review mode, temperature, and writeback mode.
-8. Click "Start review". The add-in refreshes progress automatically and shows suggestions when the run finishes.
+6. Open the task pane, choose `当前选区` (current selection) or `全书 DOCX` (whole-book DOCX), and fill in `书名` (book title). Whole-book mode requires selecting a `.docx` file.
+7. Expand `补充信息（可选）` (optional additional information) or `更多设置（试点支持）` (pilot settings) as needed to adjust review goal, model profile, review mode, temperature, and writeback mode.
+8. Click `开始审校` (start review). The add-in refreshes progress automatically and shows suggestions when the run finishes.
 9. Review original text, replacement, explanation, and evidence in the suggestions area. Accept, reject, or bulk-process pending suggestions.
-10. For current selections, click "Write back accepted suggestions" to let the add-in write to Word. For DOCX projects, writeback generates a backend output file, then click "Download reviewed file".
-11. Validate refresh progress, continue-waiting behavior for long tasks, recent review reopening, troubleshooting details, DOCX download, and report summary.
+10. For current selections, click `写回 N 条已接受建议` (write back N accepted suggestions) to let the add-in write to Word. For DOCX projects, writeback generates a backend output file, then click `下载审校后文件` (download reviewed file).
+11. Validate `刷新进度` (refresh progress), `继续等待` (continue waiting) behavior for long tasks, `打开最近审校` (recent review reopening), `排障信息（技术支持）` (troubleshooting details), DOCX download, and report summary.
 
 ## Tests and Validation
 

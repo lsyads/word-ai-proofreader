@@ -40,7 +40,7 @@ Word 桌面版
 - Microsoft Word 桌面版。
 - Git for Windows。
 - Python 3.11 或 Python 3.12，安装时勾选“Add python.exe to PATH”。
-- Node.js LTS，安装时允许加入 PATH。
+- Node.js 22.15.0 或更新版本，安装时允许加入 PATH。
 - PowerShell。Windows 自带 PowerShell 可用。
 - 能访问远程 AI API 地址的网络。
 

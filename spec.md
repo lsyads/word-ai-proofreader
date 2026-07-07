@@ -111,7 +111,7 @@ Word current selection or DOCX file
 - Review scope includes visible table-of-contents text, body paragraphs, table text, and common text-box text. Headers, footers, footnotes, and endnotes are not included.
 - While extracting visible text, the backend builds a mapping from text character ranges to OOXML text nodes. AI still returns compact issues only. The backend binds each issue to its source chunk, prefers chunk-local location, can re-search `original` in the chunk before writeback, and maps the result back to DOCX. DOCX writeback location is not delegated to the frontend.
 - Chunk priority: split by chapter, then section; if still over 7000 characters and table-of-contents style text is available, use small TOC headings; if still over 7000 characters, reuse current-selection paragraph/sentence-end rules.
-- Comment mode writes Word-native comments. Revision-plus-comment mode writes native `w:del/w:ins` revisions for issues with `replacement` and anchors the reason comment to inserted replacement text. Issues without `replacement` or without safe location fall back to precise comments or summary comments.
+- `批注模式` writes Word-native comments. `修订+批注` writes native `w:del/w:ins` revisions for issues with `replacement` and anchors the reason comment to inserted replacement text. Issues without `replacement` or without safe location fall back to precise comments or summary comments.
 - After V2 project writeback, the backend stores a new file such as `Manuscript-AI-review-comments-20260502153000.docx`, and the add-in shows a download entry. V2 writeback results are stored under the project output directory in `AGENT_WORKSPACE_DIR`. The current V2 API does not return retention or expiration fields; if the output file is externally cleaned, download returns a clear error.
 - Lower-level `/api/proofread/docx/tasks` results are stored under `DOCX_OUTPUT_DIR`, retained for at least 7 days by default, and restored after backend restart through a SQLite index. Expired or externally removed files return clear download errors.
 
@@ -169,7 +169,7 @@ Request:
 }
 ```
 
-Response is `V2ProjectResponse`; `source_type="selection"`, `source_filename="Current selection"`, and `text_preview` is a short selection preview.
+Response is `V2ProjectResponse`; `source_type="selection"`, `source_filename="当前选区"`, and `text_preview` is a short selection preview.
 
 ### `GET /api/v2/projects`
 
@@ -709,12 +709,12 @@ AGENT_WORKSPACE_DIR=var/agent-workspace
 - Lower-level chunked tasks can retry the current chunk after the frontend wait threshold. Terminal tasks with failed chunks can retry failed chunks.
 - Lower-level DOCX tasks support the same current-chunk and failed-chunk retry; after successful retry, a new result file is generated.
 - If some chunks fail but usable results exist, task status is `partial_succeeded`.
-- Lower-level tasks support `DELETE` cancellation. The current V2 add-in does not expose a stop-review button; long polling timeout shows refresh-progress and continue-waiting controls.
+- Lower-level tasks support `DELETE` cancellation. The current V2 add-in does not expose a stop-review button; long polling timeout shows `刷新进度` and `继续等待` controls.
 - Blank Word book title or empty selection shows an error and does not call review APIs.
 - When the backend returns candidates or compatible `issues[]`, the add-in only displays suggestions. It writes back to Word only after the editor accepts suggestions and clicks writeback.
-- After whole-book `.docx` V2 project writeback, the add-in shows the backend-generated filename and "Download reviewed file". Current V2 project responses do not show retention time.
-- Single-item "locate" selects corresponding original text. Duplicate originals prefer `locator.key` and a narrow `original` search within that key.
-- Comment mode does not change body text. Revision-plus-comment mode creates accept/rejectable Word revisions and anchors reason comments to inserted replacement text, then restores original revision settings.
+- After whole-book `.docx` V2 project writeback, the add-in shows the backend-generated filename and `下载审校后文件`. Current V2 project responses do not show retention time.
+- Single-item `定位原文` selects corresponding original text. Duplicate originals prefer `locator.key` and a narrow `original` search within that key.
+- `批注模式` does not change body text. `修订+批注` creates accept/rejectable Word revisions and anchors reason comments to inserted replacement text, then restores original revision settings.
 - If backend returns empty `issues[]`, request fails, or there are no accepted candidates, the add-in inserts no comments or revisions.
 - Lower-level `.docx` whole-book tasks generate a downloadable new file even when no issue is found. Failed or cancelled requests do not create new downloadable results. V2 DOCX project writeback requires accepted candidates and returns 409 if none are approved.
-- The add-in workbench can manually reopen historical V2 reviews from the recent-review list. Local workspace stores projects, runs, candidates, reports, and result indexes, but does not write full text or original DOCX into long-term memory. The current V2 add-in does not provide JSON export, JSON import, or clear-history entry points; it supports deleting one project and clearing troubleshooting logs.
+- The add-in workbench can manually reopen historical V2 reviews from `打开最近审校`. Local workspace stores projects, runs, candidates, reports, and result indexes, but does not write full text or original DOCX into long-term memory. The current V2 add-in does not provide JSON export, JSON import, or clear-history entry points; it supports deleting one project and clearing troubleshooting logs.

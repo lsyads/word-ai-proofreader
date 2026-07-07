@@ -361,7 +361,8 @@ curl.exe -k -I https://localhost:3000/taskpane.html
 如果试点 AI 服务提供 `/v1/models`，可以检查：
 
 ```powershell
-curl.exe https://请替换为远程兼容API地址/v1/models -H "Authorization: Bearer 请替换为试点专用Key"
+$env:PILOT_AI_API_KEY = "在这里粘贴试点专用Key"
+curl.exe https://请替换为远程兼容API地址/v1/models -H "Authorization: Bearer $env:PILOT_AI_API_KEY"
 ```
 
 如果该命令失败，先确认网络、代理、API 地址和 Key；不要把包含真实 Key 的命令截图发到群聊。

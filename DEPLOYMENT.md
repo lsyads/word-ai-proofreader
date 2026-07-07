@@ -101,8 +101,8 @@ Replace `AI_API_KEY`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` with pilot value
 AI_API_KEY=
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON=
-OPENAI_API_BASE_URL=https://replace-with-remote-compatible-api/v1
-OPENAI_MODEL=replace-with-pilot-model-id
+OPENAI_API_BASE_URL=https://pilot-ai.example.com/v1
+OPENAI_MODEL=pilot-model-id
 AI_REQUEST_TIMEOUT_SECONDS=180
 AI_FAST_MAX_TOKENS=16384
 AI_THINKING_MAX_TOKENS=32768
@@ -355,7 +355,8 @@ After fixing `.env`, press `Ctrl+C` to stop the backend and start it again.
 If the pilot AI service exposes `/v1/models`, check:
 
 ```powershell
-curl.exe https://replace-with-remote-compatible-api/v1/models -H "Authorization: Bearer replace-with-pilot-key"
+$env:PILOT_AI_API_KEY = "paste-pilot-key-here"
+curl.exe https://pilot-ai.example.com/v1/models -H "Authorization: Bearer $env:PILOT_AI_API_KEY"
 ```
 
 If it fails, check network, proxy, API address, and key. Do not post screenshots containing real keys in group chats.

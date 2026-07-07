@@ -1,10 +1,12 @@
-# Word AI 审校助手测试说明
+# Word AI Proofreader Testing
 
-本文汇总开发和 AI coding 场景下的验证命令，是最小验证矩阵的主文档。产品验收口径见 [spec.md](spec.md)，Windows 试点部署验证见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+Language: English | [简体中文](TESTING_cn.md)
 
-## 快速检查
+This document collects validation commands for development and AI coding work. It is the primary minimum validation matrix. Product acceptance criteria are in [spec.md](spec.md), and Windows pilot deployment validation is in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-后端测试，离线可跑：
+## Quick Checks
+
+Backend tests, offline:
 
 ```bash
 cd backend
@@ -12,7 +14,7 @@ source .venv/bin/activate
 python -m pytest -q
 ```
 
-前端静态检查和构建，离线可跑：
+Frontend static checks and build, offline:
 
 ```bash
 cd word-addin
@@ -20,20 +22,28 @@ npm run lint
 npm run build
 ```
 
-Manifest 校验，需要访问 Microsoft Office manifest validation service：
+Python dependency audit, requires network and `pip-audit` locally; otherwise use the GitHub Actions `CI` workflow:
+
+```bash
+cd backend
+python -m pip install pip-audit
+python -m pip_audit -r requirements.txt --strict
+```
+
+Manifest validation, requires access to the Microsoft Office manifest validation service:
 
 ```bash
 cd word-addin
 npm run validate
 ```
 
-本地健康检查，需要后端已启动：
+Local health check, requires the backend to be running:
 
 ```bash
 curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 ```
 
-Word 手工联调，需要 Word 桌面版、Office 插件 dev server 和可用后端：
+Word manual integration, requires Word desktop, the Office add-in dev server, and a usable backend:
 
 ```bash
 cd word-addin
@@ -41,20 +51,24 @@ npm run dev-server
 npm run start
 ```
 
-## 最小验证矩阵
+## Minimum Validation Matrix
 
-| 改动类型 | 最小检查 |
+| Change type | Minimum checks |
 | --- | --- |
-| API/schema/状态字段 | `cd backend && python -m pytest -q`；检查 [spec.md](spec.md)、`word-addin/src/taskpane/types.ts`、`api.ts` 是否同步 |
-| V2 Agent run、状态推进、失败重试 | `backend/tests/test_v2_workspace.py`、`backend/tests/test_agents.py`，必要时跑完整后端测试 |
-| 候选队列、分页、批量决策、latest run 语义 | `backend/tests/test_v2_workspace.py`；前端改动再跑 `npm run lint` 和 `npm run build` |
-| DOCX 抽取、定位、批注/修订、下载 | `backend/tests/test_docx.py`、`backend/tests/test_v2_workspace.py`，有前端下载改动再跑前端检查 |
-| AI profile、Responses/Chat、mock fallback、timeout | `backend/tests/test_ai_profiles.py`、`backend/tests/test_ai_client.py`、`backend/tests/test_api.py` |
-| trace 脱敏、run events、当前分块 timeout | `backend/tests/test_agents.py`、`backend/tests/test_v2_workspace.py`；前端进度展示改动再跑前端检查 |
-| 前端 UI、按钮状态、刷新、定位、写回 | `cd word-addin && npm run lint && npm run build`；关键 Office.js 行为需要 Word 手工联调 |
-| 环境变量、启动方式、部署文档 | `backend/tests/test_settings.py`；检查 `.env.example`、[README.md](README.md)、[DEPLOYMENT.md](DEPLOYMENT.md) 是否同步 |
+| API/schema/status fields | `cd backend && python -m pytest -q`; check [spec.md](spec.md), `word-addin/src/taskpane/types.ts`, and `api.ts` |
+| V2 Agent run, status progression, failed retry | `backend/tests/test_v2_workspace.py`, `backend/tests/test_agents.py`; run the full backend suite when needed |
+| Candidate queue, pagination, bulk decisions, latest-run semantics | `backend/tests/test_v2_workspace.py`; frontend changes also require `npm run lint` and `npm run build` |
+| DOCX extraction, location, comments/revisions, download | `backend/tests/test_docx.py`, `backend/tests/test_v2_workspace.py`; frontend download changes also require frontend checks |
+| AI profiles, Responses/Chat, mock fallback, timeout | `backend/tests/test_ai_profiles.py`, `backend/tests/test_ai_client.py`, `backend/tests/test_api.py` |
+| Trace redaction, run events, current-chunk timeout | `backend/tests/test_agents.py`, `backend/tests/test_v2_workspace.py`; frontend progress-display changes also require frontend checks |
+| Frontend UI, button states, refresh, location, writeback | `cd word-addin && npm run lint && npm run build`; key Office.js behavior requires Word manual integration |
+| Frontend dependency or lockfile changes | `cd word-addin && npm ci && npm audit --registry=https://registry.npmjs.org && npm run lint && npm run build`; audit needs the official npm registry because some mirrors do not implement the audit endpoint |
+| Backend dependency changes | GitHub Actions `CI` workflow `Python dependency audit`, or local `cd backend && python -m pip_audit -r requirements.txt --strict` when `pip-audit` is installed |
+| Environment variables, startup, deployment docs | `backend/tests/test_settings.py`, `backend/tests/test_env_example.py`; check `.env.example`, [README.md](README.md), and [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Markdown documentation | Check English/cn pairing, language switches, matching internal links, and stale template or personal strings |
+| Public release gate | Run GitHub Actions `CI` and `Secret Scan` manually with `workflow_dispatch`; release only after backend tests, Python audit, frontend audit/lint/build, Gitleaks, and TruffleHog are green |
 
-单个后端文件可这样跑：
+Run a single backend test file like this:
 
 ```bash
 cd backend
@@ -62,27 +76,31 @@ source .venv/bin/activate
 python -m pytest -q tests/test_v2_workspace.py
 ```
 
-## 检查类型说明
+## Check Types
 
-- 离线可跑：后端 pytest、前端 lint、前端 build。
-- 需要网络：`npm run validate`，以及真实远程 AI API 连通性检查。
-- 需要 Word 桌面版：旁加载插件、定位原文、当前选区写回、批注/修订模式人工确认。
-- 需要真实 AI key：真实 Responses/Chat 调用、远程模型 timeout 和 provider 兼容性验证。
-- 不需要真实 AI key：mock fallback、schema 校验、候选状态、项目存储、DOCX 写回单元测试。
+- Offline: backend pytest, frontend lint, frontend build.
+- Requires network: `npm run validate`, `pip-audit`, real remote AI API connectivity checks, GitHub Actions dependency downloads, and full-history secret-scan actions.
+- Requires npm security API: `cd word-addin && npm audit --registry=https://registry.npmjs.org`.
+- Requires GitHub Actions for the public-release record when local tools are unavailable: `CI` and `Secret Scan` should be manually dispatched and green before making the repository public.
+- Requires Word desktop: add-in sideloading, original-text location, current-selection writeback, and manual confirmation of comments/revisions.
+- Requires a real AI key: real Responses/Chat calls, remote model timeout behavior, and provider compatibility checks.
+- Does not require a real AI key: mock fallback, schema validation, candidate state, project storage, and DOCX writeback unit tests.
 
-## 手工联调清单
+## Manual Integration Checklist
 
-1. 启动后端并确认 `/health` 返回 `{"status":"ok"}`。
-2. 启动 `word-addin` dev server，并旁加载到 Word。
-3. 当前选区审校：选中正文，填写书名，启动审校，确认候选展示、定位、接受/忽略和写回。
-4. DOCX 审校：选择 `.docx` 文件，启动审校，接受候选，执行后端写回并下载审校后文件。
-5. 长任务场景：确认运行中分块进度、当前分块 timeout 倒计时、刷新当前项目和继续等待入口不把等待误报为失败。
-6. 失败分块场景：确认 `retry-failed` 只重试失败 chunk，新增候选进入同一 run，已写回输出在需要时标记 `output_stale=true`。
+1. Start the backend and confirm `/health` returns `{"status":"ok"}`.
+2. Start the `word-addin` dev server and sideload the add-in into Word.
+3. Current-selection review: select text, fill in `书名`, click `开始审校`, then confirm candidate display, `定位原文`, accept/reject, and writeback.
+4. DOCX review: choose a `.docx` file, click `开始审校`, accept candidates, run backend writeback, and click `下载审校后文件`.
+5. Long-task scenario: confirm chunk progress, current-chunk timeout countdown, `刷新进度`, and `继续等待` controls do not report waiting as failure.
+6. Failed-chunk scenario: confirm `retry-failed` only retries failed chunks, new candidates enter the same run, and previously written output is marked `output_stale=true` when necessary.
 
-## 文档检查
+## Documentation Checks
 
-本项目没有单独配置 Markdown linter。文档改动至少手工检查：
+This project does not have a dedicated Markdown linter. At minimum, manually check:
 
-- 相对链接可从仓库根目录打开。
-- 命令和 `word-addin/package.json`、`backend/requirements.txt` 中的实际脚本一致。
-- 新增 API 字段、状态值或环境变量时，同步 [spec.md](spec.md)、[README.md](README.md) 和相关测试说明。
+- Relative links open from the repository root.
+- Commands match `word-addin/package.json` and `backend/requirements.txt`.
+- New API fields, status values, or environment variables are synchronized across [spec.md](spec.md), [README.md](README.md), and related test documentation.
+- The English canonical Markdown file and matching `_cn.md` file stay content-equivalent.
+- English docs link to English docs, while Chinese docs link to `_cn.md` counterparts, except language-switch links.

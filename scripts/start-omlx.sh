@@ -2,10 +2,10 @@
 set -euo pipefail
 
 : "${OMLX_BIN:=omlx}"
-: "${OMLX_MODEL_DIR:=/Users/wulala/AI/models}"
+: "${OMLX_MODEL_DIR:=$HOME/AI/models}"
 : "${OMLX_BASE_PATH:=$HOME/.omlx}"
 : "${OMLX_PORT:=8001}"
-: "${OMLX_API_KEY:=local-omlx-dev-key}"
+: "${OMLX_API_KEY:=}"
 : "${OMLX_PRELOAD_MODEL:=Qwen3.6-35B-A3B-4.4bit-msq}"
 : "${OMLX_CONFIGURE_MODEL_SETTINGS:=1}"
 
@@ -74,12 +74,24 @@ echo "  model dir: $OMLX_MODEL_DIR"
 echo "  base path: $OMLX_BASE_PATH"
 echo "  port:      $OMLX_PORT"
 echo "  base URL:  http://127.0.0.1:${OMLX_PORT}/v1"
+if [[ -n "$OMLX_API_KEY" ]]; then
+  echo "  api key:   configured"
+else
+  echo "  api key:   not configured"
+fi
 if [[ -n "$OMLX_PRELOAD_MODEL" ]]; then
   echo "  preload:   $OMLX_PRELOAD_MODEL"
 fi
 
-exec "$OMLX_BIN" serve \
-  --model-dir "$OMLX_MODEL_DIR" \
-  --base-path "$OMLX_BASE_PATH" \
-  --port "$OMLX_PORT" \
-  --api-key "$OMLX_API_KEY"
+omlx_args=(
+  serve
+  --model-dir "$OMLX_MODEL_DIR"
+  --base-path "$OMLX_BASE_PATH"
+  --port "$OMLX_PORT"
+)
+
+if [[ -n "$OMLX_API_KEY" ]]; then
+  omlx_args+=(--api-key "$OMLX_API_KEY")
+fi
+
+exec "$OMLX_BIN" "${omlx_args[@]}"

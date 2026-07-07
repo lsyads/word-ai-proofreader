@@ -1,0 +1,41 @@
+# 安全策略
+
+语言：[English](SECURITY.md) | 简体中文
+
+## 支持状态
+
+本项目正在准备公开开源。安全报告适用于当前默认分支，以及发布 tag 之后的最新发布版。旧的本地试点快照、生成文件、被 Git 忽略的缓存和未跟踪的部署副本不在支持范围内。
+
+## 报告漏洞
+
+如果漏洞会暴露密钥、未出版稿件正文或可用攻击路径，请不要创建公开 issue。请优先使用仓库安全公告渠道私下报告；如果该渠道不可用，请通过项目仓库所有者联系维护者。
+
+请包含：
+
+- 受影响的 commit、分支或版本。
+- 复现步骤。
+- 影响范围和谁可以触发。
+- 是否涉及 API Key、Authorization header、Bearer token、稿件正文、DOCX 文件、trace 或 SQLite 工作区文件。
+
+不要在报告中包含真实 API Key、完整未出版稿件正文或私有文档。请使用脱敏示例或合成文档。
+
+## 密钥和凭证
+
+API Key 必须只保存在后端运行环境文件中，例如 `.env`。不要提交真实 Key、token、证书或私有部署配置。仓库 `.gitignore` 已排除 `.env`、本地证书、`backend/var/`、构建产物、依赖目录和缓存，但涉及配置或历史的贡献仍应在提交 PR 前运行 secret scan。
+
+公开仓库前，应在 GitHub Actions 中手动运行 `Secret Scan` workflow，并要求 full-history Gitleaks 和 TruffleHog 两个 job 都通过。本机能跑 Gitleaks 或 TruffleHog 当然有帮助，但已有 Actions 绿色记录时本机工具不是硬性前置条件。
+
+后端和 Agent trace 的设计目标是不记录完整正文、API Key、Authorization header 或 Bearer token。如果发现任何路径会记录或持久化这些值，请按安全问题处理。
+
+## 稿件隐私
+
+本工具会处理 Word 稿件内容。在真实 AI 模式下，当前选区文本或 DOCX 分块会发送给配置的 AI provider。贡献者和部署人员必须向用户说明这条数据流，并且试点时应使用稿件副本。
+
+项目记忆应保存结构化出版事实，例如术语、本书约定和编辑偏好。默认不应保存完整稿件正文。
+
+## 安全默认值
+
+- 当前选区或全书写回前必须经过人工确认。
+- 批注模式是试点时更保守的写回模式。
+- 后端 `INFO` 日志不应打印完整请求正文。`DEBUG` 只用于非敏感文档的本地调试。
+- 不要把真实 `.docx` 稿件、SQLite 工作区、`.env` 文件或 provider 响应附加到公开 issue。

@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real API keys, unpublished manuscript text, `.env` files, or private DOCX files.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Branch, commit SHA, or release tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Word add-in
+        - Backend API
+        - V2 workbench
+        - DOCX writeback
+        - AI provider integration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use a synthetic or redacted document.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already run
+      description: Include commands such as backend pytest, frontend lint/build, or Word manual validation.

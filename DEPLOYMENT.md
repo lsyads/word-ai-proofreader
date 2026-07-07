@@ -1,48 +1,50 @@
-# Word AI 审校助手 Windows 本地试点部署手册
+# Word AI Proofreader Windows Local Pilot Deployment Guide
 
-本文面向技术支持人员，用于在 5 位编辑的 Windows 电脑上从零部署本地试点版。每台编辑电脑都会启动本项目的 FastAPI 后端和 Word 插件开发服务，Word 通过旁加载插件清单打开 DocPilot V2 出版审校工作台；AI 能力由远程 OpenAI 兼容 API 提供。
+Language: English | [简体中文](DEPLOYMENT_cn.md)
 
-相关文档：项目入口见 [README.md](README.md)，代码结构见 [ARCHITECTURE.md](ARCHITECTURE.md)，测试矩阵见 [TESTING.md](TESTING.md)，API 契约见 [spec.md](spec.md)。本文只维护 Windows 本地试点部署流程。
+This guide is for technical support staff deploying a local pilot from scratch on five Windows editor machines. Each editor machine runs the FastAPI backend and the Word add-in development service locally. Word opens the DocPilot V2 publishing review workbench by sideloading the add-in manifest. AI capability is provided by a remote OpenAI-compatible API.
 
-## 1. 适用范围
+Related docs: project entry point [README.md](README.md), code structure [ARCHITECTURE.md](ARCHITECTURE.md), test matrix [TESTING.md](TESTING.md), and API contract [spec.md](spec.md). This document only maintains the Windows local pilot deployment flow.
 
-- 操作系统：Windows 10 或 Windows 11。
-- Office：Microsoft Word 桌面版。
-- 部署方式：每台编辑电脑本地运行 `backend` 和 `word-addin`。
-- 插件地址：`https://localhost:3000/taskpane.html`。
-- 后端地址：`http://127.0.0.1:8000`。
-- AI 服务：远程 OpenAI 兼容接口。试点默认建议置空 `AI_PROFILES_JSON`，由 `.env` 中的 `OPENAI_API_BASE_URL`、`OPENAI_MODEL` 和 `AI_API_KEY` 生成 `Default AI (.env)` profile。
+## 1. Scope
 
-本试点默认不要求每台电脑安装 oMLX 或本地大模型。如果后续改为本地模型试点，需要另行补充模型安装、硬件要求和模型服务启动步骤。
+- OS: Windows 10 or Windows 11.
+- Office: Microsoft Word desktop.
+- Deployment style: each editor machine runs `backend` and `word-addin` locally.
+- Add-in URL: `https://localhost:3000/taskpane.html`.
+- Backend URL: `http://127.0.0.1:8000`.
+- AI service: remote OpenAI-compatible endpoint. For the pilot, leave `AI_PROFILES_JSON` empty by default and let `.env` values `OPENAI_API_BASE_URL`, `OPENAI_MODEL`, and `AI_API_KEY` create the `Default AI (.env)` profile.
 
-## 2. 部署架构
+This pilot does not require every machine to install oMLX or a local model by default. If a later pilot uses local models, add separate model installation, hardware, and model-service startup instructions.
+
+## 2. Deployment Architecture
 
 ```text
-Word 桌面版
-  -> 旁加载 word-addin/manifest.xml
-  -> 打开 https://localhost:3000/taskpane.html
-  -> Webpack dev server 代理 /api 到 http://127.0.0.1:8000
-  -> FastAPI backend 调用远程 OpenAI 兼容 API
+Word desktop
+  -> sideload word-addin/manifest.xml
+  -> open https://localhost:3000/taskpane.html
+  -> Webpack dev server proxies /api to http://127.0.0.1:8000
+  -> FastAPI backend calls a remote OpenAI-compatible API
 ```
 
-注意：
+Notes:
 
-- API Key 只写入每台电脑本地根目录 `.env`。
-- 不要把真实 API Key 写入 `manifest.xml`、前端源码、Webpack 配置、截图、聊天记录或文档。
-- 真实稿件试点时建议先复制 Word 文档副本；如果试点优先保守，请在任务窗格高级设置中把写回模式改为“批注模式”后再写回。
+- API keys are written only to the local root `.env` on each machine.
+- Do not put real API keys in `manifest.xml`, frontend source, Webpack config, screenshots, chat logs, or documentation.
+- For real manuscript pilots, copy the Word document first. If the pilot should be conservative, choose comment mode in advanced writeback settings before writing back.
 
-## 3. 前置软件
+## 3. Prerequisites
 
-在每台编辑电脑上安装：
+Install on each editor machine:
 
-- Microsoft Word 桌面版。
-- Git for Windows。
-- Python 3.11 或 Python 3.12，安装时勾选“Add python.exe to PATH”。
-- Node.js LTS，安装时允许加入 PATH。
-- PowerShell。Windows 自带 PowerShell 可用。
-- 能访问远程 AI API 地址的网络。
+- Microsoft Word desktop.
+- Git for Windows.
+- Python 3.11 or Python 3.12, with "Add python.exe to PATH" checked.
+- Node.js 22.15.0 or newer, with PATH enabled.
+- PowerShell, which is built into Windows.
+- Network access to the remote AI API endpoint.
 
-安装完成后，重新打开 PowerShell，执行以下命令确认可用：
+After installation, reopen PowerShell and check:
 
 ```powershell
 git --version
@@ -51,34 +53,28 @@ node --version
 npm --version
 ```
 
-如果提示找不到命令，先重启 PowerShell；仍失败时，检查 Git、Python、Node.js 是否已加入系统 PATH。
+If a command is not found, restart PowerShell first. If it still fails, check whether Git, Python, and Node.js were added to the system PATH.
 
-## 4. 获取代码
+## 4. Get the Code
 
-建议把项目放在固定目录，例如 `C:\Pilot\word-ai-proofreader`。
+Use a stable directory such as `C:\Pilot\word-ai-proofreader`.
 
-方式一：从 Git 仓库克隆：
+Option 1, clone from Git:
 
 ```powershell
 mkdir C:\Pilot
 cd C:\Pilot
-git clone <repo-url> word-ai-proofreader
+git clone https://github.com/lsyads/word-ai-proofreader.git word-ai-proofreader
 cd C:\Pilot\word-ai-proofreader
 ```
 
-方式二：由技术支持复制完整项目目录到每台电脑，然后进入项目根目录：
+Option 2, technical support copies the full project directory to each machine, then enters the project root:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader
 ```
 
-确认根目录能看到这些文件和目录：
-
-```powershell
-dir
-```
-
-预期至少包含：
+Confirm the root directory contains at least:
 
 ```text
 backend
@@ -88,25 +84,25 @@ spec.md
 .env.example
 ```
 
-## 5. 配置本机 `.env`
+## 5. Configure Local `.env`
 
-在项目根目录复制环境变量模板：
+Copy the environment template in the project root:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-把 `.env` 调整为试点配置。当前 `.env.example` 默认包含 `AI_PROFILES_JSON` 多 profile 模板；后端会优先按 profile 的 `api_key_env` 读取 Key，插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile。当前模板中对应的是 id 为 `xiaomi-mimo`、model 为 `mimo-v2.5-pro` 的 profile，Key 来自 `MIMO_API_KEY`。Windows 远程试点如果只使用一个远程 OpenAI 兼容服务，建议把 `AI_PROFILES_JSON='[...]'` 整段改为 `AI_PROFILES_JSON=`，再使用下面的 legacy `.env` profile。
+Adjust `.env` for the pilot. `.env.example` contains a multi-profile `AI_PROFILES_JSON` template, including a local `local-omlx` profile that reads `AI_API_KEY` and remote profiles that read `OPENROUTER_API_KEY` or `MIMO_API_KEY`. The backend reads keys according to each profile's `api_key_env`, and the add-in prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. In the current template that profile is `mimo-v2.5-pro`, with key from `MIMO_API_KEY`. If the Windows remote pilot uses one remote OpenAI-compatible service, set `AI_PROFILES_JSON=` and use the legacy `.env` profile below.
 
-以下示例中的 `AI_API_KEY`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 必须替换为试点实际值：
+Replace `AI_API_KEY`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` with pilot values:
 
 ```text
-AI_API_KEY=请替换为试点专用Key
+AI_API_KEY=
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON=
-OPENAI_API_BASE_URL=https://请替换为远程兼容API地址/v1
-OPENAI_MODEL=请替换为试点模型ID
+OPENAI_API_BASE_URL=https://pilot-ai.example.com/v1
+OPENAI_MODEL=pilot-model-id
 AI_REQUEST_TIMEOUT_SECONDS=180
 AI_FAST_MAX_TOKENS=16384
 AI_THINKING_MAX_TOKENS=32768
@@ -114,20 +110,20 @@ BACKEND_LOG_LEVEL=INFO
 BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 ```
 
-配置要求：
+Configuration requirements:
 
-- `AI_API_KEY` 使用试点专用 Key，不使用个人生产 Key。
-- `OPENAI_API_BASE_URL` 应指向远程 OpenAI 兼容服务的 `/v1` 根路径。
-- `OPENAI_MODEL` 必须与远程服务提供的模型 ID 一致。
-- `AI_PROFILES_JSON` 为空时，后端使用 `AI_API_KEY/AI_PROVIDER_API/OPENAI_API_BASE_URL/OPENAI_MODEL` 生成 `Default AI (.env)` profile。
-- 如果试点要保留多 profile，必须为插件实际选中的 profile 配置对应的 `api_key_env`。当前模板中 `xiaomi-mimo` profile 的 model 是 `mimo-v2.5-pro`，Key 来自 `MIMO_API_KEY`。
-- `BACKEND_CORS_ORIGINS` 保持 `https://localhost:3000,http://localhost:3000`。
-- `BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 当前不被代码读取；后端地址由第 6 节 uvicorn 命令决定，插件代理地址由 `word-addin\webpack.config.js` 决定。
-- 不要提交、转发或截图包含真实 Key 的 `.env`。
+- Use a pilot-specific `AI_API_KEY`, not a personal production key.
+- `OPENAI_API_BASE_URL` should point to the remote OpenAI-compatible `/v1` root.
+- `OPENAI_MODEL` must match a model id exposed by the remote service.
+- When `AI_PROFILES_JSON` is empty, the backend creates `Default AI (.env)` from `AI_API_KEY/AI_PROVIDER_API/OPENAI_API_BASE_URL/OPENAI_MODEL`.
+- If multiple profiles are retained, configure the `api_key_env` required by the profile the add-in will actually select. In the current template, `mimo-v2.5-pro` reads from `MIMO_API_KEY`.
+- Keep `BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000`.
+- `BACKEND_HOST`, `BACKEND_PORT`, and `WORD_ADDIN_API_BASE_URL` are intentionally omitted from `.env.example` because the current code does not read them. The backend address is controlled by the uvicorn command in section 6; the add-in proxy address is controlled by `word-addin\webpack.config.js`.
+- Do not commit, forward, or screenshot a `.env` that contains a real key.
 
-## 6. 启动后端
+## 6. Start the Backend
 
-打开第一个 PowerShell 窗口：
+Open the first PowerShell window:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader\backend
@@ -138,35 +134,35 @@ pip install -r requirements.txt
 uvicorn app.main:app --env-file ..\.env --host 127.0.0.1 --port 8000 --reload
 ```
 
-如果激活虚拟环境时报执行策略错误，执行一次：
+If virtual-environment activation fails because script execution is disabled, run once:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-然后重新执行：
+Then activate again:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-保持这个 PowerShell 窗口打开。后端正常启动后，会持续显示 `Uvicorn running on http://127.0.0.1:8000`。
+Keep this PowerShell window open. A healthy backend keeps printing `Uvicorn running on http://127.0.0.1:8000`.
 
-另开一个 PowerShell 窗口检查健康状态：
+Open another PowerShell window to check health:
 
 ```powershell
 curl.exe http://127.0.0.1:8000/health
 ```
 
-预期返回：
+Expected response:
 
 ```json
 {"status":"ok"}
 ```
 
-## 7. 启动 Word 插件服务
+## 7. Start the Word Add-in Service
 
-打开第二个 PowerShell 窗口：
+Open the second PowerShell window:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader\word-addin
@@ -175,68 +171,68 @@ npx office-addin-dev-certs install
 npm run dev-server
 ```
 
-安装证书时如果 Windows 弹出安全确认，请选择信任。保持这个 PowerShell 窗口打开。
+If Windows prompts to trust the certificate, accept it. Keep this PowerShell window open.
 
-另开一个 PowerShell 窗口检查插件页面：
+Open another PowerShell window to check the add-in page:
 
 ```powershell
 curl.exe -k -I https://localhost:3000/taskpane.html
 ```
 
-预期能看到 HTTP 状态 `200`。如果端口尚未完全启动，等待几秒后重试。
+Expected result: HTTP status `200`. If the port is still starting, wait a few seconds and retry.
 
-## 8. 旁加载 Word 插件
+## 8. Sideload the Word Add-in
 
-打开第三个 PowerShell 窗口：
+Open the third PowerShell window:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader\word-addin
 npm run start
 ```
 
-命令会使用 `word-addin\manifest.xml` 旁加载插件并打开 Word。确认 Word 功能区出现“AI 审校”按钮。
+The command sideloads `word-addin\manifest.xml` and opens Word. Confirm that the Word ribbon shows the Chinese `AI 审校` button.
 
-如果 Word 已经打开但没有出现按钮：
+If Word is open but the button does not appear:
 
-1. 关闭所有 Word 窗口。
-2. 在第三个 PowerShell 窗口执行：
+1. Close all Word windows.
+2. In the third PowerShell window, run:
 
    ```powershell
    npm run stop
    npm run start
    ```
 
-3. 重新检查 Word 功能区。
+3. Check the Word ribbon again.
 
-## 9. 验证审校流程
+## 9. Validate the Review Flow
 
-准备一个 Word 文档副本，按以下步骤验证：
+Prepare a copy of a Word document and validate:
 
-1. 打开 Word 文档，选中一段 500 到 3000 字的正文。
-2. 点击功能区“AI 审校”，打开 DocPilot V2 任务窗格。
-3. 在任务窗格选择“当前选区”，填写“书名”；书籍背景和审校重点可在“补充信息”里填写。
-4. 试点优先保守时，展开“更多设置（试点支持）”，把“写回模式”改为“批注模式”。
-5. 点击“开始审校”。
-6. 审校完成后，确认任务窗格显示审校建议；没有建议时应显示“未发现需要处理的建议”。
-7. 点击单条建议的“定位原文”，确认 Word 能选中对应原文。
-8. 逐条“接受”或“忽略”建议；也可用“接受全部待处理/忽略全部待处理”处理所有待处理建议，并确认弹窗说明作用范围。
-9. 点击“写回已接受建议”，确认 Word 只写回已接受建议。
-10. 切换到“全书 DOCX”来源时，选择 `.docx` 文件后重复审校；接受建议并点击写回后，再点击“下载审校后文件”。
+1. Open the Word document and select 500 to 3000 characters of body text.
+2. Click the ribbon `AI 审校` button to open the task pane.
+3. Choose `当前选区` and fill in `书名`. Book background and review focus can be filled in under `补充信息（可选）`.
+4. For a conservative pilot, expand `更多设置（试点支持）` and change `写回模式` to `批注模式`.
+5. Click `开始审校`.
+6. After review, confirm the task pane shows review suggestions. If there are no suggestions, it should show `审校完成，未发现需要处理的建议。` or an equivalent no-suggestions message.
+7. Click `定位原文` for one suggestion and confirm Word selects the corresponding text.
+8. Accept or reject suggestions one by one, or use `接受全部待处理` / `忽略全部待处理` and confirm the dialog explains its scope.
+9. Click `写回 N 条已接受建议` and confirm Word writes only accepted suggestions.
+10. Switch to `全书 DOCX`, choose a `.docx` file, repeat review, accept suggestions, write back, and click `下载审校后文件`.
 
-验收通过标准：
+Acceptance checks:
 
-- 任务窗格能打开。
-- 后端 `/health` 返回 `{"status":"ok"}`。
-- 当前选区或 DOCX 审校能返回审校建议，或明确提示未发现需要处理的建议。
-- 可定位建议点击“定位原文”后能选中原文。
-- 批注模式不会直接改正文。
-- 点击“写回已接受建议”后只写入已接受建议。
+- The task pane opens.
+- Backend `/health` returns `{"status":"ok"}`.
+- Current-selection or DOCX review returns suggestions, or clearly reports no suggestions.
+- `定位原文` selects the original text for locatable suggestions.
+- `批注模式` does not directly change body text.
+- `写回 N 条已接受建议` writes only accepted suggestions.
 
-## 10. 日常启动和停止
+## 10. Daily Start and Stop
 
-每天试点开始时：
+At the start of each pilot day:
 
-1. 启动后端：
+1. Start the backend:
 
    ```powershell
    cd C:\Pilot\word-ai-proofreader\backend
@@ -244,60 +240,60 @@ npm run start
    uvicorn app.main:app --env-file ..\.env --host 127.0.0.1 --port 8000 --reload
    ```
 
-2. 启动插件服务：
+2. Start the add-in service:
 
    ```powershell
    cd C:\Pilot\word-ai-proofreader\word-addin
    npm run dev-server
    ```
 
-3. 旁加载 Word 插件：
+3. Sideload the Word add-in:
 
    ```powershell
    cd C:\Pilot\word-ai-proofreader\word-addin
    npm run start
    ```
 
-每天试点结束时：
+At the end of each pilot day:
 
-- 在后端和 dev server 的 PowerShell 窗口按 `Ctrl+C` 停止服务。
-- 如需停止 Word 调试旁加载，执行：
+- Press `Ctrl+C` in the backend and dev-server PowerShell windows.
+- To stop Word debugging sideload state:
 
   ```powershell
   cd C:\Pilot\word-ai-proofreader\word-addin
   npm run stop
   ```
 
-## 11. 常见问题
+## 11. Common Problems
 
-### 11.1 端口 8000 或 3000 被占用
+### 11.1 Port 8000 or 3000 Is Already Used
 
-检查占用进程：
+Check the process:
 
 ```powershell
 netstat -ano | findstr :8000
 netstat -ano | findstr :3000
 ```
 
-如果确认是旧的本项目进程，可在任务管理器中结束对应 PID。不要随意结束不认识的系统或办公软件进程。
+If the process is an old instance of this project, end that PID in Task Manager. Do not kill unknown system or office-software processes casually.
 
-### 11.2 PowerShell 不允许激活虚拟环境
+### 11.2 PowerShell Blocks Virtual Environment Activation
 
-错误通常类似“running scripts is disabled on this system”。执行：
+The error usually says scripts are disabled. Run:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-然后重新打开 PowerShell 或重新激活：
+Then reopen PowerShell or activate again:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 11.3 Python、Node 或 npm 找不到
+### 11.3 Python, Node, or npm Is Not Found
 
-先重新打开 PowerShell，再执行：
+Reopen PowerShell and run:
 
 ```powershell
 python --version
@@ -305,22 +301,22 @@ node --version
 npm --version
 ```
 
-仍失败时，重新安装对应软件，并确认安装时加入 PATH。
+If the commands still fail, reinstall the relevant software and confirm PATH is enabled during installation.
 
-### 11.4 证书不受信任或任务窗格打不开
+### 11.4 Certificate Is Not Trusted or the Task Pane Does Not Open
 
-在 `word-addin` 目录重新安装 Office 开发证书：
+Reinstall Office development certificates from `word-addin`:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader\word-addin
 npx office-addin-dev-certs install
 ```
 
-然后重启 `npm run dev-server`，关闭并重新打开 Word。
+Restart `npm run dev-server`, close Word, and reopen it.
 
-### 11.5 Word 没有出现“AI 审校”按钮
+### 11.5 Word Does Not Show the `AI 审校` Button
 
-执行：
+Run:
 
 ```powershell
 cd C:\Pilot\word-ai-proofreader\word-addin
@@ -328,64 +324,65 @@ npm run stop
 npm run start
 ```
 
-如果仍然没有出现，关闭所有 Word 窗口后重试。
+If it still does not appear, close all Word windows and retry.
 
-### 11.6 任务窗格提示 `Load failed`
+### 11.6 The Task Pane Shows `Load failed`
 
-按顺序检查：
+Check in order:
 
 ```powershell
 curl.exe http://127.0.0.1:8000/health
 curl.exe -k -I https://localhost:3000/taskpane.html
 ```
 
-如果后端不可用，回到第 6 节重启后端。如果插件页面不可用，回到第 7 节重启 dev server。
+If the backend is unavailable, restart it from section 6. If the add-in page is unavailable, restart the dev server from section 7.
 
-### 11.7 后端返回 502 或审校失败
+### 11.7 Backend Returns 502 or Review Fails
 
-优先检查第一个 PowerShell 窗口中的后端日志。常见原因：
+Check backend logs in the first PowerShell window first. Common causes:
 
-- `AI_API_KEY` 未替换或无权限。
-- `OPENAI_API_BASE_URL` 写错。
-- `OPENAI_MODEL` 与远程服务模型 ID 不一致。
-- 未置空 `AI_PROFILES_JSON`，插件优先匹配到 model 为 `mimo-v2.5-pro` 的 `xiaomi-mimo` profile，但对应的 `MIMO_API_KEY` 或其他 `api_key_env` 为空。
-- 当前网络无法访问远程 AI API。
-- 远程 AI 服务返回非 JSON 或响应超时。
+- `AI_API_KEY` was not replaced or lacks permission.
+- `OPENAI_API_BASE_URL` is wrong.
+- `OPENAI_MODEL` does not match the remote service model id.
+- `AI_PROFILES_JSON` was not cleared and the add-in selected `mimo-v2.5-pro`, but `MIMO_API_KEY` or another required `api_key_env` is empty.
+- The network cannot reach the remote AI API.
+- The remote AI service returned non-JSON or timed out.
 
-修正 `.env` 后，按 `Ctrl+C` 停止后端，再重新启动后端。
+After fixing `.env`, press `Ctrl+C` to stop the backend and start it again.
 
-### 11.8 远程模型不可达
+### 11.8 Remote Model Is Unreachable
 
-如果试点 AI 服务提供 `/v1/models`，可以检查：
+If the pilot AI service exposes `/v1/models`, check:
 
 ```powershell
-curl.exe https://请替换为远程兼容API地址/v1/models -H "Authorization: Bearer 请替换为试点专用Key"
+$env:PILOT_AI_API_KEY = "paste-pilot-key-here"
+curl.exe https://pilot-ai.example.com/v1/models -H "Authorization: Bearer $env:PILOT_AI_API_KEY"
 ```
 
-如果该命令失败，先确认网络、代理、API 地址和 Key；不要把包含真实 Key 的命令截图发到群聊。
+If it fails, check network, proxy, API address, and key. Do not post screenshots containing real keys in group chats.
 
-## 12. 安全和试点约束
+## 12. Security and Pilot Constraints
 
-- 每台电脑的 `.env` 只保存在本机，不提交到 Git。
-- 不把真实 API Key 写入前端文件、清单文件、构建产物或文档。
-- 不在群聊、截图、录屏和反馈表中暴露 API Key。
-- 真实未出版稿件先使用副本试点。
-- 试点优先保守时使用“批注模式”；使用“修订+批注”前，必须确认编辑理解 Word 修订可接受或拒绝。
-- 审校结果必须由编辑人工确认，插件只作为辅助工具。
-- 后端日志默认使用 `INFO`，不要在真实稿件试点中长期使用 `DEBUG`。
+- Each machine's `.env` stays local and is not committed to Git.
+- Do not write real API keys into frontend files, manifest files, build artifacts, or documentation.
+- Do not expose API keys in group chats, screenshots, recordings, or feedback forms.
+- Use copies of real unpublished manuscripts for pilots.
+- For conservative pilots, use comment mode. Before using revisions plus comments, confirm the editor understands Word revisions can be accepted or rejected.
+- Review results must be confirmed by an editor. The add-in is an assistive tool.
+- Backend logs default to `INFO`. Do not keep `DEBUG` enabled for real manuscript pilots.
 
-## 13. 试点反馈记录建议
+## 13. Pilot Feedback Notes
 
-每位编辑每天记录 3 到 5 次真实使用反馈即可。建议记录：
+Each editor can record 3 to 5 real-use feedback entries per day. Suggested fields:
 
-- 电脑编号或编辑编号。
-- 文档类型和大致字数。
-- 审校来源：当前选区或全书 DOCX。
-- 审校模式：快速审校或深度审校，默认深度审校。
-- API 模式：Responses 或 Chat。
-- 是否成功返回结果。
-- 定位是否准确。
-- 批注或修订是否写入正确位置。
-- 有价值建议数量。
-- 明显误报数量。
-- 错误提示或截图，截图前遮挡敏感正文和 API Key。
+- Machine id or editor id.
+- Document type and approximate word count.
+- Review source: current selection or whole-book DOCX.
+- Review mode: fast or deep; the default is deep review.
+- API mode: Responses or Chat.
+- Whether results were returned successfully.
+- Whether location was accurate.
+- Whether comments or revisions were written to the correct position.
+- Number of valuable suggestions.
+- Number of clear false positives.
+- Error messages or screenshots, with sensitive manuscript text and API keys covered before sharing.

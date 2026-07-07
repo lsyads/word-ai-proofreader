@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose an improvement or new capability.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep the core boundary in mind: the agent proposes suggestions and evidence; editors confirm before writeback.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Word add-in
+        - Backend API
+        - V2 workbench
+        - DOCX writeback
+        - AI provider integration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or developer problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful version of the change.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints or compatibility notes
+      description: Note API, schema, privacy, writeback, or documentation implications.

@@ -8,9 +8,9 @@
   <Description DefaultValue="面向出版社责任编辑的 Word AI 审校助手。"/>
   <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
-  <SupportUrl DefaultValue="https://www.contoso.com/help"/>
+  <SupportUrl DefaultValue="https://github.com/lsyads/word-ai-proofreader/issues"/>
   <AppDomains>
-    <AppDomain>https://www.contoso.com</AppDomain>
+    <AppDomain>https://github.com</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Document"/>

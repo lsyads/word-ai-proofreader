@@ -1,63 +1,73 @@
-# Word AI 审校助手
+# Word AI Proofreader
 
-面向出版社责任编辑的 Word AI 审校助手。当前版本以 V2.2 出版审校工作台为主流程：编辑在 Word 中选择文本或上传 `.docx` 书稿，点击开始审校，查看建议，接受或忽略后再写回 Word。
+Language: English | [简体中文](README_cn.md)
 
-V2.2 围绕一本书建立审校项目，保存文档地图、审校计划、运行状态、候选建议、编辑决策和报告。V2 项目数据、历史、trace、任务快照和结果索引不迁移旧版本；代码仍保留底层直接 API，用于复用已验证的文档处理能力和开发调试。
+Word AI Proofreader is a Word document review agent for publishing editors. The current main flow is the V2.2 publishing review workbench: an editor selects text in Word or uploads a `.docx` manuscript, starts a review, inspects suggestions, accepts or rejects them, and then writes approved changes back to Word.
 
-## 项目结构
+V2.2 is project-based. A project is built around one book and stores the document map, review plan, run status, candidate suggestions, editor decisions, and report. V2 does not migrate old local project data, old traces, old task snapshots, or old result indexes. The lower-level direct APIs remain in the codebase so the validated document-processing capabilities can still be reused for development and debugging.
+
+## Project Structure
 
 ```text
 .
-├── backend/      # Python FastAPI 后端服务
-├── scripts/      # 本地开发辅助脚本
-├── word-addin/   # Office.js + TypeScript + Webpack Word 插件
-├── AGENTS.md     # 协作约定
-├── ARCHITECTURE.md # 代码入口、模块边界和 V2 数据流
-├── DEPLOYMENT.md # Windows 本地试点部署
-├── TESTING.md    # 测试命令和最小验证矩阵
-└── spec.md       # API 契约和验收标准
+├── backend/          # Python FastAPI backend
+├── scripts/          # Local development helper scripts
+├── word-addin/       # Office.js + TypeScript + Webpack Word add-in
+├── AGENTS.md         # AI coding collaboration rules
+├── ARCHITECTURE.md   # Code entry points, module boundaries, and V2 data flow
+├── DEPLOYMENT.md     # Windows local pilot deployment guide
+├── TESTING.md        # Test commands and minimum validation matrix
+├── spec.md           # API contract and acceptance criteria
+└── *_cn.md           # Chinese counterparts of the public Markdown docs
 ```
 
-## 当前能力（V2.2 工作台）
+## Current Capabilities (V2.2 Workbench)
 
-- 审校来源：支持当前选区和全书 DOCX。当前选区由插件读取并通过 Office.js 写回；全书 DOCX 上传到后端，后端处理目录可见文本、正文、表格和常见文本框文字。本版不支持 `.doc`，请先另存为 `.docx`。
-- 普通使用流程：插件主界面保留“审校来源、书名、开始审校、本次进度、审校建议、写回/下载”，最近审校和排障信息默认折叠。
-- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions。插件默认深度审校、Temperature `0.6`、修订+批注模式，并优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；这些配置放在“更多设置（试点支持）”中。后端 API schema 的默认 temperature 仍为 `0.2`，用于直接 API 调用。未配置 Key 时返回 mock 结果，方便本地联调。
-- 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息和审校目标作为 prompt 背景，但不把完整正文写入长期记忆。
-- 责任编辑边界：当前审校计划只展示 5 个实际执行阶段：生成计划、基础语言审校、候选归并、二次复核、等待编辑确认。术语、本书约定和一致性不再作为独立计划步骤展示；标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，AI 或本地规则默认都不会让这类建议进入责任编辑确认队列。
-- 建议处理：Agent 只生成审校建议、风险说明和证据；编辑逐条接受/忽略，也可批量处理所有待处理建议。无论置信度多高，都必须接受后才会写回。
-- Word 写回：当前选区写回已接受建议时由插件完成定位、批注或修订+批注；DOCX 审校只写回已接受建议，由后端生成审校后文件，插件提供下载入口。
-- 可观测性：V2 工作台保存本次审校、文档地图、审校计划、run event trace、建议、项目记忆和审校报告；这些技术信息默认收进“排障信息（技术支持）”。trace 不记录完整正文、API Key、Authorization 或 Bearer token。
-- 结果保留：V2 DOCX 写回结果保存在后端 `AGENT_WORKSPACE_DIR` 的项目输出目录，当前不返回保留期限或过期时间；下载入口在项目输出文件仍存在时可继续使用。底层 DOCX 任务结果索引仍由 `DOCX_OUTPUT_DIR` 和 `DOCX_RETENTION_DAYS` 控制。
+- Review sources: current Word selection and whole-book DOCX. The add-in reads the current selection and writes it back through Office.js. Whole-book DOCX files are uploaded to the backend, which processes visible table-of-contents text, body text, tables, and common text-box content. `.doc` is not supported; save it as `.docx` first.
+- Primary workflow: the task pane keeps the normal path focused on review source, book title, start review, current progress, review suggestions, writeback, and download. Recent reviews and troubleshooting details are folded by default.
+- AI API: OpenAI-compatible Responses API and Chat Completions are supported. The add-in defaults to deep review, temperature `0.6`, revision-plus-comment writeback, and prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. These settings live under the Chinese UI section `更多设置（试点支持）`. The backend direct API schema still defaults temperature to `0.2`. If no key is configured, the backend returns mock results for local integration.
+- Book information: the add-in requires a book title and accepts an optional introduction. The backend uses book information and the review goal as prompt context, but it does not store the full manuscript in long-term memory.
+- Publishing-editor boundary: the implemented plan shows five real execution stages: plan review, basic language review, candidate merge, evaluator recheck, and editor confirmation. Terminology, book conventions, and cross-chapter consistency are not separate V2.2 plan steps. Mechanical copyediting items such as punctuation, whitespace, full-width/half-width conversion, and Chinese/English symbol conversion belong to the copyediting vendor by default, so AI and local rules do not let those items enter the publishing-editor confirmation queue.
+- Suggestions: the agent only generates candidate issues, risk notes, evidence, and recommendations. Editors accept, reject, or bulk-process pending suggestions. No suggestion is written back until an editor accepts it.
+- Word writeback: accepted current-selection suggestions are located and written back by the add-in as comments or revisions plus comments. DOCX projects write back only accepted suggestions through the backend and expose a download link for the reviewed file.
+- Observability: the V2 workbench stores the current review, document map, review plan, run-event trace, suggestions, project memory, and report. These technical details are folded into the Chinese UI section `排障信息（技术支持）`. Traces do not record full text, API keys, Authorization headers, or Bearer tokens.
+- Result retention: V2 DOCX writeback results are stored in the project output directory under `AGENT_WORKSPACE_DIR`. The current V2 project API does not return retention days or expiration time; a download is available while the output file still exists. Lower-level DOCX task result indexes are still controlled by `DOCX_OUTPUT_DIR` and `DOCX_RETENTION_DAYS`.
 
-文档导航：
+Documentation:
 
-- [AGENTS.md](AGENTS.md)：AI coding 协作约定、V2 目标和边界。
-- [ARCHITECTURE.md](ARCHITECTURE.md)：代码入口、模块边界、V2 工作台数据流和常见改动入口。
-- [spec.md](spec.md)：API 契约、状态语义、环境变量和验收标准。
-- [TESTING.md](TESTING.md)：后端、前端、manifest 和 Word 手工联调的测试矩阵。
-- [DEPLOYMENT.md](DEPLOYMENT.md)：Windows 编辑电脑本地试点部署手册。
+- [AGENTS.md](AGENTS.md): AI coding collaboration rules, V2 goals, and boundaries.
+- [ARCHITECTURE.md](ARCHITECTURE.md): code entry points, module boundaries, V2 workbench data flow, and common change points.
+- [spec.md](spec.md): API contract, status semantics, environment variables, and acceptance criteria.
+- [TESTING.md](TESTING.md): backend, frontend, manifest, and Word manual integration test matrix.
+- [DEPLOYMENT.md](DEPLOYMENT.md): Windows editor-machine local pilot deployment guide.
+- [SECURITY.md](SECURITY.md): vulnerability reporting, secret handling, and manuscript privacy notes.
+- [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow and doc-sync rules.
 
-## V2 工作台说明
+## V2 Workbench
 
-V2.2 已收敛为项目化审校闭环：选择当前选区或全书 DOCX、填写书名、开始审校、查看建议、接受/忽略、写回或下载审校后文件。当前选区写回和定位由 Office.js 完成，DOCX 写回由后端完成；插件 UI 不提供旧版独立入口。
+V2.2 has converged on a project-based review loop: choose the current selection or whole-book DOCX, fill in the book title, start review, inspect suggestions, accept or reject them, and write back or download the reviewed file. Current-selection location and writeback are handled by Office.js. DOCX writeback is handled by the backend. The add-in UI no longer exposes the old standalone entry points.
 
-产品目标和 AI coding 边界见 [AGENTS.md](AGENTS.md)，代码入口和端到端流程见 [ARCHITECTURE.md](ARCHITECTURE.md)，完整 API 契约和状态语义见 [spec.md](spec.md)。
+The add-in UI is currently Chinese-only. This English documentation keeps literal UI labels in Chinese and adds English explanations around them.
 
-## 环境变量
+Product goals and AI-coding boundaries are in [AGENTS.md](AGENTS.md). Code entry points and the end-to-end flow are in [ARCHITECTURE.md](ARCHITECTURE.md). The full API contract and status semantics are in [spec.md](spec.md).
 
-复制模板后按需填写：
+## Environment Variables
+
+Copy the template and fill in local values:
 
 ```bash
 cp .env.example .env
 ```
 
-后端当前会读取的常用配置：
+The template keeps the same shape as `.env` and includes the variables read by the backend. Common backend settings:
 
 ```text
-AI_API_KEY=local-omlx-dev-key
+AI_API_KEY=
+OPENROUTER_API_KEY=
 MIMO_API_KEY=
+
 AI_PROVIDER_API=responses
+AI_PROFILES_JSON='[...]'
 OPENAI_API_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_MODEL=Qwen3.6-35B-A3B-4.4bit-msq
 AI_REQUEST_TIMEOUT_SECONDS=180
@@ -76,40 +86,45 @@ AGENT_TRACE_DIR=var/agent-traces
 AGENT_WORKSPACE_DIR=var/agent-workspace
 ```
 
-API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest.xml`、前端源码、Webpack 配置、构建产物或文档。
+API keys belong only in the backend runtime environment. Do not put real keys in `manifest.xml`, frontend source, Webpack config, build artifacts, screenshots, chat logs, or documentation.
+All `*_API_KEY` entries in `.env.example` are intentionally blank; fill them only in your local `.env`.
 
-`.env.example` 中还保留 `BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 作为人工启动命令和历史兼容说明；当前代码不会读取这些变量。后端监听地址由 `uvicorn ... --host/--port` 决定，插件开发代理在 `word-addin/webpack.config.js` 中指向 `http://127.0.0.1:8000`。
+`.env.example` currently includes `local-omlx`, `hy3-preview`, `mimo-v2.5`, and `mimo-v2.5-pro` profiles in `AI_PROFILES_JSON`. The local profile reads `AI_API_KEY` and points to `http://127.0.0.1:8001/v1`. The add-in prefers a profile whose id, model, or label contains `mimo-v2.5-pro`; the template's matching remote profile is `mimo-v2.5-pro`, with key material read from `MIMO_API_KEY`.
 
-`.env.example` 默认包含 `local-omlx`、`openrouter-qwen`、`xiaomi-mimo` 三个 profile 的 `AI_PROFILES_JSON` 模板。插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；当前模板中 `xiaomi-mimo` profile 的 model 是 `mimo-v2.5-pro`，Key 来自 `MIMO_API_KEY`。如果删除或留空 `AI_PROFILES_JSON`，后端会用上面的旧变量生成 `Default AI (.env)`，插件里可直接选择。详细环境变量规则见 [spec.md](spec.md)，Windows 试点配置见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+The backend still supports a legacy single-profile fallback when `AI_PROFILES_JSON` is removed or left empty: `AI_API_KEY`, `AI_PROVIDER_API`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` create `Default AI (.env)`. Those fields stay in `.env.example` because the code reads them. `BACKEND_HOST`, `BACKEND_PORT`, and `WORD_ADDIN_API_BASE_URL` are omitted because the current code does not read them; backend listen address is controlled by the `uvicorn ... --host/--port` command, and the add-in development proxy is configured in `word-addin/webpack.config.js`. See [spec.md](spec.md) for full environment-variable rules and [DEPLOYMENT.md](DEPLOYMENT.md) for the Windows pilot configuration.
 
-后端只把 profile 的 `id`、名称、模型和支持的 API 形态返回给插件，不返回 API Key。
+The backend returns only profile id, label, model, and supported API modes to the add-in. It never returns API keys.
 
-默认 SQLite 文件位置：
+Default SQLite locations:
 
-- Agent trace：`backend/var/agent-traces/traces.sqlite3`，由 `AGENT_TRACE_DIR` 控制。
-- V2 工作台：`backend/var/agent-workspace/projects.sqlite3`，由 `AGENT_WORKSPACE_DIR` 控制。
-- DOCX 下载索引：`backend/var/docx-results/results.sqlite3`，由 `DOCX_OUTPUT_DIR` 控制，记录下载恢复所需元数据和新任务的 `run_id`。
+- Agent trace: `backend/var/agent-traces/traces.sqlite3`, optionally controlled by `AGENT_TRACE_DIR`.
+- V2 workbench: `backend/var/agent-workspace/projects.sqlite3`, optionally controlled by `AGENT_WORKSPACE_DIR`.
+- DOCX download index: `backend/var/docx-results/results.sqlite3`, controlled by `DOCX_OUTPUT_DIR`; it records metadata needed to recover downloads and new task `run_id` values.
 
-这些目录都在 `backend/var/` 下，默认不提交到 Git。
+These directories live under `backend/var/` by default and are not committed to Git.
 
-## 启动 oMLX 本地 AI 服务
+## Start a Local oMLX AI Service
 
-本地真实 AI 联调可用 oMLX 启动 OpenAI 兼容服务。脚本默认读取 `/Users/wulala/AI/models`，监听 `8001` 端口。
+For local real-AI integration, oMLX can expose an OpenAI-compatible service. The helper script defaults to `$HOME/AI/models`, `$HOME/.omlx`, no API key, and port `8001`; override `OMLX_MODEL_DIR`, `OMLX_BASE_PATH`, `OMLX_PORT`, `OMLX_API_KEY`, or `OMLX_PRELOAD_MODEL` as needed. If you enable bearer auth for the local service, set the same local-only value in `OMLX_API_KEY` and `.env` `AI_API_KEY`.
 
 ```bash
-./scripts/start-omlx.sh
+OMLX_MODEL_DIR="$HOME/AI/models" ./scripts/start-omlx.sh
 ```
 
-模型服务检查：
+Model-service check:
 
 ```bash
+curl_headers=()
+if [ -n "${OMLX_API_KEY:-}" ]; then
+  curl_headers=(-H "Authorization: Bearer ${OMLX_API_KEY}")
+fi
 curl --noproxy 127.0.0.1 http://127.0.0.1:8001/v1/models \
-  -H 'Authorization: Bearer local-omlx-dev-key'
+  "${curl_headers[@]}"
 ```
 
-如 `/v1/models` 返回的模型 ID 和 `.env` 不一致，请更新 `OPENAI_MODEL`。
+If `/v1/models` returns a model id that differs from `.env`, update the matching `AI_PROFILES_JSON` profile's `model`. If you intentionally use the legacy single-profile fallback, update `OPENAI_MODEL` instead.
 
-## 启动后端
+## Start the Backend
 
 ```bash
 cd backend
@@ -119,21 +134,21 @@ pip install -r requirements.txt
 uvicorn app.main:app --env-file ../.env --host 127.0.0.1 --port 8000 --reload
 ```
 
-健康检查：
+Health check:
 
 ```bash
 curl --noproxy 127.0.0.1 http://127.0.0.1:8000/health
 ```
 
-预期返回：
+Expected response:
 
 ```json
 {"status":"ok"}
 ```
 
-## 启动 Word 插件
+## Start the Word Add-in
 
-Windows 编辑电脑从零安装和本地试点部署见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+For a Windows editor-machine setup from scratch, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ```bash
 cd word-addin
@@ -141,38 +156,38 @@ npm install
 npm run dev-server
 ```
 
-插件开发服务默认运行在：
+The development service runs at:
 
 ```text
 https://localhost:3000/taskpane.html
 ```
 
-旁加载到 Word：
+Sideload into Word:
 
 ```bash
 cd word-addin
 npm run start
 ```
 
-## 联调流程
+## Integration Flow
 
-1. 启动 oMLX 或配置远程 OpenAI 兼容 API。
-2. 启动后端，确认 `/health` 返回 `{"status":"ok"}`。
-3. 启动 `word-addin` dev server。
-4. 运行 `npm run start` 旁加载插件到 Word。
-5. 当前选区审校：在 Word 文档中选中正文；全书审校：准备一个 `.docx` 文件。
-6. 打开任务窗格，选择“当前选区”或“全书 DOCX”，填写书名；全书模式需选择 `.docx` 文件。
-7. 按需展开“补充信息”或“更多设置（试点支持）”，调整审校重点、模型配置、审校模式、temperature 和写回模式。
-8. 点击“开始审校”。插件会自动刷新本次进度，完成后显示审校建议。
-9. 审校完成后，在审校建议区查看原文、建议改为、修改说明和依据，逐条接受/忽略或批量处理待处理建议。
-10. 当前选区点击“写回已接受建议”后由插件写回 Word；DOCX 点击写回后由后端生成审校后文件，再点击“下载审校后文件”。
-11. 验证刷新进度、继续等待长任务、手动打开最近审校、排障信息、DOCX 下载和报告摘要等常用流程。
+1. Start oMLX or configure a remote OpenAI-compatible API.
+2. Start the backend and confirm `/health` returns `{"status":"ok"}`.
+3. Start the `word-addin` dev server.
+4. Run `npm run start` to sideload the add-in into Word.
+5. Current-selection review: select body text in Word. Whole-book review: prepare a `.docx` file.
+6. Open the task pane, choose `当前选区` (current selection) or `全书 DOCX` (whole-book DOCX), and fill in `书名` (book title). Whole-book mode requires selecting a `.docx` file.
+7. Expand `补充信息（可选）` (optional additional information) or `更多设置（试点支持）` (pilot settings) as needed to adjust review goal, model profile, review mode, temperature, and writeback mode.
+8. Click `开始审校` (start review). The add-in refreshes progress automatically and shows suggestions when the run finishes.
+9. Review original text, replacement, explanation, and evidence in the suggestions area. Accept, reject, or bulk-process pending suggestions.
+10. For current selections, click `写回 N 条已接受建议` (write back N accepted suggestions) to let the add-in write to Word. For DOCX projects, writeback generates a backend output file, then click `下载审校后文件` (download reviewed file).
+11. Validate `刷新进度` (refresh progress), `继续等待` (continue waiting) behavior for long tasks, `打开最近审校` (recent review reopening), `排障信息（技术支持）` (troubleshooting details), DOCX download, and report summary.
 
-## 测试与验证
+## Tests and Validation
 
-常用检查如下，详细测试矩阵见 [TESTING.md](TESTING.md)。
+Common checks are listed below. See [TESTING.md](TESTING.md) for the full validation matrix.
 
-后端测试：
+Backend:
 
 ```bash
 cd backend
@@ -180,7 +195,7 @@ source .venv/bin/activate
 python -m pytest -q
 ```
 
-前端检查：
+Frontend:
 
 ```bash
 cd word-addin
@@ -188,21 +203,23 @@ npm run lint
 npm run build
 ```
 
-Manifest 联网校验：
+Manifest validation:
 
 ```bash
 cd word-addin
 npm run validate
 ```
 
-`npm run validate` 需要访问 Microsoft Office manifest validation service，离线或网络受限时可能失败。
+`npm run validate` needs access to the Microsoft Office manifest validation service and can fail when offline or network-restricted.
 
-## 文档维护约定
+## Documentation Maintenance
 
-- 改接口契约时，更新 [spec.md](spec.md)。
-- 改代码入口、模块边界或 V2 数据流时，更新 [ARCHITECTURE.md](ARCHITECTURE.md)。
-- 改测试命令、验证矩阵或手工联调要求时，更新 [TESTING.md](TESTING.md)。
-- 改启动方式、端口、环境变量或联调流程时，更新本文件。
-- 改 V2 Agent 工作台目标、架构边界或协作约束时，更新 [AGENTS.md](AGENTS.md)。
-- 改 Windows 试点部署流程时，更新 [DEPLOYMENT.md](DEPLOYMENT.md)。
-- 临时排障记录不要写进长期文档；需要留存时放到 Git 忽略的临时目录。
+- API contract changes require updates to [spec.md](spec.md).
+- Code entry point, module boundary, or V2 data-flow changes require updates to [ARCHITECTURE.md](ARCHITECTURE.md).
+- Test command, validation matrix, or manual integration changes require updates to [TESTING.md](TESTING.md).
+- Startup, port, environment-variable, or integration-flow changes require updates to this file.
+- V2 Agent workbench goal, architecture boundary, or collaboration-rule changes require updates to [AGENTS.md](AGENTS.md).
+- Windows pilot deployment changes require updates to [DEPLOYMENT.md](DEPLOYMENT.md).
+- Public release, security, or contribution process changes require updates to [SECURITY.md](SECURITY.md) or [CONTRIBUTING.md](CONTRIBUTING.md).
+- Every Markdown documentation change must keep the English canonical file and the matching `_cn.md` file content-equivalent.
+- Do not put temporary troubleshooting notes in long-lived docs. If they must be kept, put them in a Git-ignored temporary directory.

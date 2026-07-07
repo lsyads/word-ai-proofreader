@@ -1,32 +1,35 @@
 # AGENTS.md
 
-本项目是一个面向出版社责任编辑的 Word 文档审校 Agent 系统。
+Language: English | [简体中文](AGENTS_cn.md)
 
-当前主流程是 V2.2 出版审校 Agent 工作台：在复用已验证的 DOCX 解析、分块审校、AI 调用、原文定位、批注/修订写回等底层文档处理能力的基础上，围绕一本书建立审校项目，让 Agent 制定计划、调用工具、复核候选、等待编辑确认并沉淀出版规则。
+This project is a Word document review agent system for publishing editors.
 
-V2 无需兼容 V1 存量数据、旧 trace、旧任务快照或旧结果索引；不要为了迁移旧数据牺牲当前实现清晰度。代码仍可保留底层直接 API，用于复用已验证能力和开发调试。
+The current main flow is the V2.2 publishing review agent workbench. It reuses validated low-level document-processing capabilities, including DOCX parsing, chunked review, AI calls, original-text location, and comment/revision writeback. On top of those capabilities, it builds a project around one book so the agent can create a plan, call tools, recheck candidates, wait for editor confirmation, and accumulate publishing rules.
 
-## AI coding 必读顺序
+V2 does not need to be compatible with V1 existing data, old traces, old task snapshots, or old result indexes. Do not sacrifice current implementation clarity for old-data migration. The code may keep lower-level direct APIs for reuse of validated capabilities and development debugging.
 
-1. 先读本文件，确认 V2 产品目标、协作边界和禁止事项。
-2. 涉及实现入口、模块职责或数据流时，读 `ARCHITECTURE.md`。
-3. 涉及 API、schema、状态值、环境变量或验收口径时，读 `spec.md`。
-4. 改完需要选择验证命令时，读 `TESTING.md`。
-5. 涉及 Windows 试点部署流程时，读 `DEPLOYMENT.md`。
+## Required Reading Order for AI Coding
 
-## V2 产品边界
+1. Read this file first to confirm V2 product goals, collaboration boundaries, and forbidden changes.
+2. For implementation entry points, module responsibilities, or data flow, read `ARCHITECTURE.md`.
+3. For APIs, schemas, status values, environment variables, or acceptance criteria, read `spec.md`.
+4. For validation-command selection after changes, read `TESTING.md`.
+5. For Windows pilot deployment flow changes, read `DEPLOYMENT.md`.
 
-完成一个可运行、可测试、可展示的出版审校 Agent 工作台，使责任编辑不只是“调用一次 AI 审校”，而是可以围绕一本书建立审校项目，让 Agent 制定计划、分阶段执行、给出证据、复核候选结果，并在编辑确认后写回 Word。术语、本书约定和跨章节一致性能力可沉淀为项目记忆和后续扩展，但当前 V2.2 审校计划不把它们单列为执行步骤。
+## V2 Product Boundary
 
-V2 coding 必须遵守：
+The goal is a runnable, testable, demonstrable publishing review agent workbench. A publishing editor should do more than "call AI once": they should create a review project around a book, let the agent plan and execute in stages, inspect evidence, recheck candidate results, and write back to Word only after editor confirmation. Terminology, book conventions, and cross-chapter consistency can be accumulated as project memory and future extensions, but the current V2.2 review plan does not show them as separate execution steps.
 
-- 面向审校项目，而不是一次性请求；围绕一本书保存审校目标、文档地图、运行状态、待确认问题和审校报告。
-- `agents/` 负责编排、计划、工具选择、复核、人机确认状态和可观测运行；`services/` 负责可复用业务能力。
-- 不从零重写已验证的 DOCX、定位和写回底层服务，除非 V2 工作台的产品目标确实要求调整。
-- 不使用黑盒式“一个超级 prompt 跑到底”的实现，不把所有逻辑塞进单个 FastAPI endpoint。
-- tool 输入输出必须有明确类型；复杂输入使用 Pydantic schema；tool 名称使用 `snake_case`；`tools.py` 只做薄封装。
-- 记忆优先沉淀术语表、人物/地名/机构名一致性、出版社体例规则、编辑确认过的偏好和本书级别约定；默认不把完整正文写入长期记忆。
-- Agent 只能生成候选问题、风险说明、证据和建议；当前选区或全书写回前必须经过编辑确认，不允许未经人工确认自动静默改正文。
-- 每次 Agent run 生成 `run_id`；trace 记录决策、节点、工具调用摘要、chunk 状态、耗时、错误和重试次数，但不记录完整正文、API Key、Authorization 或 Bearer token。
-- 正式接口、状态值、环境变量或 schema 变更必须同步 `spec.md`；验证命令按 `TESTING.md` 选择。
-- 临时排障记录不要写进长期文档；需要留存时放到 Git 忽略的临时目录。
+V2 coding must follow these rules:
+
+- Work around review projects, not one-off requests. Save the review goal, document map, run state, pending issues, and review report for a book.
+- `agents/` owns orchestration, planning, tool selection, rechecking, human-confirmation state, and observable runs. `services/` owns reusable business capabilities.
+- Do not rewrite validated DOCX, location, or writeback low-level services from scratch unless the V2 workbench product goal truly requires it.
+- Do not implement a black-box "one super prompt does everything" flow, and do not put all logic into a single FastAPI endpoint.
+- Tool inputs and outputs must be clearly typed. Use Pydantic schemas for complex inputs. Tool names use `snake_case`. `tools.py` is a thin wrapper layer only.
+- Memory should prioritize terminology, person/place/organization name consistency, publisher style rules, editor-confirmed preferences, and book-level conventions. Do not store full manuscript text in long-term memory by default.
+- The agent may generate candidate issues, risk notes, evidence, and suggestions only. Any current-selection or whole-book writeback must go through editor confirmation first. Silent automatic body-text modification is not allowed.
+- Every agent run produces a `run_id`. Trace records decisions, nodes, tool-call summaries, chunk state, elapsed time, errors, and retry counts, but not full text, API keys, Authorization headers, or Bearer tokens.
+- Formal API, status-value, environment-variable, or schema changes must update `spec.md`. Choose validation commands according to `TESTING.md`.
+- Do not put temporary troubleshooting notes in long-lived docs. If they must be retained, put them in a Git-ignored temporary directory.
+- Markdown documentation is bilingual for open source: the English `.md` file is canonical, and the matching `_cn.md` file must stay content-equivalent.

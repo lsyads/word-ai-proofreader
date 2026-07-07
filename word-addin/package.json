@@ -1,10 +1,14 @@
 {
-  "name": "office-addin-taskpane",
+  "name": "word-ai-proofreader-addin",
   "version": "0.0.1",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OfficeDev/Office-Addin-TaskPane.git"
+    "url": "https://github.com/lsyads/word-ai-proofreader.git"
   },
+  "bugs": {
+    "url": "https://github.com/lsyads/word-ai-proofreader/issues"
+  },
+  "homepage": "https://github.com/lsyads/word-ai-proofreader#readme",
   "license": "MIT",
   "config": {
     "app_to_debug": "word",

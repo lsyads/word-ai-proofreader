@@ -120,6 +120,11 @@ body {
   width: 100%;
 }
 
+.control-input,
+.control-select {
+  height: 34px;
+}
+
 .control-textarea {
   line-height: 1.45;
   min-height: 72px;

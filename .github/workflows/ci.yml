@@ -5,6 +5,10 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   backend:
@@ -29,6 +33,18 @@ jobs:
 
       - name: Run backend tests
         run: python -m pytest -q
+
+  python-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Audit backend requirements
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: backend/requirements.txt
 
   frontend:
     name: Frontend lint and build

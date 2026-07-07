@@ -23,6 +23,8 @@
 
 API Key 必须只保存在后端运行环境文件中，例如 `.env`。不要提交真实 Key、token、证书或私有部署配置。仓库 `.gitignore` 已排除 `.env`、本地证书、`backend/var/`、构建产物、依赖目录和缓存，但涉及配置或历史的贡献仍应在提交 PR 前运行 secret scan。
 
+公开仓库前，应在 GitHub Actions 中手动运行 `Secret Scan` workflow，并要求 full-history Gitleaks 和 TruffleHog 两个 job 都通过。本机能跑 Gitleaks 或 TruffleHog 当然有帮助，但已有 Actions 绿色记录时本机工具不是硬性前置条件。
+
 后端和 Agent trace 的设计目标是不记录完整正文、API Key、Authorization header 或 Bearer token。如果发现任何路径会记录或持久化这些值，请按安全问题处理。
 
 ## 稿件隐私

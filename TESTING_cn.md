@@ -22,6 +22,14 @@ npm run lint
 npm run build
 ```
 
+Python 依赖漏洞库审计，需要网络和本机已安装 `pip-audit`；本机没有时以 GitHub Actions 的 `CI` workflow 为准：
+
+```bash
+cd backend
+python -m pip install pip-audit
+python -m pip_audit -r requirements.txt --strict
+```
+
 Manifest 校验，需要访问 Microsoft Office manifest validation service：
 
 ```bash
@@ -55,8 +63,10 @@ npm run start
 | trace 脱敏、run events、当前分块 timeout | `backend/tests/test_agents.py`、`backend/tests/test_v2_workspace.py`；前端进度展示改动再跑前端检查 |
 | 前端 UI、按钮状态、刷新、定位、写回 | `cd word-addin && npm run lint && npm run build`；关键 Office.js 行为需要 Word 手工联调 |
 | 前端依赖或 lockfile 变更 | `cd word-addin && npm ci && npm audit --registry=https://registry.npmjs.org && npm run lint && npm run build`；audit 需要官方 npm registry，因为部分镜像不实现 audit endpoint |
+| 后端依赖变更 | GitHub Actions `CI` workflow 的 `Python dependency audit`，或本机安装 `pip-audit` 后运行 `cd backend && python -m pip_audit -r requirements.txt --strict` |
 | 环境变量、启动方式、部署文档 | `backend/tests/test_settings.py`、`backend/tests/test_env_example.py`；检查 `.env.example`、[README_cn.md](README_cn.md)、[DEPLOYMENT_cn.md](DEPLOYMENT_cn.md) 是否同步 |
 | Markdown 文档 | 检查英文/中文成对文件、语言切换、内部链接和模板/个人路径残留 |
+| 公开发布门禁 | 在 GitHub Actions 中手动触发 `CI` 和 `Secret Scan`；后端测试、Python audit、前端 audit/lint/build、Gitleaks 和 TruffleHog 全部跑绿后再公开 |
 
 单个后端文件可这样跑：
 
@@ -69,8 +79,9 @@ python -m pytest -q tests/test_v2_workspace.py
 ## 检查类型说明
 
 - 离线可跑：后端 pytest、前端 lint、前端 build。
-- 需要网络：`npm run validate`，以及真实远程 AI API 连通性检查。
+- 需要网络：`npm run validate`、`pip-audit`、真实远程 AI API 连通性检查、GitHub Actions 依赖下载和 full-history secret scan。
 - 需要 npm security API：`cd word-addin && npm audit --registry=https://registry.npmjs.org`。
+- 本机缺少安全扫描工具时，公开发布记录以 GitHub Actions 为准：`CI` 和 `Secret Scan` 应手动触发并跑绿。
 - 需要 Word 桌面版：旁加载插件、定位原文、当前选区写回、批注/修订模式人工确认。
 - 需要真实 AI key：真实 Responses/Chat 调用、远程模型 timeout 和 provider 兼容性验证。
 - 不需要真实 AI key：mock fallback、schema 校验、候选状态、项目存储、DOCX 写回单元测试。

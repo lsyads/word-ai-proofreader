@@ -23,6 +23,8 @@ Do not include real API keys, full unpublished manuscript text, or private docum
 
 API keys must stay in backend runtime environment files such as `.env`. Never commit real keys, tokens, certificates, or private deployment configs. The repository `.gitignore` excludes `.env`, local certificates, `backend/var/`, build output, dependency folders, and caches, but contributors should still run a secret scan before opening pull requests that touch configuration or history.
 
+Before making the repository public, manually run the GitHub Actions `Secret Scan` workflow and require the full-history Gitleaks and TruffleHog jobs to pass. Local Gitleaks or TruffleHog runs are useful but optional when the Actions workflow provides the release record.
+
 The backend and agent traces are designed not to record full text, API keys, Authorization headers, or Bearer tokens. If you find a path that logs or persists those values, treat it as a security issue.
 
 ## Manuscript Privacy

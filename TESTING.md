@@ -22,6 +22,14 @@ npm run lint
 npm run build
 ```
 
+Python dependency audit, requires network and `pip-audit` locally; otherwise use the GitHub Actions `CI` workflow:
+
+```bash
+cd backend
+python -m pip install pip-audit
+python -m pip_audit -r requirements.txt --strict
+```
+
 Manifest validation, requires access to the Microsoft Office manifest validation service:
 
 ```bash
@@ -55,8 +63,10 @@ npm run start
 | Trace redaction, run events, current-chunk timeout | `backend/tests/test_agents.py`, `backend/tests/test_v2_workspace.py`; frontend progress-display changes also require frontend checks |
 | Frontend UI, button states, refresh, location, writeback | `cd word-addin && npm run lint && npm run build`; key Office.js behavior requires Word manual integration |
 | Frontend dependency or lockfile changes | `cd word-addin && npm ci && npm audit --registry=https://registry.npmjs.org && npm run lint && npm run build`; audit needs the official npm registry because some mirrors do not implement the audit endpoint |
+| Backend dependency changes | GitHub Actions `CI` workflow `Python dependency audit`, or local `cd backend && python -m pip_audit -r requirements.txt --strict` when `pip-audit` is installed |
 | Environment variables, startup, deployment docs | `backend/tests/test_settings.py`, `backend/tests/test_env_example.py`; check `.env.example`, [README.md](README.md), and [DEPLOYMENT.md](DEPLOYMENT.md) |
 | Markdown documentation | Check English/cn pairing, language switches, matching internal links, and stale template or personal strings |
+| Public release gate | Run GitHub Actions `CI` and `Secret Scan` manually with `workflow_dispatch`; release only after backend tests, Python audit, frontend audit/lint/build, Gitleaks, and TruffleHog are green |
 
 Run a single backend test file like this:
 
@@ -69,8 +79,9 @@ python -m pytest -q tests/test_v2_workspace.py
 ## Check Types
 
 - Offline: backend pytest, frontend lint, frontend build.
-- Requires network: `npm run validate`, real remote AI API connectivity checks, GitHub Actions dependency downloads, and full-history secret-scan actions.
+- Requires network: `npm run validate`, `pip-audit`, real remote AI API connectivity checks, GitHub Actions dependency downloads, and full-history secret-scan actions.
 - Requires npm security API: `cd word-addin && npm audit --registry=https://registry.npmjs.org`.
+- Requires GitHub Actions for the public-release record when local tools are unavailable: `CI` and `Secret Scan` should be manually dispatched and green before making the repository public.
 - Requires Word desktop: add-in sideloading, original-text location, current-selection writeback, and manual confirmation of comments/revisions.
 - Requires a real AI key: real Responses/Chat calls, remote model timeout behavior, and provider compatibility checks.
 - Does not require a real AI key: mock fallback, schema validation, candidate state, project storage, and DOCX writeback unit tests.

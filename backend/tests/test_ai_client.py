@@ -427,6 +427,96 @@ def test_proofread_with_ai_uses_custom_temperature_for_chat(monkeypatch):
     assert FakeAsyncClient.calls[0]["json"]["temperature"] == 0.9
 
 
+def test_proofread_with_ai_uses_deepseek_chat_payload(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "deepseek-v4-pro",
+                    "label": "deepseek-v4-pro",
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                    "model": "deepseek-v4-pro",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    result = asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="deepseek-v4-pro",
+            provider_api="chat",
+            temperature=0.7,
+            settings=profile_settings,
+        )
+    )
+
+    assert result.response_id == "chatcmpl-1"
+    call = FakeAsyncClient.calls[0]
+    assert call["url"] == "https://api.deepseek.com/chat/completions"
+    assert call["headers"] == {"Authorization": "Bearer deepseek-key"}
+    assert call["json"]["model"] == "deepseek-v4-pro"
+    assert call["json"]["max_tokens"] == 8192
+    assert call["json"]["temperature"] == 0.7
+    assert call["json"]["thinking"] == {"type": "disabled"}
+    assert call["json"]["response_format"] == {"type": "json_object"}
+    assert "reasoning" not in call["json"]
+    assert "reasoning_effort" not in call["json"]
+    assert "max_completion_tokens" not in call["json"]
+
+
+def test_proofread_with_ai_enables_deepseek_thinking_without_temperature(monkeypatch):
+    FakeAsyncClient.calls = []
+    FakeAsyncClient.response = FakeResponse(payload=chat_payload())
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    profile_settings = Settings(
+        AI_PROFILES_JSON=json.dumps(
+            [
+                {
+                    "id": "deepseek-v4-pro",
+                    "label": "deepseek-v4-pro",
+                    "api_base_url": "https://api.deepseek.com",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                    "model": "deepseek-v4-pro",
+                    "default_api": "chat",
+                    "supported_apis": ["chat"],
+                }
+            ]
+        )
+    )
+
+    asyncio.run(
+        proofread_with_ai(
+            "这是一段文本。",
+            book(),
+            ai_profile_id="deepseek-v4-pro",
+            provider_api="chat",
+            proofread_mode="thinking",
+            reasoning_enabled=True,
+            temperature=0.7,
+            settings=profile_settings,
+        )
+    )
+
+    call = FakeAsyncClient.calls[0]
+    assert call["json"]["max_tokens"] == 16384
+    assert call["json"]["thinking"] == {"type": "enabled"}
+    assert call["json"]["reasoning_effort"] == "high"
+    assert call["json"]["response_format"] == {"type": "json_object"}
+    assert "temperature" not in call["json"]
+    assert "reasoning" not in call["json"]
+    assert "max_completion_tokens" not in call["json"]
+
+
 def test_proofread_with_ai_uses_xiaomimimo_chat_payload(monkeypatch):
     FakeAsyncClient.calls = []
     FakeAsyncClient.response = FakeResponse(payload=chat_payload())
@@ -454,6 +544,7 @@ def test_proofread_with_ai_uses_xiaomimimo_chat_payload(monkeypatch):
             book(),
             ai_profile_id="xiaomi-mimo",
             provider_api="chat",
+            temperature=0.8,
             settings=profile_settings,
         )
     )
@@ -464,6 +555,7 @@ def test_proofread_with_ai_uses_xiaomimimo_chat_payload(monkeypatch):
     assert call["headers"] == {"Authorization": "Bearer mimo-key"}
     assert call["json"]["model"] == "mimo-v2.5-pro"
     assert call["json"]["max_completion_tokens"] == 8192
+    assert call["json"]["temperature"] == 0.8
     assert call["json"]["thinking"] == {"type": "disabled"}
     assert call["json"]["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in call["json"]
@@ -499,6 +591,7 @@ def test_proofread_with_ai_enables_xiaomimimo_thinking(monkeypatch):
             provider_api="chat",
             proofread_mode="thinking",
             reasoning_enabled=True,
+            temperature=0.8,
             settings=profile_settings,
         )
     )
@@ -506,6 +599,7 @@ def test_proofread_with_ai_enables_xiaomimimo_thinking(monkeypatch):
     call = FakeAsyncClient.calls[0]
     assert call["json"]["max_completion_tokens"] == 16384
     assert call["json"]["thinking"] == {"type": "enabled"}
+    assert "temperature" not in call["json"]
     assert "max_tokens" not in call["json"]
     assert "reasoning" not in call["json"]
 

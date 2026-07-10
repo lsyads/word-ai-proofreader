@@ -25,7 +25,7 @@ V2.2 is project-based. A project is built around one book and stores the documen
 
 - Review sources: current Word selection and whole-book DOCX. The add-in reads the current selection and writes it back through Office.js. Whole-book DOCX files are uploaded to the backend, which processes visible table-of-contents text, body text, tables, and common text-box content. `.doc` is not supported; save it as `.docx` first.
 - Primary workflow: the task pane keeps the normal path focused on review source, book title, start review, current progress, review suggestions, writeback, and download. Recent reviews and troubleshooting details are folded by default.
-- AI API: OpenAI-compatible Responses API and Chat Completions are supported. The add-in defaults to deep review, temperature `0.6`, revision-plus-comment writeback, and prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. These settings live under the Chinese UI section `更多设置（试点支持）`. The backend direct API schema still defaults temperature to `0.2`. If no key is configured, the backend returns mock results for local integration.
+- AI API: OpenAI-compatible Responses API and Chat Completions are supported. The add-in defaults to deep review, temperature `0.6`, revision-plus-comment writeback, and prefers a profile whose id, model, or label contains `deepseek-v4-pro`. These settings live under the Chinese UI section `更多设置（试点支持）`. The backend direct API schema still defaults temperature to `0.2`. If no key is configured, the backend returns mock results for local integration.
 - Book information: the add-in requires a book title and accepts an optional introduction. The backend uses book information and the review goal as prompt context, but it does not store the full manuscript in long-term memory.
 - Publishing-editor boundary: the implemented plan shows five real execution stages: plan review, basic language review, candidate merge, evaluator recheck, and editor confirmation. Terminology, book conventions, and cross-chapter consistency are not separate V2.2 plan steps. Mechanical copyediting items such as punctuation, whitespace, full-width/half-width conversion, and Chinese/English symbol conversion belong to the copyediting vendor by default, so AI and local rules do not let those items enter the publishing-editor confirmation queue.
 - Suggestions: the agent only generates candidate issues, risk notes, evidence, and recommendations. Editors accept, reject, or bulk-process pending suggestions. No suggestion is written back until an editor accepts it.
@@ -65,6 +65,7 @@ The template keeps the same shape as `.env` and includes the variables read by t
 AI_API_KEY=
 OPENROUTER_API_KEY=
 MIMO_API_KEY=
+DEEPSEEK_API_KEY=
 
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON='[...]'
@@ -89,7 +90,7 @@ AGENT_WORKSPACE_DIR=var/agent-workspace
 API keys belong only in the backend runtime environment. Do not put real keys in `manifest.xml`, frontend source, Webpack config, build artifacts, screenshots, chat logs, or documentation.
 All `*_API_KEY` entries in `.env.example` are intentionally blank; fill them only in your local `.env`.
 
-`.env.example` currently includes `local-omlx`, `hy3-preview`, `mimo-v2.5`, and `mimo-v2.5-pro` profiles in `AI_PROFILES_JSON`. The local profile reads `AI_API_KEY` and points to `http://127.0.0.1:8001/v1`. The add-in prefers a profile whose id, model, or label contains `mimo-v2.5-pro`; the template's matching remote profile is `mimo-v2.5-pro`, with key material read from `MIMO_API_KEY`.
+`.env.example` currently includes `local-omlx`, `hy3-preview`, `deepseek-v4-pro`, `mimo-v2.5`, and `mimo-v2.5-pro` profiles in `AI_PROFILES_JSON`. The local profile reads `AI_API_KEY` and points to `http://127.0.0.1:8001/v1`. The add-in prefers a profile whose id, model, or label contains `deepseek-v4-pro`; the template's matching remote profile is `deepseek-v4-pro`, with key material read from `DEEPSEEK_API_KEY`.
 
 The backend still supports a legacy single-profile fallback when `AI_PROFILES_JSON` is removed or left empty: `AI_API_KEY`, `AI_PROVIDER_API`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` create `Default AI (.env)`. Those fields stay in `.env.example` because the code reads them. `BACKEND_HOST`, `BACKEND_PORT`, and `WORD_ADDIN_API_BASE_URL` are omitted because the current code does not read them; backend listen address is controlled by the `uvicorn ... --host/--port` command, and the add-in development proxy is configured in `word-addin/webpack.config.js`. See [spec.md](spec.md) for full environment-variable rules and [DEPLOYMENT.md](DEPLOYMENT.md) for the Windows pilot configuration.
 

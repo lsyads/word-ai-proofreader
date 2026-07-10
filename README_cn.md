@@ -25,7 +25,7 @@ V2.2 围绕一本书建立审校项目，保存文档地图、审校计划、运
 
 - 审校来源：支持当前选区和全书 DOCX。当前选区由插件读取并通过 Office.js 写回；全书 DOCX 上传到后端，后端处理目录可见文本、正文、表格和常见文本框文字。本版不支持 `.doc`，请先另存为 `.docx`。
 - 普通使用流程：插件主界面保留“审校来源、书名、开始审校、本次进度、审校建议、写回/下载”，最近审校和排障信息默认折叠。
-- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions。插件默认深度审校、Temperature `0.6`、修订+批注模式，并优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；这些配置放在“更多设置（试点支持）”中。后端 API schema 的默认 temperature 仍为 `0.2`，用于直接 API 调用。未配置 Key 时返回 mock 结果，方便本地联调。
+- AI API：支持 OpenAI 兼容 Responses API 和 Chat Completions。插件默认深度审校、Temperature `0.6`、修订+批注模式，并优先匹配 id、model 或 label 包含 `deepseek-v4-pro` 的 profile；这些配置放在“更多设置（试点支持）”中。后端 API schema 的默认 temperature 仍为 `0.2`，用于直接 API 调用。未配置 Key 时返回 mock 结果，方便本地联调。
 - 书籍信息：插件要求填写书名，介绍可选；后端把书籍信息和审校目标作为 prompt 背景，但不把完整正文写入长期记忆。
 - 责任编辑边界：当前审校计划只展示 5 个实际执行阶段：生成计划、基础语言审校、候选归并、二次复核、等待编辑确认。术语、本书约定和一致性不再作为独立计划步骤展示；标点符号、空格、全半角和中英文符号转换等机械校对属于校对公司任务，AI 或本地规则默认都不会让这类建议进入责任编辑确认队列。
 - 建议处理：Agent 只生成审校建议、风险说明和证据；编辑逐条接受/忽略，也可批量处理所有待处理建议。无论置信度多高，都必须接受后才会写回。
@@ -65,6 +65,7 @@ cp .env.example .env
 AI_API_KEY=
 OPENROUTER_API_KEY=
 MIMO_API_KEY=
+DEEPSEEK_API_KEY=
 
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON='[...]'
@@ -89,7 +90,7 @@ AGENT_WORKSPACE_DIR=var/agent-workspace
 API Key 只配置在后端运行环境中。不要把真实 Key 写入 `manifest.xml`、前端源码、Webpack 配置、构建产物或文档。
 `.env.example` 中所有 `*_API_KEY` 都刻意留空；真实值只填写到本机 `.env`。
 
-`.env.example` 当前在 `AI_PROFILES_JSON` 中包含 `local-omlx`、`hy3-preview`、`mimo-v2.5` 和 `mimo-v2.5-pro` 四个 profile。本地 profile 读取 `AI_API_KEY`，并指向 `http://127.0.0.1:8001/v1`。插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile；当前模板中匹配的远程 profile 是 `mimo-v2.5-pro`，Key 来自 `MIMO_API_KEY`。
+`.env.example` 当前在 `AI_PROFILES_JSON` 中包含 `local-omlx`、`hy3-preview`、`deepseek-v4-pro`、`mimo-v2.5` 和 `mimo-v2.5-pro` 五个 profile。本地 profile 读取 `AI_API_KEY`，并指向 `http://127.0.0.1:8001/v1`。插件会优先匹配 id、model 或 label 包含 `deepseek-v4-pro` 的 profile；当前模板中匹配的远程 profile 是 `deepseek-v4-pro`，Key 来自 `DEEPSEEK_API_KEY`。
 
 后端仍支持 legacy 单 profile fallback：删除或留空 `AI_PROFILES_JSON` 后，`AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 会生成 `Default AI (.env)`。这些字段保留在 `.env.example` 中，因为代码会读取它们。`BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 不放进模板，因为当前代码不会读取它们；后端监听地址由 `uvicorn ... --host/--port` 决定，插件开发代理在 `word-addin/webpack.config.js` 中配置。详细环境变量规则见 [spec_cn.md](spec_cn.md)，Windows 试点配置见 [DEPLOYMENT_cn.md](DEPLOYMENT_cn.md)。
 

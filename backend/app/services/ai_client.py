@@ -24,7 +24,7 @@ from app.settings import Settings, get_settings
 
 ProviderAPI = Literal["responses", "chat"]
 ProofreadMode = Literal["fast", "thinking"]
-ChatDialect = Literal["default", "xiaomimimo"]
+ChatDialect = Literal["default", "deepseek", "xiaomimimo"]
 DEFAULT_TEMPERATURE = 0.2
 logger = logging.getLogger(__name__)
 _TOKENIZER_UNAVAILABLE_MODELS: set[str] = set()
@@ -419,7 +419,7 @@ async def _proofread_with_chat(
         dialect,
         proofread_mode,
         reasoning_enabled,
-        payload["temperature"],
+        payload.get("temperature"),
         len(text),
         _chat_output_token_limit(payload),
     )
@@ -506,15 +506,27 @@ def _build_chat_payload(
             {"role": "system", "content": _build_system_prompt(proofread_mode)},
             {"role": "user", "content": _build_user_prompt(text, book)},
         ],
-        "temperature": temperature,
     }
 
     if resolved_dialect == "xiaomimimo":
         payload["max_completion_tokens"] = _max_tokens_for_mode(settings, proofread_mode)
         payload["thinking"] = {"type": "enabled" if reasoning_enabled else "disabled"}
         payload["response_format"] = {"type": "json_object"}
+        if not reasoning_enabled:
+            payload["temperature"] = temperature
         return payload
 
+    if resolved_dialect == "deepseek":
+        payload["max_tokens"] = _max_tokens_for_mode(settings, proofread_mode)
+        payload["thinking"] = {"type": "enabled" if reasoning_enabled else "disabled"}
+        payload["response_format"] = {"type": "json_object"}
+        if reasoning_enabled:
+            payload["reasoning_effort"] = "high"
+        else:
+            payload["temperature"] = temperature
+        return payload
+
+    payload["temperature"] = temperature
     payload["max_tokens"] = _max_tokens_for_mode(settings, proofread_mode)
     payload["reasoning"] = {"enabled": reasoning_enabled}
     # "response_format": {"type": "json_object"},
@@ -523,6 +535,9 @@ def _build_chat_payload(
 
 def _chat_dialect(profile: AIProfile) -> ChatDialect:
     host = urlparse(profile.api_base_url).hostname or ""
+    if host.lower() == "api.deepseek.com":
+        return "deepseek"
+
     if host.lower() == "api.xiaomimimo.com":
         return "xiaomimimo"
 

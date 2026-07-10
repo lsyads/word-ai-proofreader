@@ -13,7 +13,7 @@ Related docs: project entry point [README.md](README.md), code structure [ARCHIT
 - Deployment style: each editor machine runs `backend` and `word-addin` locally.
 - Add-in URL: `https://localhost:3000/taskpane.html`.
 - Backend URL: `http://127.0.0.1:8000`.
-- AI service: remote OpenAI-compatible endpoint. For the pilot, leave `AI_PROFILES_JSON` empty by default and let `.env` values `OPENAI_API_BASE_URL`, `OPENAI_MODEL`, and `AI_API_KEY` create the `Default AI (.env)` profile.
+- AI service: remote OpenAI-compatible endpoint. The default template prefers the `deepseek-v4-pro` profile and reads key material from `DEEPSEEK_API_KEY`. If the pilot uses one custom remote service instead, leave `AI_PROFILES_JSON` empty and let `.env` values `OPENAI_API_BASE_URL`, `OPENAI_MODEL`, and `AI_API_KEY` create the `Default AI (.env)` profile.
 
 This pilot does not require every machine to install oMLX or a local model by default. If a later pilot uses local models, add separate model installation, hardware, and model-service startup instructions.
 
@@ -93,9 +93,17 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Adjust `.env` for the pilot. `.env.example` contains a multi-profile `AI_PROFILES_JSON` template, including a local `local-omlx` profile that reads `AI_API_KEY` and remote profiles that read `OPENROUTER_API_KEY` or `MIMO_API_KEY`. The backend reads keys according to each profile's `api_key_env`, and the add-in prefers a profile whose id, model, or label contains `mimo-v2.5-pro`. In the current template that profile is `mimo-v2.5-pro`, with key from `MIMO_API_KEY`. If the Windows remote pilot uses one remote OpenAI-compatible service, set `AI_PROFILES_JSON=` and use the legacy `.env` profile below.
+Adjust `.env` for the pilot. `.env.example` contains a multi-profile `AI_PROFILES_JSON` template, including a local `local-omlx` profile that reads `AI_API_KEY` and remote profiles that read `OPENROUTER_API_KEY`, `MIMO_API_KEY`, or `DEEPSEEK_API_KEY`. The backend reads keys according to each profile's `api_key_env`, and the add-in prefers a profile whose id, model, or label contains `deepseek-v4-pro`. In the current template that profile is `deepseek-v4-pro`, with key from `DEEPSEEK_API_KEY`.
 
-Replace `AI_API_KEY`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` with pilot values:
+For the default DeepSeek pilot, keep `AI_PROFILES_JSON='[...]'` and fill only:
+
+```text
+DEEPSEEK_API_KEY=
+```
+
+If the Windows remote pilot uses one custom OpenAI-compatible service instead, set `AI_PROFILES_JSON=` and use the legacy `.env` profile below.
+
+For a custom single-service pilot, replace `AI_API_KEY`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL` with pilot values:
 
 ```text
 AI_API_KEY=
@@ -112,11 +120,10 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 
 Configuration requirements:
 
-- Use a pilot-specific `AI_API_KEY`, not a personal production key.
-- `OPENAI_API_BASE_URL` should point to the remote OpenAI-compatible `/v1` root.
-- `OPENAI_MODEL` must match a model id exposed by the remote service.
+- For the default DeepSeek profile, use a pilot-specific `DEEPSEEK_API_KEY`, not a personal production key.
+- For a custom single-service profile, use a pilot-specific `AI_API_KEY`, point `OPENAI_API_BASE_URL` to the remote OpenAI-compatible `/v1` root, and set `OPENAI_MODEL` to a model id exposed by the remote service.
 - When `AI_PROFILES_JSON` is empty, the backend creates `Default AI (.env)` from `AI_API_KEY/AI_PROVIDER_API/OPENAI_API_BASE_URL/OPENAI_MODEL`.
-- If multiple profiles are retained, configure the `api_key_env` required by the profile the add-in will actually select. In the current template, `mimo-v2.5-pro` reads from `MIMO_API_KEY`.
+- If multiple profiles are retained, configure the `api_key_env` required by the profile the add-in will actually select. In the current template, `deepseek-v4-pro` reads from `DEEPSEEK_API_KEY`.
 - Keep `BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000`.
 - `BACKEND_HOST`, `BACKEND_PORT`, and `WORD_ADDIN_API_BASE_URL` are intentionally omitted from `.env.example` because the current code does not read them. The backend address is controlled by the uvicorn command in section 6; the add-in proxy address is controlled by `word-addin\webpack.config.js`.
 - Do not commit, forward, or screenshot a `.env` that contains a real key.
@@ -344,7 +351,7 @@ Check backend logs in the first PowerShell window first. Common causes:
 - `AI_API_KEY` was not replaced or lacks permission.
 - `OPENAI_API_BASE_URL` is wrong.
 - `OPENAI_MODEL` does not match the remote service model id.
-- `AI_PROFILES_JSON` was not cleared and the add-in selected `mimo-v2.5-pro`, but `MIMO_API_KEY` or another required `api_key_env` is empty.
+- `AI_PROFILES_JSON` was not cleared and the add-in selected `deepseek-v4-pro`, but `DEEPSEEK_API_KEY` or another required `api_key_env` is empty.
 - The network cannot reach the remote AI API.
 - The remote AI service returned non-JSON or timed out.
 

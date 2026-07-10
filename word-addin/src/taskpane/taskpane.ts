@@ -70,7 +70,7 @@ type BusyAction =
 
 const DEFAULT_V2_TEMPERATURE = 0.6;
 const DEFAULT_WRITEBACK_AUTHOR = "Word Proofreader";
-const PREFERRED_AI_PROFILE = "mimo-v2.5-pro";
+const PREFERRED_AI_PROFILE = "deepseek-v4-pro";
 const RUN_POLL_INTERVAL_MS = 2000;
 const RUN_POLL_TIMEOUT_MS = 60 * 60 * 1000;
 const TERMINAL_RUN_STATUSES = new Set([

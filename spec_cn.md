@@ -369,8 +369,8 @@ Request:
 - `ai_profile_id` 可选；缺省使用后端 profile 列表第一项。旧 `.env` 配置会生成 `default` profile。
 - `provider_api` 可选，支持 `responses`、`chat`；缺省使用所选 profile 的 `default_api`。
 - `proofread_mode` 可选，支持 `fast`、`thinking`；默认 `fast`。
-- `reasoning_enabled` 可选，默认 `false`；默认 Chat 供应商写入请求体 `reasoning.enabled`；Xiaomi MiMo profile 写入 `thinking.type`。
-- `temperature` 可选，默认 `0.2`，范围 `0` 到 `1.5`；写入 Responses 和 Chat provider 请求体。
+- `reasoning_enabled` 可选，默认 `false`；默认 Chat 供应商写入请求体 `reasoning.enabled`；DeepSeek 和 Xiaomi MiMo profile 写入 `thinking.type`。DeepSeek 开启推理时还会写入 `reasoning_effort="high"`。
+- `temperature` 可选，默认 `0.2`，范围 `0` 到 `1.5`；写入 Responses 和 Chat provider 请求体，但 DeepSeek 和 Xiaomi MiMo Chat 在 `thinking.type="enabled"` 时不发送该字段，因为这些供应商的思考模式不支持采样参数。
 - `context` 可选，用于调用来源等调试信息。
 
 Response:
@@ -654,6 +654,7 @@ Response:
 AI_API_KEY=
 OPENROUTER_API_KEY=
 MIMO_API_KEY=
+DEEPSEEK_API_KEY=
 
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON='[...]'
@@ -675,15 +676,15 @@ AGENT_TRACE_DIR=var/agent-traces
 AGENT_WORKSPACE_DIR=var/agent-workspace
 ```
 
-`.env.example` 保持和 `.env` 相同的填写格式，并保留后端 settings 会读取或 `AI_PROFILES_JSON` 会引用的变量。当前 `AI_PROFILES_JSON` 包含 `local-omlx`、`hy3-preview`、`mimo-v2.5` 和 `mimo-v2.5-pro`；插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile。
+`.env.example` 保持和 `.env` 相同的填写格式，并保留后端 settings 会读取或 `AI_PROFILES_JSON` 会引用的变量。当前 `AI_PROFILES_JSON` 包含 `local-omlx`、`hy3-preview`、`deepseek-v4-pro`、`mimo-v2.5` 和 `mimo-v2.5-pro`；插件会优先匹配 id、model 或 label 包含 `deepseek-v4-pro` 的 profile。
 
 - 选中 profile 的 `api_key_env` 对应 Key 为空时，底层直接审校服务走 mock fallback。
 - 不配置 `AI_PROFILES_JSON` 时，后端根据 `AI_API_KEY`、`AI_PROVIDER_API`、`OPENAI_API_BASE_URL`、`OPENAI_MODEL` 生成 `default` profile。这些 legacy fallback 变量仍支持，并且保留在 `.env.example` 中，因为代码会读取它们。
-- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。Xiaomi MiMo 示例：`{"id":"mimo-v2.5-pro","label":"mimo-v2.5-pro","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
+- `AI_PROFILES_JSON` 可选，用于配置多个 OpenAI 兼容 profile；每项包含 `id`、`label`、`api_base_url`、`api_key_env`、`model`、`default_api`、`supported_apis`。DeepSeek 示例：`{"id":"deepseek-v4-pro","label":"deepseek-v4-pro","api_base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-pro","default_api":"chat","supported_apis":["chat"]}`。Xiaomi MiMo 示例：`{"id":"mimo-v2.5-pro","label":"mimo-v2.5-pro","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`。
 - `AI_PROVIDER_API` 默认 `responses`，用于旧 `.env` 默认 profile 的 `default_api`。
 - `proofread_mode=fast` 使用 `AI_FAST_MAX_TOKENS`；`proofread_mode=thinking` 使用 `AI_THINKING_MAX_TOKENS`。
 - AI 请求 timeout 使用动态估算，不再直接使用固定 `AI_REQUEST_TIMEOUT_SECONDS`；该旧字段仍保留在模板里用于兼容。计算规则：先用 `tiktoken` 估算完整上送 prompt/messages 的 `estimated_input_tokens`，再加上本次请求的输出 token 上限得到 `estimated_total_tokens`；`token_units = ceil(max(estimated_total_tokens, 1) / 1000)`；`fast` 使用 `AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS`，`thinking` 或 `reasoning_enabled=true` 使用 `AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS`；`raw_timeout = AI_REQUEST_TIMEOUT_BASE_SECONDS + token_units * seconds_per_1k`；最终 `timeout_seconds = clamp(raw_timeout, AI_REQUEST_TIMEOUT_MIN_SECONDS, AI_REQUEST_TIMEOUT_MAX_SECONDS)`。动态 timeout 字段支持覆盖，并保留在 `.env.example` 中；默认 base 60 秒、最小 60 秒、最大 900 秒、fast 每 1k tokens 45 秒、thinking 每 1k tokens 75 秒。
-- `temperature` 是请求级参数，不需要环境变量；底层直接 API schema 默认 `0.2`，当前 V2.2 插件工作台默认 `0.6`。
+- `temperature` 是请求级参数，不需要环境变量；底层直接 API schema 默认 `0.2`，当前 V2.2 插件工作台默认 `0.6`。DeepSeek 和 Xiaomi MiMo Chat 在 `thinking.type="enabled"` 时会省略 `temperature`，因为这些供应商的思考模式不支持采样参数。
 - `AGENT_TRACE_DIR` 保存 Agent run trace 的 SQLite 文件，默认 `backend/var/agent-traces`。
 - `AGENT_WORKSPACE_DIR` 保存 V2 project/session/run/history schema 的 SQLite 文件和 V2 输出文件，默认 `backend/var/agent-workspace`。
 - `BACKEND_LOG_LEVEL=INFO` 不打印完整请求正文；`DEBUG` 可能打印选区文本、书名、介绍和 AI 输出，仅用于本地调试。
@@ -695,9 +696,10 @@ AGENT_WORKSPACE_DIR=var/agent-workspace
 - 空文本、缺少 `book` 或空 `book.title` 返回 422。
 - 选中 profile 没有配置 Key 时，底层直接审校服务返回 mock `issues[]`。
 - 配置默认 profile 的 `AI_API_KEY`，或多 profile 对应的 `api_key_env` 时，按 `ai_profile_id` 和 `provider_api` 调用 Responses 或 Chat；provider 异常返回 502，错误信息不包含 Key 或 Authorization header。
-- `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。
+- `api_base_url=https://api.deepseek.com` 的 Chat profile 按 DeepSeek OpenAI-compatible Chat Completions 适配：使用 `max_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，并且只在 `reasoning_enabled=true` 时发送 `reasoning_effort="high"`，不发送默认 `reasoning` 或 MiMo 专用的 `max_completion_tokens`。当 `thinking.type="enabled"` 时，后端会省略 `temperature`。
+- `api_base_url=https://api.xiaomimimo.com/v1` 的 Chat profile 按 Xiaomi MiMo OpenAI-compatible Chat Completions 适配：使用 `max_completion_tokens`、`thinking.type`、`response_format={"type":"json_object"}`，不发送 `max_tokens` 或 `reasoning`。当 `thinking.type="enabled"` 时，后端会省略 `temperature`。
 - V2 selection 和 DOCX 项目可以创建文档地图、审校计划和 Agent run；run 完成后候选进入编辑确认队列，候选数为 0 时项目 run 状态为 `succeeded`。
-- 普通审校、流式审校、分块任务、DOCX 全书任务和 V2 Agent run 都接受 `temperature`；越界返回 422，合法值会传给 AI provider；V2.2 插件默认提交 `0.6`。
+- 普通审校、流式审校、分块任务、DOCX 全书任务和 V2 Agent run 都接受 `temperature`；越界返回 422，除 DeepSeek 和 Xiaomi MiMo 开启思考的 Chat 请求外，合法值会传给 AI provider；V2.2 插件默认提交 `0.6`。
 - 普通审校、流式审校、分块任务和 DOCX 全书任务都会返回 `run_id`；新生成的 DOCX 持久化结果在服务重启后仍返回 `run_id`；`GET /api/agent/runs/{run_id}/trace` 可查询节点、chunk、耗时、状态、错误和重试次数，且 trace 不包含完整正文或密钥。
 - `/api/ai-profiles` 不返回 Key；profile 不存在或不支持所选 `provider_api` 时返回 400。
 - Responses 请求不携带 `previous_response_id`，同一 `session_id` 多次审校互不续接上下文。

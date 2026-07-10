@@ -13,7 +13,7 @@
 - 部署方式：每台编辑电脑本地运行 `backend` 和 `word-addin`。
 - 插件地址：`https://localhost:3000/taskpane.html`。
 - 后端地址：`http://127.0.0.1:8000`。
-- AI 服务：远程 OpenAI 兼容接口。试点默认建议置空 `AI_PROFILES_JSON`，由 `.env` 中的 `OPENAI_API_BASE_URL`、`OPENAI_MODEL` 和 `AI_API_KEY` 生成 `Default AI (.env)` profile。
+- AI 服务：远程 OpenAI 兼容接口。默认模板优先使用 `deepseek-v4-pro` profile，并从 `DEEPSEEK_API_KEY` 读取 Key。如果试点改用单一自定义远程服务，再置空 `AI_PROFILES_JSON`，由 `.env` 中的 `OPENAI_API_BASE_URL`、`OPENAI_MODEL` 和 `AI_API_KEY` 生成 `Default AI (.env)` profile。
 
 本试点默认不要求每台电脑安装 oMLX 或本地大模型。如果后续改为本地模型试点，需要另行补充模型安装、硬件要求和模型服务启动步骤。
 
@@ -99,9 +99,17 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-把 `.env` 调整为试点配置。当前 `.env.example` 默认包含 `AI_PROFILES_JSON` 多 profile 模板，其中本地 `local-omlx` profile 读取 `AI_API_KEY`，远程 profile 读取 `OPENROUTER_API_KEY` 或 `MIMO_API_KEY`。后端会优先按 profile 的 `api_key_env` 读取 Key，插件会优先匹配 id、model 或 label 包含 `mimo-v2.5-pro` 的 profile。当前模板中匹配的是 `mimo-v2.5-pro` profile，Key 来自 `MIMO_API_KEY`。Windows 远程试点如果只使用一个远程 OpenAI 兼容服务，建议把 `AI_PROFILES_JSON='[...]'` 整段改为 `AI_PROFILES_JSON=`，再使用下面的 legacy `.env` profile。
+把 `.env` 调整为试点配置。当前 `.env.example` 默认包含 `AI_PROFILES_JSON` 多 profile 模板，其中本地 `local-omlx` profile 读取 `AI_API_KEY`，远程 profile 读取 `OPENROUTER_API_KEY`、`MIMO_API_KEY` 或 `DEEPSEEK_API_KEY`。后端会优先按 profile 的 `api_key_env` 读取 Key，插件会优先匹配 id、model 或 label 包含 `deepseek-v4-pro` 的 profile。当前模板中匹配的是 `deepseek-v4-pro` profile，Key 来自 `DEEPSEEK_API_KEY`。
 
-以下示例中的 `AI_API_KEY`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 必须替换为试点实际值：
+默认 DeepSeek 试点保留 `AI_PROFILES_JSON='[...]'`，只填写：
+
+```text
+DEEPSEEK_API_KEY=
+```
+
+Windows 远程试点如果改用一个自定义 OpenAI 兼容服务，建议把 `AI_PROFILES_JSON='[...]'` 整段改为 `AI_PROFILES_JSON=`，再使用下面的 legacy `.env` profile。
+
+自定义单服务试点时，以下示例中的 `AI_API_KEY`、`OPENAI_API_BASE_URL` 和 `OPENAI_MODEL` 必须替换为试点实际值：
 
 ```text
 AI_API_KEY=
@@ -118,11 +126,10 @@ BACKEND_CORS_ORIGINS=https://localhost:3000,http://localhost:3000
 
 配置要求：
 
-- `AI_API_KEY` 使用试点专用 Key，不使用个人生产 Key。
-- `OPENAI_API_BASE_URL` 应指向远程 OpenAI 兼容服务的 `/v1` 根路径。
-- `OPENAI_MODEL` 必须与远程服务提供的模型 ID 一致。
+- 默认 DeepSeek profile 使用试点专用的 `DEEPSEEK_API_KEY`，不要使用个人生产 Key。
+- 自定义单服务 profile 使用试点专用的 `AI_API_KEY`，`OPENAI_API_BASE_URL` 指向远程 OpenAI 兼容服务的 `/v1` 根路径，`OPENAI_MODEL` 必须与远程服务提供的模型 ID 一致。
 - `AI_PROFILES_JSON` 为空时，后端使用 `AI_API_KEY/AI_PROVIDER_API/OPENAI_API_BASE_URL/OPENAI_MODEL` 生成 `Default AI (.env)` profile。
-- 如果试点要保留多 profile，必须为插件实际选中的 profile 配置对应的 `api_key_env`。当前模板中 `mimo-v2.5-pro` 读取 `MIMO_API_KEY`。
+- 如果试点要保留多 profile，必须为插件实际选中的 profile 配置对应的 `api_key_env`。当前模板中 `deepseek-v4-pro` 读取 `DEEPSEEK_API_KEY`。
 - `BACKEND_CORS_ORIGINS` 保持 `https://localhost:3000,http://localhost:3000`。
 - `BACKEND_HOST`、`BACKEND_PORT`、`WORD_ADDIN_API_BASE_URL` 当前不被代码读取，因此刻意不放进 `.env.example`；后端地址由第 6 节 uvicorn 命令决定，插件代理地址由 `word-addin\webpack.config.js` 决定。
 - 不要提交、转发或截图包含真实 Key 的 `.env`。
@@ -350,7 +357,7 @@ curl.exe -k -I https://localhost:3000/taskpane.html
 - `AI_API_KEY` 未替换或无权限。
 - `OPENAI_API_BASE_URL` 写错。
 - `OPENAI_MODEL` 与远程服务模型 ID 不一致。
-- 未置空 `AI_PROFILES_JSON`，插件选中了 `mimo-v2.5-pro`，但对应的 `MIMO_API_KEY` 或其他 `api_key_env` 为空。
+- 未置空 `AI_PROFILES_JSON`，插件选中了 `deepseek-v4-pro`，但对应的 `DEEPSEEK_API_KEY` 或其他 `api_key_env` 为空。
 - 当前网络无法访问远程 AI API。
 - 远程 AI 服务返回非 JSON 或响应超时。
 

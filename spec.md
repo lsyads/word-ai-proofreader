@@ -367,8 +367,8 @@ Fields:
 - `ai_profile_id` is optional; default is the first backend profile. Old `.env` settings create the `default` profile.
 - `provider_api` is optional, supports `responses` and `chat`, and defaults to the selected profile's `default_api`.
 - `proofread_mode` is optional, supports `fast` and `thinking`, and defaults to `fast`.
-- `reasoning_enabled` is optional and defaults to `false`; default Chat providers receive `reasoning.enabled`, while Xiaomi MiMo profiles receive `thinking.type`.
-- `temperature` is optional, defaults to `0.2`, accepts `0..1.5`, and is sent to Responses and Chat providers.
+- `reasoning_enabled` is optional and defaults to `false`; default Chat providers receive `reasoning.enabled`, while DeepSeek and Xiaomi MiMo profiles receive `thinking.type`. DeepSeek also receives `reasoning_effort="high"` when reasoning is enabled.
+- `temperature` is optional, defaults to `0.2`, accepts `0..1.5`, and is sent to Responses and Chat providers, except DeepSeek and Xiaomi MiMo Chat requests with `thinking.type="enabled"` omit it because their thinking modes do not support sampling parameters.
 - `context` is optional debug information such as call source.
 
 Response:
@@ -650,6 +650,7 @@ Response:
 AI_API_KEY=
 OPENROUTER_API_KEY=
 MIMO_API_KEY=
+DEEPSEEK_API_KEY=
 
 AI_PROVIDER_API=responses
 AI_PROFILES_JSON='[...]'
@@ -671,15 +672,15 @@ AGENT_TRACE_DIR=var/agent-traces
 AGENT_WORKSPACE_DIR=var/agent-workspace
 ```
 
-`.env.example` mirrors `.env` format and keeps variables read by backend settings or referenced by `AI_PROFILES_JSON`. Its `AI_PROFILES_JSON` contains `local-omlx`, `hy3-preview`, `mimo-v2.5`, and `mimo-v2.5-pro`; the add-in prefers a profile whose id, model, or label contains `mimo-v2.5-pro`.
+`.env.example` mirrors `.env` format and keeps variables read by backend settings or referenced by `AI_PROFILES_JSON`. Its `AI_PROFILES_JSON` contains `local-omlx`, `hy3-preview`, `deepseek-v4-pro`, `mimo-v2.5`, and `mimo-v2.5-pro`; the add-in prefers a profile whose id, model, or label contains `deepseek-v4-pro`.
 
 - Empty key material for the selected profile's `api_key_env` uses mock fallback in the direct proofreading service.
 - Without `AI_PROFILES_JSON`, the backend creates a `default` profile from `AI_API_KEY`, `AI_PROVIDER_API`, `OPENAI_API_BASE_URL`, and `OPENAI_MODEL`. These legacy fallback variables remain supported and are kept in `.env.example` because the code reads them.
-- `AI_PROFILES_JSON` is optional and configures multiple OpenAI-compatible profiles. Each item contains `id`, `label`, `api_base_url`, `api_key_env`, `model`, `default_api`, and `supported_apis`. Xiaomi MiMo example: `{"id":"mimo-v2.5-pro","label":"mimo-v2.5-pro","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`.
+- `AI_PROFILES_JSON` is optional and configures multiple OpenAI-compatible profiles. Each item contains `id`, `label`, `api_base_url`, `api_key_env`, `model`, `default_api`, and `supported_apis`. DeepSeek example: `{"id":"deepseek-v4-pro","label":"deepseek-v4-pro","api_base_url":"https://api.deepseek.com","api_key_env":"DEEPSEEK_API_KEY","model":"deepseek-v4-pro","default_api":"chat","supported_apis":["chat"]}`. Xiaomi MiMo example: `{"id":"mimo-v2.5-pro","label":"mimo-v2.5-pro","api_base_url":"https://api.xiaomimimo.com/v1","api_key_env":"MIMO_API_KEY","model":"mimo-v2.5-pro","default_api":"chat","supported_apis":["chat"]}`.
 - `AI_PROVIDER_API` defaults to `responses` and is used as the legacy `.env` default profile's `default_api`.
 - `proofread_mode=fast` uses `AI_FAST_MAX_TOKENS`; `proofread_mode=thinking` uses `AI_THINKING_MAX_TOKENS`.
 - AI request timeout is dynamically estimated instead of using fixed `AI_REQUEST_TIMEOUT_SECONDS`; the old field remains in the template for compatibility. The backend estimates full outgoing prompt/message `estimated_input_tokens` with `tiktoken`, adds this request's output-token limit to get `estimated_total_tokens`, calculates `token_units = ceil(max(estimated_total_tokens, 1) / 1000)`, uses `AI_FAST_TIMEOUT_SECONDS_PER_1K_TOKENS` for `fast` and `AI_THINKING_TIMEOUT_SECONDS_PER_1K_TOKENS` for `thinking` or `reasoning_enabled=true`, then computes `raw_timeout = AI_REQUEST_TIMEOUT_BASE_SECONDS + token_units * seconds_per_1k` and clamps it between `AI_REQUEST_TIMEOUT_MIN_SECONDS` and `AI_REQUEST_TIMEOUT_MAX_SECONDS`. The dynamic timeout fields are supported overrides and stay in `.env.example`; defaults are base 60 seconds, minimum 60 seconds, maximum 900 seconds, fast 45 seconds per 1k tokens, and thinking 75 seconds per 1k tokens.
-- `temperature` is request-level and does not need an environment variable. The lower-level direct API schema defaults to `0.2`; the current V2.2 add-in workbench defaults to `0.6`.
+- `temperature` is request-level and does not need an environment variable. The lower-level direct API schema defaults to `0.2`; the current V2.2 add-in workbench defaults to `0.6`. DeepSeek and Xiaomi MiMo Chat omit `temperature` when `thinking.type="enabled"` because those providers do not support sampling parameters in thinking mode.
 - `AGENT_TRACE_DIR` stores agent run trace SQLite files, defaulting to `backend/var/agent-traces`.
 - `AGENT_WORKSPACE_DIR` stores V2 project/session/run/history SQLite files and V2 output files, defaulting to `backend/var/agent-workspace`.
 - `BACKEND_LOG_LEVEL=INFO` does not print full request text. `DEBUG` may print selection text, book title, introduction, and AI output; use it only for local debugging.
@@ -691,9 +692,10 @@ AGENT_WORKSPACE_DIR=var/agent-workspace
 - Empty text, missing `book`, or blank `book.title` returns 422.
 - Without key material for the selected profile, the backend returns mock `issues[]` from the direct proofreading service.
 - With default-profile `AI_API_KEY` or a configured multi-profile `api_key_env`, the backend calls Responses or Chat according to `ai_profile_id` and `provider_api`; provider errors return 502 without key or Authorization header content.
-- `api_base_url=https://api.xiaomimimo.com/v1` Chat profiles use Xiaomi MiMo OpenAI-compatible Chat Completions adaptation: `max_completion_tokens`, `thinking.type`, and `response_format={"type":"json_object"}`, without `max_tokens` or `reasoning`.
+- `api_base_url=https://api.deepseek.com` Chat profiles use DeepSeek OpenAI-compatible Chat Completions adaptation: `max_tokens`, `thinking.type`, `response_format={"type":"json_object"}`, and `reasoning_effort="high"` only when `reasoning_enabled=true`, without default `reasoning` or MiMo-only `max_completion_tokens`. When `thinking.type="enabled"`, the backend omits `temperature`.
+- `api_base_url=https://api.xiaomimimo.com/v1` Chat profiles use Xiaomi MiMo OpenAI-compatible Chat Completions adaptation: `max_completion_tokens`, `thinking.type`, and `response_format={"type":"json_object"}`, without `max_tokens` or `reasoning`. When `thinking.type="enabled"`, the backend omits `temperature`.
 - V2 selection and DOCX projects can create document maps, review plans, and agent runs. After run completion, candidates enter editor confirmation; if candidate count is 0, run status is `succeeded`.
-- Direct review, streaming review, chunked tasks, DOCX tasks, and V2 agent runs accept `temperature`; out-of-range values return 422, valid values are sent to the provider, and the V2.2 add-in defaults to `0.6`.
+- Direct review, streaming review, chunked tasks, DOCX tasks, and V2 agent runs accept `temperature`; out-of-range values return 422, valid values are sent to the provider except DeepSeek and Xiaomi MiMo thinking-enabled Chat requests, and the V2.2 add-in defaults to `0.6`.
 - Direct review, streaming review, chunked tasks, and DOCX tasks return `run_id`. New persistent DOCX results still return `run_id` after service restart. `GET /api/agent/runs/{run_id}/trace` returns nodes, chunks, elapsed time, status, errors, and retry counts, and traces exclude full text and secrets.
 - `/api/ai-profiles` does not return keys. Unknown profiles or unsupported selected `provider_api` values return 400.
 - Responses requests do not carry `previous_response_id`; repeated reviews with the same `session_id` do not continue provider context.

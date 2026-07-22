@@ -63,6 +63,9 @@
     "webpack-cli": "^5.1.4",
     "webpack-dev-server": "^6.0.0"
   },
+  "overrides": {
+    "adm-zip": "0.6.0"
+  },
   "prettier": "office-addin-prettier-config",
   "browserslist": [
     "last 2 versions",

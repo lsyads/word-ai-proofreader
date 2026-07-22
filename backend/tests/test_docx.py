@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TypeAlias
 from xml.etree import ElementTree as ET
 
+import pytest
 from fastapi.testclient import TestClient
 from app.agents import trace as agent_trace
 from app.main import app
@@ -119,6 +120,21 @@ def replace_docx_entry(document_bytes: bytes, name: str, data: bytes) -> bytes:
     return output.getvalue()
 
 
+def make_docx_with_internal_entity() -> bytes:
+    document_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE document [
+      <!ENTITY expanded "internal entity content">
+    ]>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:r><w:t>&expanded;</w:t></w:r></w:p>
+        <w:sectPr/>
+      </w:body>
+    </w:document>
+    """
+    return replace_docx_entry(make_docx(["normal content"]), "word/document.xml", document_xml)
+
+
 def test_parse_docx_extracts_body_table_and_textbox_text():
     document = docx_service.parse_docx(
         make_docx(["目录", "第一章 开始", "正文内容"], table_text="表格文字", textbox_text="文本框文字")
@@ -129,6 +145,41 @@ def test_parse_docx_extracts_body_table_and_textbox_text():
     assert "表格文字" in document.text
     assert "文本框文字" in document.text
     assert document.text.count("文本框文字") == 1
+
+
+def test_parse_docx_rejects_internal_xml_entities():
+    with pytest.raises(docx_service.DocxError, match="无法安全解析"):
+        docx_service.parse_docx(make_docx_with_internal_entity())
+
+
+def test_docx_task_api_rejects_internal_xml_entities():
+    response = client.post(
+        "/api/proofread/docx/tasks",
+        params={"filename": "malicious.docx", "book": json.dumps(BOOK, ensure_ascii=False)},
+        content=make_docx_with_internal_entity(),
+    )
+
+    assert response.status_code == 400
+    assert "无法安全解析" in response.json()["detail"]
+
+
+def test_writeback_rejects_internal_entities_in_related_xml_parts(tmp_path: Path):
+    relationships_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE Relationships [
+      <!ENTITY expanded "comments.xml">
+    ]>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="unsafe" Target="&expanded;"/>
+    </Relationships>
+    """
+    source = replace_docx_entry(
+        make_docx(["normal content"]),
+        "word/_rels/document.xml.rels",
+        relationships_xml,
+    )
+
+    with pytest.raises(docx_service.DocxError, match="无法安全解析"):
+        docx_service.write_docx_result(source, [], "comment", tmp_path / "out.docx")
 
 
 def test_split_docx_prefers_chapter_then_section_boundaries():

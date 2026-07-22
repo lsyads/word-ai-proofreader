@@ -11,6 +11,9 @@ from typing import Literal
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import quoteattr
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
+
 from app.schemas import ChunkedProofreadIssue, ProofreadChunk, ProofreadIssue
 from app.services import chunking
 
@@ -90,6 +93,18 @@ class DocxError(ValueError):
     """Raised when a DOCX package cannot be parsed or written safely."""
 
 
+def _parse_xml(xml_bytes: bytes, part_name: str) -> ET.Element:
+    try:
+        return DefusedET.fromstring(
+            xml_bytes,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (DefusedXmlException, ET.ParseError) as exc:
+        raise DocxError(f"DOCX XML 部件 {part_name} 无法安全解析。") from exc
+
+
 def parse_docx(document_bytes: bytes) -> DocxDocument:
     try:
         with zipfile.ZipFile(BytesIO(document_bytes), "r") as archive:
@@ -102,7 +117,7 @@ def parse_docx(document_bytes: bytes) -> DocxDocument:
 
     document_namespaces = _collect_namespaces(entries[WORD_DOCUMENT_PATH])
     _register_namespaces(document_namespaces)
-    document_root = ET.fromstring(entries[WORD_DOCUMENT_PATH])
+    document_root = _parse_xml(entries[WORD_DOCUMENT_PATH], WORD_DOCUMENT_PATH)
     text, blocks, spans = _extract_document_text_model(document_root)
 
     return DocxDocument(
@@ -984,13 +999,23 @@ def _collect_namespaces(xml_bytes: bytes) -> list[tuple[str, str]]:
     namespaces: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
-    for _, namespace in ET.iterparse(BytesIO(xml_bytes), events=("start-ns",)):
-        prefix, uri = namespace
-        key = (prefix or "", uri)
-        if key in seen:
-            continue
-        seen.add(key)
-        namespaces.append(key)
+    try:
+        iterator = DefusedET.iterparse(
+            BytesIO(xml_bytes),
+            events=("start-ns",),
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+        for _, namespace in iterator:
+            prefix, uri = namespace
+            key = (prefix or "", uri)
+            if key in seen:
+                continue
+            seen.add(key)
+            namespaces.append(key)
+    except (DefusedXmlException, ET.ParseError) as exc:
+        raise DocxError(f"DOCX XML 部件 {WORD_DOCUMENT_PATH} 无法安全解析。") from exc
 
     return namespaces
 
@@ -1123,12 +1148,12 @@ class _DocxPackage:
 
     def _ensure_comments_root(self) -> ET.Element:
         if COMMENTS_PATH in self.entries:
-            return ET.fromstring(self.entries[COMMENTS_PATH])
+            return _parse_xml(self.entries[COMMENTS_PATH], COMMENTS_PATH)
         return ET.Element(_w("comments"))
 
     def _ensure_comments_relationship(self) -> None:
         if WORD_RELS_PATH in self.entries:
-            root = ET.fromstring(self.entries[WORD_RELS_PATH])
+            root = _parse_xml(self.entries[WORD_RELS_PATH], WORD_RELS_PATH)
         else:
             root = ET.Element(f"{{{REL_NS}}}Relationships")
 
@@ -1149,7 +1174,7 @@ class _DocxPackage:
 
     def _ensure_comments_content_type(self) -> None:
         if CONTENT_TYPES_PATH in self.entries:
-            root = ET.fromstring(self.entries[CONTENT_TYPES_PATH])
+            root = _parse_xml(self.entries[CONTENT_TYPES_PATH], CONTENT_TYPES_PATH)
         else:
             root = ET.Element(f"{{{CT_NS}}}Types")
 
